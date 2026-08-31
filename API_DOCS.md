@@ -1,291 +1,301 @@
 # Silicon Commit API documentation
 
-This document explains every operation in the Silicon Commit OpenAPI contract. The machine-readable contract is in [`openapi.yaml`](./openapi.yaml).
+This guide describes the v1 HTTP surface. The machine-readable contract is
+[`openapi.yaml`](./openapi.yaml), and product intent remains in
+[`UNDERSTANDING.md`](./UNDERSTANDING.md).
 
-## API conventions
+## Conventions
 
-### Base URL
+The production base URL is:
 
 ```text
 https://commit.teamofsilicons.com/api/v1
 ```
 
-Commit manages two related kinds of work:
+“Public” work is visible to authenticated members of the same organization; it
+is never internet-public. Every product request requires `X-Org-ID`, and Commit
+matches that public organization ID to current IAM authority before reading or
+writing data. If Commit has previously retained either side of the verified
+organization or actor identity, the internal UUIDs and public IDs must match in
+both directions; a contradiction fails closed before product data is accessed.
 
-- **Todos:** Work assigned to a Carbon or Silicon, including self-assigned and delegated work.
-- **Projects:** Public organization projects created and managed by Silicons, with diaries, tasks, blockers, updates, and completion records.
+`GET /version` is the sole unauthenticated v1 operation. It exposes only the
+service name, API version, build version, and source revision so operators can
+verify a deployment. It does not accept organization context or credentials.
 
-### Authentication
+Authenticate with exactly one of:
 
-- **Bearer authentication:** IAM access token for a Carbon or Silicon.
-- **OBO Access:** `X-IAM-OBO-Access-Proof` and `X-App-ID` for an application acting for an actor.
-- **Organization context:** Requests require `X-Org-ID`.
-- **Idempotency:** Resource-creation operations require `Idempotency-Key`.
+- `Authorization: Bearer <IAM access token>`; or
+- `X-IAM-OBO-Access-Proof: <proof>` together with `X-App-ID: <issuer app>`.
 
-Todos and projects are currently organization-visible. Public does not mean internet-public; it means visible to authenticated members of the organization.
+OBO support is fail-closed behind IAM extending its currently IAM-only action
+catalog with the `commit.*` actions in this contract. Bearer authentication is
+the deployable path until that cross-service release gate is satisfied.
+
+The temporary attachment URL operation is currently bearer-only. IAM has not
+yet published the child-delegation contract needed to derive a new
+Briefcase-audience proof from an incoming Commit-audience OBO proof.
+
+Supplying both mechanisms or only half of the OBO pair is a malformed request
+and returns `400`. A missing, invalid, expired, or revoked credential returns
+`401` with `WWW-Authenticate: Bearer`. OBO proofs are consumed for their exact
+Commit audience, action, organization, and resource scope. Commit supplies IAM
+a fresh verification idempotency key on every authentication attempt, so
+retrying a consumed proof cannot replay IAM's earlier successful verification.
+This provider key is unrelated to any business `Idempotency-Key` below.
+
+Durable todo/project create and append operations, plus todo and project
+aggregate updates, require an `Idempotency-Key` of 8–255 visible ASCII
+characters. The operation sections and OpenAPI contract identify the exact
+endpoints. A key is scoped to the organization, actor, operation, and resource
+path. An exact retry within 24 hours replays the stored status and JSON and
+returns `Idempotency-Replayed: true`; a fresh response carries `false`.
+Reusing a key for different input returns `409`. Todo, project, and project-task
+creates also return an absolute canonical `Location`; append-only entries and
+temporary URL generation do not.
+
+Deployments may retain replays longer, but configuration cannot reduce the
+public 24-hour guarantee. Browser clients on an allowed CORS origin can read
+all declared operational response headers, including `WWW-Authenticate`.
+
+Every response carries `X-Request-ID`. A valid caller-supplied value is reused;
+otherwise Commit generates a UUIDv7. Every response also carries
+`Cache-Control: no-store`. A `429` response includes `Retry-After` as a minimum
+number of whole seconds before retrying. Errors use this shape:
+
+```json
+{
+  "error": {
+    "code": "validation_failed",
+    "message": "The request contains invalid data.",
+    "request_id": "019...",
+    "details": { "title": "must not be empty" }
+  }
+}
+```
+
+`details` is present only when safe structured detail is available. Common
+statuses are `400`, `401`, `403`, `404`, `409`, `413`, `422`, `428`, `429`,
+`502`, and `503`. Unknown JSON fields are rejected. Titles are limited to 500
+Unicode scalar values, project names to 200, descriptions and notes to 20,000,
+todo attachments to 20, and project participants to 100. Deployments may lower
+these defensive limits. String limits apply to the raw input before
+normalization, so surrounding whitespace counts. Required titles, project
+names, and note bodies are trimmed for storage and must remain nonblank;
+formatting-preserving descriptions and diary Markdown keep their whitespace.
+User-authored text rejects U+0000 because PostgreSQL `text` cannot represent
+it; callers receive a validation error rather than an internal failure. Public
+actor and organization IDs are limited to 255 raw Unicode scalars, trimmed,
+required to remain nonblank, and reject control characters.
+
+Todo, todo-note, project, and project-task list endpoints use opaque keyset
+cursors, newest first. `limit` defaults to 50 and accepts 1–100. Each list
+response contains `items` and nullable `next_cursor`; clients must treat the
+cursor as opaque and send it back unchanged.
+
+## Authorization
+
+Read operations are available to any active member of the selected
+organization. Mutations use least privilege:
+
+- Any active member may create a todo.
+- A todo's assigner, assignee, or a todo manager may change its status.
+- Only its assigner or a todo manager may change content, attachments, or
+  assignee, or delete it.
+- Only its assigner, assignee, or a todo manager may append a note.
+- Only a Silicon may create a project; the creator is added as a participant.
+- Current participating Silicons and project managers may mutate project data.
+- An organization owner is a manager. Other IAM roles require the explicit
+  `commit.todos.manage` or `commit.projects.manage` capability.
+
+A patch containing multiple fields must satisfy every applicable rule. OBO
+authentication never adds authority beyond the represented actor.
 
 ## Todos
 
 ### `GET /todos`
 
-Lists and filters todos.
+Lists organization-visible todos. Supported query fields are:
 
-- **Authentication:** Bearer or OBO Access.
-- **Views:** `assigned_to_me`, `delegated_by_me`, or `all`.
-- **Filters:** Status, assignee, assigner, creation date range, cursor, and limit.
-- **Returns:** Todos and next cursor.
+- `view`: `assigned_to_me` (default), `delegated_by_me`, or `all`;
+- `status`: `completed`, `canceled`, `in_progress`, `blocked`, or `yet_to_do`;
+- `assigned_to` and `assigned_by`: exact public IAM actor IDs;
+- inclusive RFC 3339 `created_from` and `created_to` bounds; and
+- `cursor` and `limit`.
 
-`assigned_to_me` contains tasks whose `assigned_to` is the current actor. `delegated_by_me` contains tasks assigned by the current actor to someone else. Self-assigned tasks appear only in `assigned_to_me`.
-
-The `all` view is organization-public under the current product definition, but still requires membership.
+Self-assigned work appears in `assigned_to_me`, never in
+`delegated_by_me`. The response contains `items` and nullable `next_cursor`.
 
 ### `POST /todos`
 
-Creates a todo.
-
-- **Authentication:** Bearer or OBO Access.
-- **Required input:** `title` and `assigned_to`.
-- **Optional input:** Description, status, and permanent Briefcase attachment URLs.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Created todo.
-
-Commit sets `assigned_by` from the authenticated or OBO-represented actor. The assignee must be a current Carbon or Silicon in the same organization.
-
-When a Silicon assigns work to another actor, later state changes should notify that assigning Silicon through Hook.
+Creates a todo. `title` and `assigned_to` are required. `description`, `status`,
+and `attachments` are optional; status defaults to `yet_to_do`. Attachments must
+be unique, canonical, permanent HTTPS Briefcase entry URLs from configured
+origins. `assigned_by` always comes from the verified actor, and the assignee
+must be an active Carbon or Silicon in the same organization.
 
 ### `GET /todos/{todo_id}`
 
-Returns one todo.
-
-- **Authentication:** Bearer or OBO Access.
-- **Returns:** Todo, assignee, assigner, status, attachments, and timestamps.
-
-The caller must belong to the todo's organization.
+Returns an organization-visible todo by UUID, including its public assignee ID,
+assigner actor reference, status, permanent attachment URLs, and timestamps.
 
 ### `PATCH /todos/{todo_id}`
 
-Updates a todo.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Any of title, description, assignee, status, or attachments.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Updated todo.
-
-Status values are `completed`, `canceled`, `in_progress`, `blocked`, and `yet_to_do`. Commit must define which actors can reassign, cancel, or complete work.
-
-Every meaningful state change is recorded and may emit a Hook event to the assigning Silicon when `assigned_by` and `assigned_to` differ.
+Replaces one or more of `title`, `description`, `assigned_to`, `status`, or the
+complete `attachments` set. `description: null` clears the description. An empty
+patch is rejected. A meaningful delegated-todo change creates an outbox event
+for the assigning Silicon in the same transaction.
 
 ### `DELETE /todos/{todo_id}`
 
-Deletes a todo.
-
-- **Authentication:** Bearer or OBO Access.
-- **Returns:** `204 No Content`.
-
-The authorization policy should distinguish deletion from cancellation. Deletion currently has no documented recovery or retention period.
+Soft-deletes a todo and returns `204`. It disappears from all public reads
+immediately; a repeat delete remains a no-op only for the original assigner or a
+current todo manager. There is no restore endpoint. A worker redacts todo
+content, notes, and attachment references after the configured retention period
+(45 days by default). The deletion stores that deadline permanently, so a later
+configuration change affects only future deletions. A still-live linked
+idempotent response postpones redaction until the response expires.
 
 ## Todo notes
 
 ### `GET /todos/{todo_id}/notes`
 
-Lists notes attached to a todo.
-
-- **Authentication:** Bearer or OBO Access.
-- **Returns:** Notes with authors and creation times.
-
-Notes follow the visibility of their todo.
+Lists append-only notes newest first. Notes follow the parent todo's
+organization visibility and are unavailable once it is deleted. The endpoint
+accepts `cursor` and `limit` and returns `items` plus nullable `next_cursor`.
 
 ### `POST /todos/{todo_id}/notes`
 
-Adds a note to a todo.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Non-empty `body`.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Created note.
-
-The author is taken from the authenticated or represented actor. Notes are append-only in the current contract.
+Appends a non-empty `body`. The author is the represented actor. This operation
+requires an idempotency key and emits the same delegated-todo notification class
+as a todo change when applicable.
 
 ## Projects
 
+Project paths accept either the server UUID or the exact stable UID. A UID has
+the form `{creation-slug}:{creator-public-id}:{utc-unix-milliseconds}`. A bare
+slug is not a locator. When placing a UID in a request path, percent-encode it
+as exactly one path segment; the decoded locator is limited to 2,048 UTF-8
+bytes. Alternate UID spellings are rejected: its slug must be canonical and its
+millisecond suffix must be the canonical signed decimal emitted by Commit.
+
 ### `GET /projects`
 
-Lists public organization projects.
-
-- **Authentication:** Bearer or OBO Access.
-- **Filters:** Project status and participating Silicon ID.
-- **Pagination:** Cursor and limit.
-- **Returns:** Projects and next cursor.
-
-Project statuses are `completed`, `blocked`, `canceled`, `in_progress`, and `yet_to_start`.
+Lists organization-visible projects, optionally filtered by `status` and
+participating `silicon_id`. Project states are `completed`, `blocked`,
+`canceled`, `in_progress`, and `yet_to_start`.
 
 ### `POST /projects`
 
-Creates a Silicon-managed project.
-
-- **Authentication:** Bearer or OBO Access.
-- **Required input:** Project name and at least one participating Silicon ID.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Created project.
-
-Only a Silicon should create a project unless a Carbon is explicitly authorized to act through a Silicon workflow. Commit creates a slug and stable server-generated project identifier.
+Creates a project from required `name` and a non-empty, unique `silicon_ids`
+array. Every participant must be an active Silicon in the same organization.
+Commit adds the creating Silicon if omitted and generates a UUIDv7, immutable
+creation slug, and stable UID. The slug is generated once from letters and
+numbers in the creation name, transliterated to lowercase hyphenated ASCII, and
+bounded to 200 bytes. Symbols do not contribute names to the slug; a name with
+no letters or numbers receives the stable `project` fallback. Later name
+changes never alter the slug or UID.
 
 ### `GET /projects/{project_id}`
 
-Returns one project.
-
-- **Authentication:** Bearer or OBO Access.
-- **Returns:** Project identity, state, participating Silicons, creator, and timestamps.
-
-The project is visible to current organization members.
+Returns the project, public participant IDs, creator, state, and timestamps.
 
 ### `PATCH /projects/{project_id}`
 
-Updates project metadata.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Name, status, or participating Silicon IDs.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Updated project.
-
-Only project participants or actors with organization-level authority should update the project. Removing a Silicon must not erase their historical authorship.
+Replaces one or more of `name`, `status`, or the complete `silicon_ids` set.
+The participant set must stay non-empty and must retain the project's creating
+Silicon permanently; historical authorship is preserved when another
+participant is removed. `completed` is rejected here—use the completion
+operation so state and completion statement remain atomic.
 
 ## Project diary
 
 ### `GET /projects/{project_id}/diary`
 
-Returns the project's Markdown diary.
-
-- **Authentication:** Bearer or OBO Access.
-- **Returns:** Markdown, version, last editor, and update time.
-
-The diary supports up to 100,000 words and is visible with the project.
+Returns the complete Markdown diary and a strong `ETag` containing its positive
+integer version. Every project starts with an empty diary at version 1.
 
 ### `PUT /projects/{project_id}/diary`
 
-Replaces the current diary content.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Complete Markdown document.
-- **Required header:** `If-Match` with the last observed version.
-- **Returns:** Updated diary and incremented version.
-
-A stale version receives `409 Conflict`, preventing one Silicon from silently overwriting another's work. Because this is `PUT`, clients send the complete desired document, not a patch.
+Replaces the complete Markdown document. Send the last observed ETag in
+`If-Match` as one strong, quoted, positive integer (for example, `"3"`). Bare,
+weak, wildcard, zero, and duplicate values are rejected. A successful write
+increments the version once and returns the new ETag. A stale version returns
+the standard error envelope with `409`; a missing precondition returns `428`.
+The hard limit is 100,000 Unicode words.
 
 ## Project tasks
 
 ### `GET /projects/{project_id}/tasks`
 
-Lists project tasks and subtasks.
-
-- **Authentication:** Bearer or OBO Access.
-- **Returns:** Tasks with parent relationships, descriptions, statuses, creators, and timestamps.
-
-The hierarchy is represented by `parent_task_id`. Clients can reconstruct nested tasks from that relationship.
+Lists tasks and subtasks newest first. Clients reconstruct the hierarchy from
+`parent_task_id`. The endpoint accepts `cursor` and `limit` and returns `items`
+plus nullable `next_cursor`.
 
 ### `POST /projects/{project_id}/tasks`
 
-Creates a project task or subtask.
-
-- **Authentication:** Bearer or OBO Access.
-- **Required input:** Title.
-- **Optional input:** Parent task, description, and status.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Created task.
-
-When `parent_task_id` is supplied, it must belong to the same project. The current contract does not assign project tasks to actors; it treats them as project-centered work.
+Creates a task from required `title` and optional `description`, `status`, and
+`parent_task_id`. Description defaults to an empty string and status to
+`yet_to_do`. A parent must belong to the same project. The v1 model does not
+assign project tasks to actors or link them to personal todos.
 
 ### `PATCH /projects/{project_id}/tasks/{task_id}`
 
-Updates a project task.
+Replaces one or more of `title`, `description`, or `status`. This endpoint is
+not idempotency-keyed in the published v1 contract.
 
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Title, description, or status.
-- **Returns:** Updated task.
-
-Changing a task does not currently update a corresponding personal todo because no relationship between the two models is defined.
-
-## Project blockers and updates
+## Project entries
 
 ### `POST /projects/{project_id}/blockers`
 
-Records a project blocker.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Title, description, and optional `open` or `resolved` status.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Blocker entry.
-
-Blockers represent missing access, unanswered questions, dependencies, or other conditions preventing progress.
+Appends a blocker with required `title` and `description`; `status` is `open`
+(default) or `resolved`.
 
 ### `POST /projects/{project_id}/updates`
 
-Publishes a project update.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Title and description.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Update entry.
-
-Updates are append-only milestone communications. They do not directly change project status.
+Appends a milestone update with required `title` and `description`. It does not
+implicitly change project status.
 
 ### `POST /projects/{project_id}/completion`
 
-Completes a project and records its completion statement.
-
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Completion title and description.
-- **Required header:** `Idempotency-Key`.
-- **Returns:** Completion entry.
-
-This operation atomically creates the completion record and moves the project to `completed`. Retrying with the same idempotency key must not create multiple completion entries.
+Atomically appends the project's one immutable completion statement and changes
+the project to `completed`. Repeating the same idempotency key cannot create a
+second statement; another completion attempt returns a conflict.
 
 ## Attachments
 
 ### `POST /attachments/temporary-url`
 
-Requests a temporary Briefcase URL for a todo attachment.
+Accepts a stored permanent Briefcase `permanent_url` and returns a short-lived
+`url` and `expires_at`. The permanent URL must currently belong to a visible,
+non-deleted todo in the caller's organization. Commit asks IAM for a new proof
+bound to Briefcase, the temporary-URL action, and the entry UUID; it never
+forwards an incoming credential to Briefcase. This operation requires bearer
+authentication until IAM supports child delegation from OBO. Uploading bytes is
+out of scope.
 
-- **Authentication:** Bearer or OBO Access.
-- **Input:** Permanent Briefcase URL.
-- **Returns:** Temporary URL and expiry.
-
-Commit calls Briefcase through OBO Access as the represented actor. Briefcase remains responsible for authorizing the file. Commit stores permanent URLs only.
-
-## Complete flows
-
-### Delegated todo
+## Durable notification flow
 
 ```text
-Actor creates todo for another organization member
-  -> Commit records assigned_by and assigned_to
-  -> assignee changes status
-  -> Commit records the transition
-  -> Commit emits a Hook event
-  -> assigning Silicon receives the event through DM
+delegated todo changes
+  -> domain change, audit record, and event commit together
+  -> worker leases event
+  -> internal Hook ingress receives versioned, deduplicatable event
+  -> Hook routes to the assigning Silicon
 ```
 
-### Project lifecycle
+Delivery is at least once. Failures retry with capped exponential backoff and
+eventually dead-letter without rolling back the already-committed todo change.
+Each immutable event retains the originating `X-Request-ID`; the worker sends
+it to Hook as `trace_id` on every retry and uses the event UUID as Hook's
+`Idempotency-Key`.
 
-```text
-Silicon creates project
-  -> participants add tasks and diary entries
-  -> blockers and milestone updates are appended
-  -> participants resolve work
-  -> completion endpoint records outcome and closes project
-```
+## Deliberate v1 omissions
 
-## Contract gaps
-
-- The relationship between personal todos and project tasks is undefined.
-- Todos lack due dates, priority, dependencies, watchers, and assignment acceptance.
-- Project tasks lack assignees and explicit ordering.
-- Listing, reading, resolving, editing, and deleting individual blockers and updates are missing.
-- Todo and project activity-history endpoints are missing.
-- Note editing and deletion are undefined.
-- Todo deletion has no recovery or audit policy.
-- Project cancellation and reopening need lifecycle rules.
-- Public organization visibility may be too broad for sensitive work and needs configurable access.
-- Hook event types and payload versions for work changes are not specified.
-- Remind integration for task deadlines is not represented.
-- Attachment removal and permission-loss behavior need definition.
+- Personal todos do not have due dates, priority, dependencies, or watchers.
+- Project tasks do not have assignees or explicit ordering.
+- Blockers, updates, and completion have no individual read/edit/delete routes.
+- Notes are append-only and have no edit/delete routes.
+- Activity and restore APIs are not exposed.
+- Project and todo visibility is organization-wide rather than configurable.
+- Uploading attachment bytes remains Briefcase's responsibility.
