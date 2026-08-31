@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: silicon_commit_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d silicon_commit_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      COMMIT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/silicon_commit_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo check --all-targets --locked
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --all-targets --locked
+      - name: Verify runtime database grants
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql "$COMMIT_TEST_DATABASE_URL" --set=ON_ERROR_STOP=1 \
+            --command='CREATE ROLE commit_ci_api NOLOGIN; CREATE ROLE commit_ci_worker NOLOGIN;'
+          psql "$COMMIT_TEST_DATABASE_URL" \
+            --set=database_name=silicon_commit_test \
+            --set=schema_owner=postgres \
+            --set=api_role=commit_ci_api \
+            --set=worker_role=commit_ci_worker \
+            --file=deploy/postgres_runtime_grants.sql
+          psql "$COMMIT_TEST_DATABASE_URL" \
+            --set=api_role=commit_ci_api \
+            --set=worker_role=commit_ci_worker \
+            --file=tests/postgres_runtime_grants.sql
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx --yes @redocly/cli@2.49.0 lint openapi.yaml
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          docker build
+          --build-arg GIT_COMMIT_SHA="$GITHUB_SHA"
+          --tag silicon-commit:ci
+          .
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
