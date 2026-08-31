@@ -11,8 +11,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::domain::{
+    NotificationScope, NotificationSubscriptionLevel, NotificationVersion, WebhookUrl,
     actor::{Actor, ActorType},
-    attachment::PermanentAttachmentUrl,
+    attachment::BriefcaseAttachmentUrl,
     ids::{ActorId, OrganizationId, PublicOrganizationId},
 };
 
@@ -467,13 +468,101 @@ pub struct TemporaryUrl {
 /// proof, making direct bearer or parent-proof forwarding impossible.
 #[async_trait]
 pub trait BriefcaseProvider: Send + Sync {
-    /// Requests a temporary URL for one validated permanent attachment URL.
+    /// Requests a temporary URL for one strictly classified Briefcase entry URL.
     async fn temporary_url(
         &self,
         org_id: &PublicOrganizationId,
-        attachment: &PermanentAttachmentUrl,
+        attachment: &BriefcaseAttachmentUrl,
         proof: &DelegatedOboProof,
     ) -> Result<TemporaryUrl, ProviderError>;
+}
+
+/// Immutable endpoint and subscription decision captured with an outbox event.
+#[derive(Clone, Eq, PartialEq)]
+pub struct HookRoutingSnapshot {
+    webhook_url: WebhookUrl,
+    destination_version: NotificationVersion,
+    subscription_level: NotificationSubscriptionLevel,
+    subscription_scope: NotificationScope,
+    subscription_version: NotificationVersion,
+}
+
+impl fmt::Debug for HookRoutingSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HookRoutingSnapshot")
+            .field("webhook_url", &"[REDACTED]")
+            .field("destination_version", &self.destination_version)
+            .field("subscription_level", &self.subscription_level)
+            .field("subscription_scope", &self.subscription_scope)
+            .field("subscription_version", &self.subscription_version)
+            .finish()
+    }
+}
+
+impl HookRoutingSnapshot {
+    /// Creates a complete immutable routing decision for one outbox event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either persisted resource version is zero. Zero
+    /// identifies a virtual, absent resource and can never supply a route.
+    pub fn new(
+        webhook_url: WebhookUrl,
+        destination_version: NotificationVersion,
+        subscription_level: NotificationSubscriptionLevel,
+        subscription_scope: NotificationScope,
+        subscription_version: NotificationVersion,
+    ) -> Result<Self, HookRoutingSnapshotError> {
+        if destination_version.get() == 0 || subscription_version.get() == 0 {
+            return Err(HookRoutingSnapshotError::NonPositiveVersion);
+        }
+        Ok(Self {
+            webhook_url,
+            destination_version,
+            subscription_level,
+            subscription_scope,
+            subscription_version,
+        })
+    }
+
+    /// Returns the endpoint selected when the event was committed.
+    #[must_use]
+    pub const fn webhook_url(&self) -> &WebhookUrl {
+        &self.webhook_url
+    }
+
+    /// Returns the Silicon-level settings version which supplied the endpoint.
+    #[must_use]
+    pub const fn destination_version(&self) -> NotificationVersion {
+        self.destination_version
+    }
+
+    /// Returns whether a list-wide or todo-specific rule selected the event.
+    #[must_use]
+    pub const fn subscription_level(&self) -> NotificationSubscriptionLevel {
+        self.subscription_level
+    }
+
+    /// Returns the effective matching scope copied into the event.
+    #[must_use]
+    pub const fn subscription_scope(&self) -> NotificationScope {
+        self.subscription_scope
+    }
+
+    /// Returns the version of the resource which supplied the effective rule.
+    #[must_use]
+    pub const fn subscription_version(&self) -> NotificationVersion {
+        self.subscription_version
+    }
+}
+
+/// Invalid immutable Hook routing snapshot.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum HookRoutingSnapshotError {
+    /// A virtual version-zero settings resource cannot supply a delivery route.
+    #[error("Hook routing snapshot versions must be positive")]
+    NonPositiveVersion,
 }
 
 /// Minimal durable event submitted to Hook's authenticated internal ingress.
@@ -481,9 +570,9 @@ pub trait BriefcaseProvider: Send + Sync {
 pub struct HookEvent {
     /// Stable outbox event and downstream idempotency identifier.
     pub event_id: Uuid,
-    /// Public organization handle used by Hook to scope endpoint resolution.
+    /// Public organization handle used by Hook to scope dispatch.
     pub org_id: PublicOrganizationId,
-    /// Public Silicon handle whose Hook endpoint should receive the event.
+    /// Public Silicon handle which owns the snapshotted endpoint.
     pub silicon_id: ActorId,
     /// Versioned event type such as `todo.status_changed`.
     pub event_type: String,
@@ -493,6 +582,8 @@ pub struct HookEvent {
     pub occurred_at: OffsetDateTime,
     /// Cross-service trace identifier, when present.
     pub trace_id: Option<String>,
+    /// Immutable destination and subscription decision; absent only for legacy rows.
+    pub routing_snapshot: Option<HookRoutingSnapshot>,
     /// Minimal versioned event data; never credentials or a request body copy.
     pub payload: Value,
 }

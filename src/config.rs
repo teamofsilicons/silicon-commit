@@ -148,14 +148,14 @@ pub struct IamSettings {
 pub struct BriefcaseSettings {
     /// Briefcase API base URL.
     pub base_url: Url,
-    /// HTTPS origins accepted for permanent attachment URLs.
+    /// HTTPS origins classified as Briefcase entries for temporary access.
     pub allowed_origins: Vec<Url>,
 }
 
 /// Silicon Hook delivery adapter settings.
 #[derive(Clone, Debug)]
 pub struct HookSettings {
-    /// Internal Hook event-publication endpoint; Hook owns endpoint routing.
+    /// Internal Hook event-publication endpoint for snapshotted destinations.
     pub publish_url: Option<Url>,
     /// IAM service credential scoped to the internal Hook audience.
     pub service_token: Option<SecretString>,

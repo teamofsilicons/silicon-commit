@@ -1,18 +1,18 @@
-//! Canonical permanent Briefcase attachment URLs.
+//! Provider-neutral attachment URLs and strict Briefcase classification.
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
-/// Maximum stored length of a permanent attachment URL.
+/// Maximum stored length of an attachment URL, measured in bytes.
 pub const MAX_ATTACHMENT_URL_BYTES: usize = 2_048;
 
 /// Invalid Briefcase base URL configuration.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum AttachmentPolicyError {
+pub enum BriefcasePolicyError {
     /// At least one trusted Briefcase base URL is required.
     #[error("at least one Briefcase base URL must be configured")]
     Empty,
@@ -21,10 +21,10 @@ pub enum AttachmentPolicyError {
     InvalidBase(String),
 }
 
-/// A rejected untrusted attachment URL.
+/// A rejected provider-neutral attachment URL.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum AttachmentUrlError {
-    /// The stored representation is not a syntactically valid absolute URL.
+    /// The representation is not a syntactically valid absolute URL.
     #[error("URL is not syntactically valid")]
     Malformed,
     /// Persisted URLs must use the canonical serialization produced at ingress.
@@ -33,32 +33,46 @@ pub enum AttachmentUrlError {
     /// The serialized URL is too large to persist safely.
     #[error("URL must be at most {MAX_ATTACHMENT_URL_BYTES} bytes")]
     TooLong,
-    /// Only HTTPS permanent URLs are accepted.
-    #[error("URL must use HTTPS")]
+    /// Control characters are never valid in a stored URL.
+    #[error("URL must not contain control characters")]
+    ControlCharacters,
+    /// Surrounding whitespace must not be silently normalized.
+    #[error("URL must not contain surrounding whitespace")]
+    Whitespace,
+    /// Only absolute HTTPS URLs with a host are accepted.
+    #[error("URL must use HTTPS and include a host")]
     NotHttps,
     /// URL user information is forbidden.
     #[error("URL must not contain credentials")]
     Credentials,
-    /// Fragments do not identify a Briefcase resource.
+    /// Fragments are client-side references and are not stable attachment identifiers.
     #[error("URL must not contain a fragment")]
     Fragment,
-    /// Queries identify temporary or otherwise non-canonical resources.
-    #[error("URL must not contain a query")]
-    Query,
     /// Only the default HTTPS port is allowed.
     #[error("URL must not use a non-default port")]
     Port,
+}
+
+/// A generic attachment that cannot be classified as a configured Briefcase entry.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum BriefcaseUrlError {
+    /// A previously validated URL could not be reparsed for classification.
+    #[error("attachment URL could not be classified")]
+    Malformed,
+    /// Briefcase entry URLs never contain a query.
+    #[error("Briefcase URL must not contain a query")]
+    Query,
     /// The origin is not in the configured Briefcase allowlist.
-    #[error("URL origin is not an allowed Briefcase origin")]
+    #[error("URL is not a configured Briefcase URL")]
     Origin,
     /// The path is not the canonical `/entries/{uuid}` resource path under a base.
     #[error("URL path is not a canonical Briefcase entry path")]
     Path,
 }
 
-/// Allowlist and canonical-path policy for permanent Briefcase URLs.
+/// Classifies provider-neutral attachments against configured Briefcase bases.
 #[derive(Clone, Debug)]
-pub struct AttachmentUrlPolicy {
+pub struct BriefcaseUrlPolicy {
     bases: Vec<TrustedBase>,
 }
 
@@ -68,11 +82,13 @@ struct TrustedBase {
     path: String,
 }
 
-impl AttachmentUrlPolicy {
-    /// Builds a policy from trusted Briefcase API base URLs.
+impl BriefcaseUrlPolicy {
+    /// Builds a classifier from trusted Briefcase API base URLs.
     ///
     /// A typical base is `https://briefcase.teamofsilicons.com/api/v1`.
-    pub fn new<I>(bases: I) -> Result<Self, AttachmentPolicyError>
+    /// These bases classify attachments for temporary-URL issuance and do not
+    /// restrict which HTTPS image provider may be stored on a todo.
+    pub fn new<I>(bases: I) -> Result<Self, BriefcasePolicyError>
     where
         I: IntoIterator<Item = Url>,
     {
@@ -81,19 +97,23 @@ impl AttachmentUrlPolicy {
             .map(validate_base)
             .collect::<Result<Vec<_>, _>>()?;
         if bases.is_empty() {
-            return Err(AttachmentPolicyError::Empty);
+            return Err(BriefcasePolicyError::Empty);
         }
 
         Ok(Self { bases })
     }
 
-    /// Validates an untrusted URL and extracts its Briefcase entry UUID.
-    pub fn validate(&self, candidate: Url) -> Result<PermanentAttachmentUrl, AttachmentUrlError> {
-        validate_common_url_rules(&candidate)?;
-
-        let serialized = candidate.as_str();
-        if serialized.len() > MAX_ATTACHMENT_URL_BYTES {
-            return Err(AttachmentUrlError::TooLong);
+    /// Classifies an attachment as a configured canonical Briefcase entry.
+    ///
+    /// Only values produced here may cross the Briefcase provider boundary for
+    /// temporary-URL generation.
+    pub fn classify(
+        &self,
+        attachment: &AttachmentUrl,
+    ) -> Result<BriefcaseAttachmentUrl, BriefcaseUrlError> {
+        let candidate = attachment.parsed()?;
+        if candidate.query().is_some() {
+            return Err(BriefcaseUrlError::Query);
         }
 
         let mut matched_origin = false;
@@ -104,47 +124,48 @@ impl AttachmentUrlPolicy {
             matched_origin = true;
 
             if let Some(entry_id) = canonical_entry_id(&candidate, &base.path) {
-                return Ok(PermanentAttachmentUrl {
-                    value: serialized.to_owned(),
+                return Ok(BriefcaseAttachmentUrl {
+                    attachment: attachment.clone(),
                     entry_id,
                 });
             }
         }
 
         if matched_origin {
-            Err(AttachmentUrlError::Path)
+            Err(BriefcaseUrlError::Path)
         } else {
-            Err(AttachmentUrlError::Origin)
+            Err(BriefcaseUrlError::Origin)
         }
     }
 }
 
-/// A validated canonical, permanent Briefcase entry URL.
+/// A validated, canonical HTTPS attachment URL from any image provider.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PermanentAttachmentUrl {
+pub struct AttachmentUrl {
     value: String,
-    entry_id: Uuid,
 }
 
-impl PermanentAttachmentUrl {
-    /// Reconstructs a URL that was already validated and persisted by Commit.
-    ///
-    /// This deliberately verifies only immutable storage invariants. The
-    /// deployment allowlist is enforced for new writes and temporary-URL
-    /// issuance, but may rotate without making historical todos unreadable.
-    pub(crate) fn from_persisted(value: String) -> Result<Self, AttachmentUrlError> {
+impl AttachmentUrl {
+    /// Validates an untrusted URL and stores its canonical serialization.
+    pub fn new(value: &str) -> Result<Self, AttachmentUrlError> {
+        validate_raw_input(value)?;
+        let url = Url::parse(value).map_err(|_| AttachmentUrlError::Malformed)?;
+        validate_url_components(&url)?;
+        let value = String::from(url);
         if value.len() > MAX_ATTACHMENT_URL_BYTES {
             return Err(AttachmentUrlError::TooLong);
         }
 
-        let url = Url::parse(&value).map_err(|_| AttachmentUrlError::Malformed)?;
-        validate_common_url_rules(&url)?;
-        if url.as_str() != value {
+        Ok(Self { value })
+    }
+
+    /// Reconstructs a URL already validated and persisted by Commit.
+    pub(crate) fn from_persisted(value: String) -> Result<Self, AttachmentUrlError> {
+        let attachment = Self::new(&value)?;
+        if attachment.value != value {
             return Err(AttachmentUrlError::NonCanonical);
         }
-
-        let entry_id = persisted_entry_id(&url).ok_or(AttachmentUrlError::Path)?;
-        Ok(Self { value, entry_id })
+        Ok(attachment)
     }
 
     /// Borrows the canonical URL.
@@ -153,26 +174,24 @@ impl PermanentAttachmentUrl {
         &self.value
     }
 
-    /// Returns the Briefcase entry UUID parsed from the canonical path.
-    #[must_use]
-    pub const fn entry_id(&self) -> Uuid {
-        self.entry_id
-    }
-
     /// Consumes the value object into its storage representation.
     #[must_use]
     pub fn into_inner(self) -> String {
         self.value
     }
+
+    fn parsed(&self) -> Result<Url, BriefcaseUrlError> {
+        Url::parse(&self.value).map_err(|_| BriefcaseUrlError::Malformed)
+    }
 }
 
-impl fmt::Display for PermanentAttachmentUrl {
+impl fmt::Display for AttachmentUrl {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl Serialize for PermanentAttachmentUrl {
+impl Serialize for AttachmentUrl {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -181,32 +200,101 @@ impl Serialize for PermanentAttachmentUrl {
     }
 }
 
-fn validate_base(base: Url) -> Result<TrustedBase, AttachmentPolicyError> {
-    validate_common_url_rules(&base)
-        .map_err(|error| AttachmentPolicyError::InvalidBase(error.to_string()))?;
+impl<'de> Deserialize<'de> for AttachmentUrl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// An attachment proven to be a configured canonical Briefcase entry.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct BriefcaseAttachmentUrl {
+    attachment: AttachmentUrl,
+    entry_id: Uuid,
+}
+
+impl BriefcaseAttachmentUrl {
+    /// Borrows the canonical URL.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.attachment.as_str()
+    }
+
+    /// Borrows the provider-neutral attachment value.
+    #[must_use]
+    pub const fn attachment(&self) -> &AttachmentUrl {
+        &self.attachment
+    }
+
+    /// Returns the Briefcase entry UUID parsed from the canonical path.
+    #[must_use]
+    pub const fn entry_id(&self) -> Uuid {
+        self.entry_id
+    }
+}
+
+fn validate_base(base: Url) -> Result<TrustedBase, BriefcasePolicyError> {
+    validate_url_components(&base)
+        .map_err(|error| BriefcasePolicyError::InvalidBase(error.to_string()))?;
+    if base.query().is_some() {
+        return Err(BriefcasePolicyError::InvalidBase(
+            BriefcaseUrlError::Query.to_string(),
+        ));
+    }
 
     let path = base.path().trim_end_matches('/').to_owned();
     Ok(TrustedBase { url: base, path })
 }
 
-fn validate_common_url_rules(url: &Url) -> Result<(), AttachmentUrlError> {
+fn validate_raw_input(value: &str) -> Result<(), AttachmentUrlError> {
+    if value.len() > MAX_ATTACHMENT_URL_BYTES {
+        return Err(AttachmentUrlError::TooLong);
+    }
+    if value.chars().any(char::is_control) {
+        return Err(AttachmentUrlError::ControlCharacters);
+    }
+    if value.trim() != value {
+        return Err(AttachmentUrlError::Whitespace);
+    }
+    if raw_authority(value).is_some_and(|authority| authority.contains('@')) {
+        return Err(AttachmentUrlError::Credentials);
+    }
+    Ok(())
+}
+
+fn raw_authority(value: &str) -> Option<&str> {
+    value
+        .split_once("://")
+        .map(|(_, suffix)| suffix)
+        .map(|suffix| suffix.split(['/', '?', '#']).next().unwrap_or_default())
+}
+
+fn validate_url_components(url: &Url) -> Result<(), AttachmentUrlError> {
     if url.scheme() != "https" || url.host_str().is_none() {
         return Err(AttachmentUrlError::NotHttps);
     }
-    if !url.username().is_empty() || url.password().is_some() {
+    if !url.username().is_empty() || url.password().is_some() || has_userinfo(url) {
         return Err(AttachmentUrlError::Credentials);
     }
     if url.fragment().is_some() {
         return Err(AttachmentUrlError::Fragment);
-    }
-    if url.query().is_some() {
-        return Err(AttachmentUrlError::Query);
     }
     if url.port().is_some() {
         return Err(AttachmentUrlError::Port);
     }
 
     Ok(())
+}
+
+fn has_userinfo(url: &Url) -> bool {
+    url.as_str()
+        .strip_prefix("https://")
+        .and_then(|suffix| suffix.split(['/', '?', '#']).next())
+        .is_some_and(|authority| authority.contains('@'))
 }
 
 fn canonical_entry_id(candidate: &Url, base_path: &str) -> Option<Uuid> {
@@ -220,96 +308,146 @@ fn canonical_entry_id(candidate: &Url, base_path: &str) -> Option<Uuid> {
     (entry_id.hyphenated().to_string() == id_segment).then_some(entry_id)
 }
 
-fn persisted_entry_id(candidate: &Url) -> Option<Uuid> {
-    let mut segments = candidate.path_segments()?.rev();
-    let id_segment = segments.next()?;
-    if segments.next()? != "entries" {
-        return None;
-    }
-
-    let entry_id = Uuid::parse_str(id_segment).ok()?;
-    (entry_id.hyphenated().to_string() == id_segment).then_some(entry_id)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AttachmentUrlError, AttachmentUrlPolicy, PermanentAttachmentUrl};
+    use super::{AttachmentUrl, AttachmentUrlError, BriefcaseUrlError, BriefcaseUrlPolicy};
 
-    fn policy() -> Option<AttachmentUrlPolicy> {
+    const ENTRY_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af553";
+
+    fn policy() -> Option<BriefcaseUrlPolicy> {
         let base = url::Url::parse("https://briefcase.example/api/v1").ok()?;
-        AttachmentUrlPolicy::new([base]).ok()
+        BriefcaseUrlPolicy::new([base]).ok()
     }
 
     #[test]
-    fn accepts_only_a_canonical_allowlisted_entry_url() {
+    fn accepts_and_canonicalizes_provider_neutral_urls() {
+        let candidate = "https://IMAGES.example:443/assets/launch.png?width=1200&format=webp";
+
+        let attachment = AttachmentUrl::new(candidate);
+
+        assert_eq!(
+            attachment.map(AttachmentUrl::into_inner),
+            Ok("https://images.example/assets/launch.png?width=1200&format=webp".to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_generic_urls_before_url_parser_normalization() {
+        for (candidate, expected) in [
+            (
+                "https://images.example:8443/image.png",
+                AttachmentUrlError::Port,
+            ),
+            (
+                "https://user@images.example/image.png",
+                AttachmentUrlError::Credentials,
+            ),
+            (
+                "https://@images.example/image.png",
+                AttachmentUrlError::Credentials,
+            ),
+            (
+                "https://images.example/image.png#preview",
+                AttachmentUrlError::Fragment,
+            ),
+            (
+                "https://images.example/image\n.png",
+                AttachmentUrlError::ControlCharacters,
+            ),
+            (
+                " https://images.example/image.png ",
+                AttachmentUrlError::Whitespace,
+            ),
+        ] {
+            assert_eq!(AttachmentUrl::new(candidate), Err(expected));
+        }
+    }
+
+    #[test]
+    fn classifies_only_an_exact_canonical_briefcase_entry() {
         let Some(policy) = policy() else {
             return;
         };
-        let candidate = url::Url::parse(
-            "https://briefcase.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af553",
-        );
-        let Ok(candidate) = candidate else {
+        let attachment = AttachmentUrl::new(&format!(
+            "https://briefcase.example/api/v1/entries/{ENTRY_ID}"
+        ));
+        let Ok(attachment) = attachment else {
             return;
         };
 
-        let attachment = policy.validate(candidate);
+        let classified = policy.classify(&attachment);
+
         assert_eq!(
-            attachment.map(|value| value.entry_id().to_string()),
-            Ok("018f268d-715a-7b72-8f0f-41f16f9af553".to_owned())
+            classified.map(|value| (value.as_str().to_owned(), value.entry_id())),
+            Ok((
+                format!("https://briefcase.example/api/v1/entries/{ENTRY_ID}"),
+                uuid::uuid!("018f268d-715a-7b72-8f0f-41f16f9af553")
+            ))
         );
     }
 
     #[test]
-    fn rejects_temporary_query_urls_and_lookalike_origins() {
+    fn generic_urls_are_not_implicitly_briefcase_entries() {
         let Some(policy) = policy() else {
             return;
         };
-        let with_query = url::Url::parse(
-            "https://briefcase.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af553?sig=x",
-        );
-        let lookalike = url::Url::parse(
-            "https://briefcase.example.attacker.test/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af553",
-        );
+        let cases = [
+            (
+                format!("https://briefcase.example/api/v1/not-entries/{ENTRY_ID}"),
+                BriefcaseUrlError::Path,
+            ),
+            (
+                format!("https://briefcase.example/api/v1/entries/{ENTRY_ID}?signature=opaque"),
+                BriefcaseUrlError::Query,
+            ),
+            (
+                format!("https://images.example/entries/{ENTRY_ID}"),
+                BriefcaseUrlError::Origin,
+            ),
+            (
+                "https://briefcase.example/api/v1/entries/018F268D-715A-7B72-8F0F-41F16F9AF553"
+                    .to_owned(),
+                BriefcaseUrlError::Path,
+            ),
+        ];
+
+        for (candidate, expected) in cases {
+            let attachment = AttachmentUrl::new(&candidate);
+            assert!(
+                attachment.is_ok(),
+                "generic URL should be accepted: {candidate}"
+            );
+            assert_eq!(
+                attachment.map(|value| policy.classify(&value)),
+                Ok(Err(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_provider_urls_require_canonical_storage() {
+        let canonical = String::from("https://retired-provider.example/image.png?variant=large");
+        let noncanonical = String::from("https://RETIRED-provider.example:443/image.png");
 
         assert_eq!(
-            with_query.ok().and_then(|url| policy.validate(url).err()),
-            Some(AttachmentUrlError::Query)
+            AttachmentUrl::from_persisted(canonical.clone()).map(AttachmentUrl::into_inner),
+            Ok(canonical)
         );
         assert_eq!(
-            lookalike.ok().and_then(|url| policy.validate(url).err()),
-            Some(AttachmentUrlError::Origin)
+            AttachmentUrl::from_persisted(noncanonical),
+            Err(AttachmentUrlError::NonCanonical)
         );
     }
 
     #[test]
-    fn persisted_urls_do_not_depend_on_the_current_origin_allowlist() {
-        let value = String::from(
-            "https://retired-briefcase.example/legacy/entries/018f268d-715a-7b72-8f0f-41f16f9af553",
+    fn serde_deserialization_canonicalizes_before_fingerprinting() {
+        let parsed = serde_json::from_str::<AttachmentUrl>(
+            r#""https://IMAGES.example:443/image.png?variant=large""#,
         );
-
-        let attachment = PermanentAttachmentUrl::from_persisted(value.clone());
 
         assert_eq!(
-            attachment.map(|attachment| {
-                let entry_id = attachment.entry_id();
-                (attachment.into_inner(), entry_id)
-            }),
-            Ok((value, uuid::uuid!("018f268d-715a-7b72-8f0f-41f16f9af553")))
+            parsed.ok().map(AttachmentUrl::into_inner),
+            Some("https://images.example/image.png?variant=large".to_owned())
         );
-    }
-
-    #[test]
-    fn persisted_urls_still_enforce_canonical_storage_invariants() {
-        let lookalike = PermanentAttachmentUrl::from_persisted(
-            "https://briefcase.example/api/v1/not-entries/018f268d-715a-7b72-8f0f-41f16f9af553"
-                .to_owned(),
-        );
-        let uppercase_id = PermanentAttachmentUrl::from_persisted(
-            "https://briefcase.example/api/v1/entries/018F268D-715A-7B72-8F0F-41F16F9AF553"
-                .to_owned(),
-        );
-
-        assert_eq!(lookalike, Err(AttachmentUrlError::Path));
-        assert_eq!(uppercase_id, Err(AttachmentUrlError::Path));
     }
 }

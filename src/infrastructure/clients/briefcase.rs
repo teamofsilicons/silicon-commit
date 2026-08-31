@@ -12,7 +12,7 @@ use crate::{
     application::ports::{BriefcaseProvider, DelegatedOboProof, ProviderError, TemporaryUrl},
     config::BriefcaseSettings,
     domain::{
-        attachment::{AttachmentUrlPolicy, PermanentAttachmentUrl},
+        attachment::{BriefcaseAttachmentUrl, BriefcaseUrlPolicy},
         ids::PublicOrganizationId,
     },
 };
@@ -30,16 +30,16 @@ const MAX_TEMPORARY_URL_LIFETIME: time::Duration = time::Duration::hours(12);
 pub struct BriefcaseClient {
     client: reqwest::Client,
     base_url: Url,
-    permanent_url_policy: AttachmentUrlPolicy,
+    briefcase_url_policy: BriefcaseUrlPolicy,
     max_response_bytes: usize,
 }
 
 impl BriefcaseClient {
-    /// Builds a Briefcase client and a canonical permanent-URL policy.
+    /// Builds a Briefcase client and strict entry-URL classifier.
     ///
     /// `base_url` supplies the required `/api/v1` path used by permanent entry
     /// URLs. `allowed_origins` is checked independently so a base URL cannot
-    /// silently expand the attachment allowlist.
+    /// silently expand the set classified as Briefcase-owned.
     ///
     /// # Errors
     ///
@@ -54,11 +54,11 @@ impl BriefcaseClient {
         if max_response_bytes == 0 {
             return Err(ClientBuildError::InvalidEndpoint);
         }
-        let permanent_url_policy = permanent_url_policy(settings)?;
+        let briefcase_url_policy = briefcase_url_policy(settings)?;
         Ok(Self {
             client: http_client(connect_timeout, request_timeout)?,
             base_url: settings.base_url.clone(),
-            permanent_url_policy,
+            briefcase_url_policy,
             max_response_bytes,
         })
     }
@@ -87,15 +87,15 @@ impl BriefcaseClient {
     }
 }
 
-/// Builds the permanent-URL policy shared by API validation and the outbound
-/// Briefcase adapter.
+/// Builds the Briefcase classifier shared by the application service and the
+/// outbound adapter.
 ///
 /// Each allowlisted origin inherits the canonical API path from `base_url`.
 /// This supports separately hosted entry origins without weakening path
 /// validation or changing the single outbound Briefcase API endpoint.
-pub(crate) fn permanent_url_policy(
+pub(crate) fn briefcase_url_policy(
     settings: &BriefcaseSettings,
-) -> Result<AttachmentUrlPolicy, ClientBuildError> {
+) -> Result<BriefcaseUrlPolicy, ClientBuildError> {
     if !strict_https_url(&settings.base_url, true)
         || !settings.allowed_origins.iter().any(|origin| {
             strict_https_url(origin, false) && origin.origin() == settings.base_url.origin()
@@ -117,7 +117,7 @@ pub(crate) fn permanent_url_policy(
             Ok(base)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    AttachmentUrlPolicy::new(bases).map_err(|_| ClientBuildError::InvalidEndpoint)
+    BriefcaseUrlPolicy::new(bases).map_err(|_| ClientBuildError::InvalidEndpoint)
 }
 
 #[async_trait]
@@ -125,18 +125,16 @@ impl BriefcaseProvider for BriefcaseClient {
     async fn temporary_url(
         &self,
         org_id: &PublicOrganizationId,
-        attachment: &PermanentAttachmentUrl,
+        attachment: &BriefcaseAttachmentUrl,
         proof: &DelegatedOboProof,
     ) -> Result<TemporaryUrl, ProviderError> {
         if proof.expires_at() <= OffsetDateTime::now_utc() {
             return Err(ProviderError::Unauthenticated);
         }
 
-        let candidate =
-            Url::parse(attachment.as_str()).map_err(|_| ProviderError::InvalidResponse)?;
         let reparsed = self
-            .permanent_url_policy
-            .validate(candidate)
+            .briefcase_url_policy
+            .classify(attachment.attachment())
             .map_err(|_| ProviderError::Forbidden)?;
         if reparsed.entry_id() != attachment.entry_id() || reparsed.as_str() != attachment.as_str()
         {
@@ -221,10 +219,10 @@ mod tests {
     use crate::config::BriefcaseSettings;
     use url::Url;
 
-    use super::{permanent_url_policy, valid_temporary_url};
+    use super::{briefcase_url_policy, valid_temporary_url};
 
     #[test]
-    fn permanent_policy_honors_every_allowlisted_origin_under_the_api_path() {
+    fn classifier_honors_every_allowlisted_origin_under_the_api_path() {
         let base_url = Url::parse("https://briefcase.example/api/v1/");
         let primary_origin = Url::parse("https://briefcase.example/");
         let secondary_origin = Url::parse("https://files.example/");
@@ -238,13 +236,16 @@ mod tests {
                 secondary_origin.unwrap_or_else(|error| panic!("test URL failed: {error}")),
             ],
         };
-        let policy = permanent_url_policy(&settings);
+        let policy = briefcase_url_policy(&settings);
         assert!(policy.is_ok());
         let secondary =
             Url::parse("https://files.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af553");
         assert!(secondary.is_ok());
         assert!(policy.is_ok_and(|policy| {
-            secondary.is_ok_and(|candidate| policy.validate(candidate).is_ok())
+            secondary.is_ok_and(|candidate| {
+                crate::domain::AttachmentUrl::new(candidate.as_str())
+                    .is_ok_and(|attachment| policy.classify(&attachment).is_ok())
+            })
         }));
     }
 

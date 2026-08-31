@@ -11,7 +11,7 @@ use crate::{
     application::ports::{
         BriefcaseProvider, ChildProofRequest, IdentityProvider, ProviderError, VerifiedActor,
     },
-    domain::AttachmentUrlPolicy,
+    domain::{AttachmentUrl, BriefcaseUrlPolicy},
     error::AppError,
 };
 
@@ -19,8 +19,8 @@ use crate::{
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemporaryUrlRequest {
-    /// Canonical permanent Briefcase entry URL stored on a visible todo.
-    pub permanent_url: Url,
+    /// Canonical attachment URL stored on a visible todo.
+    pub permanent_url: AttachmentUrl,
 }
 
 /// Public temporary attachment delivery response.
@@ -39,7 +39,7 @@ pub struct AttachmentService {
     pool: PgPool,
     identity: Arc<dyn IdentityProvider>,
     briefcase: Arc<dyn BriefcaseProvider>,
-    policy: AttachmentUrlPolicy,
+    briefcase_policy: BriefcaseUrlPolicy,
 }
 
 impl AttachmentService {
@@ -49,17 +49,17 @@ impl AttachmentService {
         pool: PgPool,
         identity: Arc<dyn IdentityProvider>,
         briefcase: Arc<dyn BriefcaseProvider>,
-        policy: AttachmentUrlPolicy,
+        briefcase_policy: BriefcaseUrlPolicy,
     ) -> Self {
         Self {
             pool,
             identity,
             briefcase,
-            policy,
+            briefcase_policy,
         }
     }
 
-    /// Generates a temporary URL for a permanent URL attached to a current todo.
+    /// Generates a temporary URL for a Briefcase entry attached to a current todo.
     ///
     /// # Errors
     ///
@@ -70,12 +70,12 @@ impl AttachmentService {
         actor: &VerifiedActor,
         input: TemporaryUrlRequest,
     ) -> Result<TemporaryUrlResponse, AppError> {
-        let attachment =
-            self.policy
-                .validate(input.permanent_url)
-                .map_err(|error| AppError::Validation {
-                    details: serde_json::json!({ "permanent_url": error.to_string() }),
-                })?;
+        let briefcase_attachment = self
+            .briefcase_policy
+            .classify(&input.permanent_url)
+            .map_err(|error| AppError::Validation {
+                details: serde_json::json!({ "permanent_url": error.to_string() }),
+            })?;
 
         let exists = sqlx::query_scalar::<_, bool>(
             r#"
@@ -86,20 +86,21 @@ impl AttachmentService {
                   ON todo.organization_id = attachment.organization_id
                  AND todo.id = attachment.todo_id
                 WHERE attachment.organization_id = $1
-                  AND attachment.permanent_url = $2
+                  AND attachment.url = $2
                   AND todo.deleted_at IS NULL
             )
             "#,
         )
         .bind(actor.organization_id.into_uuid())
-        .bind(attachment.as_str())
+        .bind(input.permanent_url.as_str())
         .fetch_one(&self.pool)
         .await?;
         if !exists {
             return Err(AppError::NotFound);
         }
 
-        let proof_request = ChildProofRequest::briefcase_temporary_url(attachment.entry_id());
+        let proof_request =
+            ChildProofRequest::briefcase_temporary_url(briefcase_attachment.entry_id());
         let proof = self
             .identity
             .exchange_child_proof(actor, &proof_request)
@@ -107,7 +108,7 @@ impl AttachmentService {
             .map_err(map_provider_error)?;
         let temporary = self
             .briefcase
-            .temporary_url(&actor.org_id, &attachment, &proof)
+            .temporary_url(&actor.org_id, &briefcase_attachment, &proof)
             .await
             .map_err(map_provider_error)?;
 

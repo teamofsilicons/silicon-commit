@@ -16,6 +16,10 @@ use crate::{
 
 /// Stable IAM OBO action names for each Commit operation.
 pub mod action {
+    /// Read the represented Silicon's notification settings.
+    pub const NOTIFICATION_SETTINGS_READ: &str = "commit.notification_settings.read";
+    /// Replace the represented Silicon's notification settings.
+    pub const NOTIFICATION_SETTINGS_UPDATE: &str = "commit.notification_settings.update";
     /// List todos.
     pub const TODOS_LIST: &str = "commit.todos.list";
     /// Create a todo.
@@ -30,6 +34,10 @@ pub mod action {
     pub const TODO_NOTES_LIST: &str = "commit.todo_notes.list";
     /// Append a todo note.
     pub const TODO_NOTES_CREATE: &str = "commit.todo_notes.create";
+    /// Read a todo-specific notification subscription.
+    pub const TODO_SUBSCRIPTION_READ: &str = "commit.todo_subscription.read";
+    /// Replace a todo-specific notification subscription.
+    pub const TODO_SUBSCRIPTION_UPDATE: &str = "commit.todo_subscription.update";
     /// List projects.
     pub const PROJECTS_LIST: &str = "commit.projects.list";
     /// Create a project.

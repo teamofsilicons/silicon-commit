@@ -2,14 +2,9 @@
 
 use std::{fmt, str::FromStr};
 
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use time::OffsetDateTime;
-use url::Url;
-
 use super::{
     actor::{Actor, ActorRef, ActorType},
-    attachment::{AttachmentUrlPolicy, PermanentAttachmentUrl},
+    attachment::AttachmentUrl,
     ids::{ActorId, OrganizationId, PublicOrganizationId, TodoId, TodoNoteId},
     pagination::{CreatedAtRange, Page, PageCursor, PageLimit},
     validation::{
@@ -17,6 +12,9 @@ use super::{
         deserialize_optional_non_null, ensure_item_count, ensure_unique,
     },
 };
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use time::OffsetDateTime;
 
 /// Lifecycle state shared by todos and project tasks.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize, sqlx::Type)]
@@ -103,28 +101,20 @@ pub struct TodoCreate {
     /// Initial lifecycle state.
     #[serde(default)]
     pub status: TodoStatus,
-    /// Permanent Briefcase entry URLs.
+    /// Canonical HTTPS attachment URLs from any image provider.
     #[serde(default)]
-    pub attachments: Vec<Url>,
+    pub attachments: Vec<AttachmentUrl>,
 }
 
 impl TodoCreate {
-    /// Applies configurable limits and permanent-URL policy.
-    pub fn validate(
-        self,
-        limits: &DomainLimits,
-        attachment_policy: &AttachmentUrlPolicy,
-    ) -> Result<ValidatedTodoCreate, ValidationError> {
+    /// Applies configurable field and collection limits.
+    pub fn validate(self, limits: &DomainLimits) -> Result<ValidatedTodoCreate, ValidationError> {
         let title = RequiredText::new("title", self.title, limits.title_chars)?;
         let description = self
             .description
             .map(|value| LimitedText::new("description", value, limits.description_chars))
             .transpose()?;
-        let attachments = validate_attachments(
-            self.attachments,
-            limits.attachments_per_todo,
-            attachment_policy,
-        )?;
+        let attachments = validate_attachments(self.attachments, limits.attachments_per_todo)?;
 
         Ok(ValidatedTodoCreate {
             title,
@@ -147,8 +137,8 @@ pub struct ValidatedTodoCreate {
     pub assigned_to: ActorId,
     /// Initial status, defaulting to `yet_to_do`.
     pub status: TodoStatus,
-    /// Canonical permanent Briefcase URLs.
-    pub attachments: Vec<PermanentAttachmentUrl>,
+    /// Canonical HTTPS attachment URLs.
+    pub attachments: Vec<AttachmentUrl>,
 }
 
 /// Three-state field used to distinguish absent PATCH fields from JSON `null`.
@@ -238,13 +228,13 @@ pub struct TodoPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub status: Option<TodoStatus>,
-    /// Complete replacement attachment set.
+    /// Complete replacement canonical HTTPS attachment set.
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
-    pub attachments: Option<Vec<Url>>,
+    pub attachments: Option<Vec<AttachmentUrl>>,
 }
 
 impl TodoPatch {
@@ -259,11 +249,7 @@ impl TodoPatch {
     }
 
     /// Validates all supplied fields and rejects an empty patch.
-    pub fn validate(
-        self,
-        limits: &DomainLimits,
-        attachment_policy: &AttachmentUrlPolicy,
-    ) -> Result<ValidatedTodoPatch, ValidationError> {
+    pub fn validate(self, limits: &DomainLimits) -> Result<ValidatedTodoPatch, ValidationError> {
         if self.is_empty() {
             return Err(ValidationError::new(
                 "body",
@@ -280,9 +266,7 @@ impl TodoPatch {
             .try_map(|value| LimitedText::new("description", value, limits.description_chars))?;
         let attachments = self
             .attachments
-            .map(|values| {
-                validate_attachments(values, limits.attachments_per_todo, attachment_policy)
-            })
+            .map(|values| validate_attachments(values, limits.attachments_per_todo))
             .transpose()?;
 
         Ok(ValidatedTodoPatch {
@@ -307,7 +291,7 @@ pub struct ValidatedTodoPatch {
     /// Requested status replacement.
     pub status: Option<TodoStatus>,
     /// Validated replacement attachment set.
-    pub attachments: Option<Vec<PermanentAttachmentUrl>>,
+    pub attachments: Option<Vec<AttachmentUrl>>,
 }
 
 /// Public todo aggregate with internal tenant and principal keys retained.
@@ -329,8 +313,8 @@ pub struct Todo {
     pub assigned_by: Actor,
     /// Current lifecycle state.
     pub status: TodoStatus,
-    /// Canonical permanent attachment URLs.
-    pub attachments: Vec<PermanentAttachmentUrl>,
+    /// Canonical attachment URLs.
+    pub attachments: Vec<AttachmentUrl>,
     /// Creation timestamp.
     pub created_at: OffsetDateTime,
     /// Last meaningful update timestamp.
@@ -365,7 +349,7 @@ impl Serialize for Todo {
             assigned_to: &'a ActorId,
             assigned_by: ActorRef,
             status: TodoStatus,
-            attachments: &'a [PermanentAttachmentUrl],
+            attachments: &'a [AttachmentUrl],
             #[serde(with = "time::serde::rfc3339")]
             created_at: OffsetDateTime,
             #[serde(with = "time::serde::rfc3339")]
@@ -469,19 +453,10 @@ impl TodoQuery {
 pub type TodoPage = Page<Todo>;
 
 fn validate_attachments(
-    attachments: Vec<Url>,
+    attachments: Vec<AttachmentUrl>,
     max: usize,
-    policy: &AttachmentUrlPolicy,
-) -> Result<Vec<PermanentAttachmentUrl>, ValidationError> {
+) -> Result<Vec<AttachmentUrl>, ValidationError> {
     ensure_item_count("attachments", attachments.len(), 0, max)?;
-    let attachments = attachments
-        .into_iter()
-        .map(|url| {
-            policy
-                .validate(url)
-                .map_err(|error| ValidationError::invalid("attachments", error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     ensure_unique("attachments", &attachments)?;
     Ok(attachments)
 }
@@ -491,15 +466,7 @@ mod tests {
     use serde_json::json;
 
     use super::{NullablePatch, TodoCreate, TodoPatch, TodoStatus};
-    use crate::domain::{
-        attachment::AttachmentUrlPolicy,
-        validation::{DomainLimits, ValidationErrorKind},
-    };
-
-    fn attachment_policy() -> Option<AttachmentUrlPolicy> {
-        let base = url::Url::parse("https://briefcase.example/api/v1").ok()?;
-        AttachmentUrlPolicy::new([base]).ok()
-    }
+    use crate::domain::validation::{DomainLimits, ValidationErrorKind};
 
     #[test]
     fn create_defaults_status_and_rejects_unknown_fields() {
@@ -555,10 +522,7 @@ mod tests {
 
     #[test]
     fn empty_patch_is_rejected_semantically() {
-        let Some(policy) = attachment_policy() else {
-            return;
-        };
-        let result = TodoPatch::default().validate(&DomainLimits::default(), &policy);
+        let result = TodoPatch::default().validate(&DomainLimits::default());
         assert!(matches!(
             result.map_err(|error| error.kind),
             Err(ValidationErrorKind::EmptyPatch)
@@ -567,18 +531,17 @@ mod tests {
 
     #[test]
     fn duplicate_attachments_are_rejected_after_canonicalization() {
-        let Some(policy) = attachment_policy() else {
-            return;
-        };
-        let url = "https://briefcase.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af553";
         let request = serde_json::from_value::<TodoCreate>(json!({
             "title": "Ship it",
             "assigned_to": "head_of_growth:tos",
-            "attachments": [url, url]
+            "attachments": [
+                "https://IMAGES.example:443/image.png",
+                "https://images.example/image.png"
+            ]
         }));
         let result = request
             .ok()
-            .and_then(|request| request.validate(&DomainLimits::default(), &policy).err());
+            .and_then(|request| request.validate(&DomainLimits::default()).err());
         assert!(matches!(
             result.map(|error| error.kind),
             Some(ValidationErrorKind::DuplicateItem)

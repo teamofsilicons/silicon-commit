@@ -4,7 +4,10 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -18,23 +21,27 @@ use uuid::Uuid;
 
 use silicon_commit::{
     application::{
+        attachments::{AttachmentService, TemporaryUrlRequest},
         idempotency::{IdempotencyKey, MutationResponse},
+        notifications::NotificationSettingsService,
         ports::{
-            ActiveMember, AuthenticationRequest, CapabilitySet, ChildProofRequest,
-            DelegatedOboProof, IdentityProvider, InboundCredential, OrganizationRole,
-            ProviderError, TrustedIdentity, VerifiedActor,
+            ActiveMember, AuthenticationRequest, BriefcaseProvider, CapabilitySet,
+            ChildProofRequest, DelegatedOboProof, IdentityProvider, InboundCredential,
+            OrganizationRole, ProviderError, TemporaryUrl, TrustedIdentity, VerifiedActor,
         },
         projects::ProjectService,
         todos::TodoService,
     },
     config::DatabaseSettings,
     domain::{
-        Actor, ActorId, ActorType, AttachmentUrlPolicy, BlockerCreate, BlockerStatus,
-        CollectionQuery, DiaryUpdate, DomainLimits, ExpectedDiaryVersion, NullablePatch,
-        OrganizationId, PageLimit, PrincipalId, ProjectCompletionCreate, ProjectCreate, ProjectId,
-        ProjectLocator, ProjectPatch, ProjectQuery, ProjectStatus, ProjectTaskCreate,
-        ProjectTaskId, ProjectTaskPatch, ProjectUpdateCreate, PublicOrganizationId, TodoCreate,
-        TodoId, TodoNoteCreate, TodoPatch, TodoQuery, TodoStatus,
+        Actor, ActorId, ActorType, AttachmentUrl, BlockerCreate, BlockerStatus,
+        BriefcaseAttachmentUrl, BriefcaseUrlPolicy, CollectionQuery, DiaryUpdate, DomainLimits,
+        ExpectedDiaryVersion, ExpectedNotificationVersion, NotificationRuleInput,
+        NotificationScope, NotificationSettingsUpdate, NullablePatch, OrganizationId, PageLimit,
+        PrincipalId, ProjectCompletionCreate, ProjectCreate, ProjectId, ProjectLocator,
+        ProjectPatch, ProjectQuery, ProjectStatus, ProjectTaskCreate, ProjectTaskId,
+        ProjectTaskPatch, ProjectUpdateCreate, PublicOrganizationId, TodoCreate, TodoId,
+        TodoNoteCreate, TodoNotificationSubscriptionUpdate, TodoPatch, TodoQuery, TodoStatus,
     },
     error::AppError,
     infrastructure::postgres,
@@ -152,6 +159,53 @@ impl IdentityProvider for TestDirectory {
     }
 }
 
+#[derive(Default)]
+struct AttachmentDependencyProbe {
+    iam_calls: AtomicUsize,
+    briefcase_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl IdentityProvider for AttachmentDependencyProbe {
+    async fn authenticate(
+        &self,
+        _request: &AuthenticationRequest,
+    ) -> Result<VerifiedActor, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+
+    async fn resolve_active_members(
+        &self,
+        _org_id: &PublicOrganizationId,
+        _actor_ids: &[ActorId],
+        _required_type: Option<ActorType>,
+    ) -> Result<Vec<ActiveMember>, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+
+    async fn exchange_child_proof(
+        &self,
+        _actor: &VerifiedActor,
+        _request: &ChildProofRequest,
+    ) -> Result<DelegatedOboProof, ProviderError> {
+        self.iam_calls.fetch_add(1, Ordering::Relaxed);
+        Err(ProviderError::Unavailable)
+    }
+}
+
+#[async_trait]
+impl BriefcaseProvider for AttachmentDependencyProbe {
+    async fn temporary_url(
+        &self,
+        _org_id: &PublicOrganizationId,
+        _attachment: &BriefcaseAttachmentUrl,
+        _proof: &DelegatedOboProof,
+    ) -> Result<TemporaryUrl, ProviderError> {
+        self.briefcase_calls.fetch_add(1, Ordering::Relaxed);
+        Err(ProviderError::Unavailable)
+    }
+}
+
 #[tokio::test]
 async fn migrations_establish_the_complete_schema() -> anyhow::Result<()> {
     let Some(pool) = test_pool().await? else {
@@ -162,13 +216,15 @@ async fn migrations_establish_the_complete_schema() -> anyhow::Result<()> {
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM public._sqlx_migrations WHERE success")
             .fetch_one(&pool)
             .await?;
-    assert!(successful_migrations >= 12);
+    assert!(successful_migrations >= 15);
 
     for relation in [
         "commit.todos",
         "commit.projects",
         "commit.idempotency_records",
         "commit.outbox_events",
+        "commit.silicon_notification_settings",
+        "commit.todo_notification_subscriptions",
     ] {
         let exists = sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
             .bind(relation)
@@ -295,6 +351,44 @@ async fn migrations_establish_the_complete_schema() -> anyhow::Result<()> {
     .fetch_one(&pool)
     .await?;
     assert_eq!(retention_schema_shape, (true, true, true, true, true, true));
+
+    let attachment_schema_shape = sqlx::query_as::<_, (bool, bool, bool, bool)>(
+        r"
+        SELECT
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'commit'
+                  AND table_name = 'todo_attachments'
+                  AND column_name = 'url'
+                  AND is_nullable = 'NO'
+            ),
+            NOT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'commit'
+                  AND table_name = 'todo_attachments'
+                  AND column_name = 'permanent_url'
+            ),
+            EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_constraint
+                WHERE conrelid = 'commit.todo_attachments'::regclass
+                  AND conname = 'todo_attachments_https_url'
+                  AND contype = 'c'
+            ),
+            EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_constraint
+                WHERE conrelid = 'commit.todo_attachments'::regclass
+                  AND conname = 'todo_attachments_organization_id_todo_id_url_key'
+                  AND contype = 'u'
+            )
+        ",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(attachment_schema_shape, (true, true, true, true));
 
     let mut transaction = pool.begin().await?;
     let organization_id = Uuid::new_v4();
@@ -477,21 +571,46 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
         pool.clone(),
         directory,
         DomainLimits::default(),
-        attachment_policy()?,
         IDEMPOTENCY_TTL,
         AUDIT_RETENTION,
         Duration::from_hours(1_080),
     );
-    let attachment = Url::parse(&format!(
+    let notification_service = NotificationSettingsService::new(pool.clone(), AUDIT_RETENTION);
+    let notification_settings = notification_service
+        .replace_settings(
+            &assigner,
+            NotificationSettingsUpdate {
+                webhook_url: Some(format!(
+                    "https://hook.example.com/silicon/{}/A1B2C3",
+                    assigner.actor.id
+                )),
+                todo_list_subscription: Some(NotificationRuleInput {
+                    scope: NotificationScope::AnyUpdate,
+                    statuses: Vec::new(),
+                }),
+            },
+            ExpectedNotificationVersion::new(0)?,
+            "req-notification-settings-create",
+        )
+        .await?;
+    assert_eq!(notification_settings.version.get(), 1);
+    let attachment = format!(
         "https://briefcase.example/api/v1/entries/{}",
         Uuid::new_v4().hyphenated()
-    ))?;
+    );
+    let external_attachment = format!(
+        "https://images.example/assets/{}.png?variant=large",
+        Uuid::new_v4().simple()
+    );
     let request = TodoCreate {
         title: "Prepare launch review".to_owned(),
         description: Some("Preserve this formatting.\n\n- first\n- second".to_owned()),
         assigned_to: assignee.actor.id.clone(),
         status: TodoStatus::YetToDo,
-        attachments: vec![attachment],
+        attachments: vec![
+            AttachmentUrl::new(&attachment)?,
+            AttachmentUrl::new(&external_attachment)?,
+        ],
     };
     let create_key = unique_key("todo-create")?;
 
@@ -506,6 +625,53 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     assert_eq!(created.status, 201);
     assert!(!created.replayed);
     let todo_id = TodoId::from_uuid(response_uuid(&created, "id")?);
+    let round_tripped = service.get(&assigner, todo_id).await?;
+    assert_eq!(
+        round_tripped
+            .attachments
+            .iter()
+            .map(AttachmentUrl::as_str)
+            .collect::<Vec<_>>(),
+        vec![attachment.as_str(), external_attachment.as_str()]
+    );
+    let stored_attachments = sqlx::query_scalar::<_, String>(
+        r"
+        SELECT url
+        FROM commit.todo_attachments
+        WHERE organization_id = $1
+          AND todo_id = $2
+        ORDER BY position
+        ",
+    )
+    .bind(organization.id.into_uuid())
+    .bind(todo_id.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        stored_attachments,
+        vec![attachment, external_attachment.clone()]
+    );
+
+    let dependency_probe = Arc::new(AttachmentDependencyProbe::default());
+    let identity: Arc<dyn IdentityProvider> = dependency_probe.clone();
+    let briefcase: Arc<dyn BriefcaseProvider> = dependency_probe.clone();
+    let attachment_service =
+        AttachmentService::new(pool.clone(), identity, briefcase, briefcase_policy()?);
+    let external_temporary_url = attachment_service
+        .temporary_url(
+            &assigner,
+            TemporaryUrlRequest {
+                permanent_url: AttachmentUrl::new(&external_attachment)?,
+            },
+        )
+        .await;
+    assert!(matches!(
+        external_temporary_url,
+        Err(AppError::Validation { ref details })
+            if details.get("permanent_url").is_some()
+    ));
+    assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 0);
     let initial_projection_versions = sqlx::query_as::<_, (i64, i64, i64)>(
         r"
         SELECT organization.xmin::text::bigint,
@@ -714,6 +880,37 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     .fetch_one(&pool)
     .await?;
     assert_eq!(notification_count, 4);
+    let routing_snapshots = sqlx::query_as::<_, (i16, String, i64, String, String, i64)>(
+        r"
+        SELECT payload_version,
+               webhook_url,
+               destination_version,
+               subscription_level::text,
+               subscription_scope::text,
+               subscription_version
+          FROM commit.outbox_events
+         WHERE organization_id = $1
+           AND todo_id = $2
+         ORDER BY created_at, id
+        ",
+    )
+    .bind(organization.id.into_uuid())
+    .bind(todo_id.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(routing_snapshots.len(), 4);
+    assert!(routing_snapshots.iter().all(|snapshot| {
+        snapshot.0 == 2
+            && snapshot.1
+                == format!(
+                    "https://hook.example.com/silicon/{}/A1B2C3",
+                    assigner.actor.id
+                )
+            && snapshot.2 == 1
+            && snapshot.3 == "list"
+            && snapshot.4 == "any_update"
+            && snapshot.5 == 1
+    }));
     let expected_audit_seconds = i64::try_from(AUDIT_RETENTION.as_secs())?;
     let retention_windows_match = sqlx::query_as::<_, (bool, bool)>(
         r"
@@ -787,6 +984,412 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     .fetch_one(&pool)
     .await?;
     assert_eq!(final_projection_versions, initial_projection_versions);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn notification_settings_drive_effective_routing_and_immutable_snapshots()
+-> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let organization = TestOrganization::unique("notification-org")?;
+    let delegating_silicon = organization.actor(
+        "notification-owner",
+        ActorType::Silicon,
+        OrganizationRole::Member,
+    )?;
+    let other_silicon = organization.actor(
+        "notification-outsider",
+        ActorType::Silicon,
+        OrganizationRole::Member,
+    )?;
+    let assignee = organization.actor(
+        "notification-assignee",
+        ActorType::Carbon,
+        OrganizationRole::Member,
+    )?;
+    let settings_service = NotificationSettingsService::new(pool.clone(), AUDIT_RETENTION);
+
+    let empty_settings = settings_service.get_settings(&delegating_silicon).await?;
+    assert_eq!(empty_settings.version.get(), 0);
+    assert!(empty_settings.webhook_url.is_none());
+    assert!(empty_settings.todo_list_subscription.is_none());
+    assert!(empty_settings.updated_at.is_none());
+    assert!(matches!(
+        settings_service.get_settings(&assignee).await,
+        Err(AppError::Forbidden)
+    ));
+
+    let webhook_v1 = format!(
+        "https://hook.example.com/silicon/{}/A1B2C3",
+        delegating_silicon.actor.id
+    );
+    let initial_settings = NotificationSettingsUpdate {
+        webhook_url: Some(webhook_v1.clone()),
+        todo_list_subscription: Some(NotificationRuleInput {
+            scope: NotificationScope::StatusUpdates,
+            statuses: Vec::new(),
+        }),
+    };
+    let created_settings = settings_service
+        .replace_settings(
+            &delegating_silicon,
+            initial_settings.clone(),
+            ExpectedNotificationVersion::new(0)?,
+            "req-notification-create",
+        )
+        .await?;
+    assert_eq!(created_settings.version.get(), 1);
+    assert!(created_settings.updated_at.is_some());
+    assert_eq!(
+        settings_service
+            .get_settings(&delegating_silicon)
+            .await?
+            .version,
+        created_settings.version
+    );
+
+    let stale_identical = settings_service
+        .replace_settings(
+            &delegating_silicon,
+            initial_settings,
+            ExpectedNotificationVersion::new(0)?,
+            "req-notification-stale-identical",
+        )
+        .await?;
+    assert_eq!(stale_identical, created_settings);
+
+    let stale_different = settings_service
+        .replace_settings(
+            &delegating_silicon,
+            NotificationSettingsUpdate {
+                webhook_url: Some(webhook_v1.clone()),
+                todo_list_subscription: Some(NotificationRuleInput {
+                    scope: NotificationScope::AnyUpdate,
+                    statuses: Vec::new(),
+                }),
+            },
+            ExpectedNotificationVersion::new(0)?,
+            "req-notification-stale-different",
+        )
+        .await;
+    assert!(matches!(
+        stale_different,
+        Err(AppError::Conflict { ref code })
+            if code.as_ref() == "notification_settings_version_conflict"
+    ));
+    assert!(matches!(
+        settings_service
+            .replace_settings(
+                &assignee,
+                NotificationSettingsUpdate::default(),
+                ExpectedNotificationVersion::new(0)?,
+                "req-notification-carbon-forbidden",
+            )
+            .await,
+        Err(AppError::Forbidden)
+    ));
+
+    let todo_service = TodoService::new(
+        pool.clone(),
+        Arc::new(TestDirectory::new([active_member(&assignee)])),
+        DomainLimits::default(),
+        IDEMPOTENCY_TTL,
+        AUDIT_RETENTION,
+        Duration::from_hours(1_080),
+    );
+    let created_todo = todo_service
+        .create(
+            &delegating_silicon,
+            TodoCreate {
+                title: "Exercise notification routing".to_owned(),
+                description: None,
+                assigned_to: assignee.actor.id.clone(),
+                status: TodoStatus::YetToDo,
+                attachments: Vec::new(),
+            },
+            unique_key("notification-todo-create")?,
+            "req-notification-todo-create",
+        )
+        .await?;
+    let todo_id = TodoId::from_uuid(response_uuid(&created_todo, "id")?);
+    assert_eq!(
+        notification_outbox_count(&pool, organization.id, todo_id).await?,
+        0
+    );
+
+    let empty_override = settings_service
+        .get_todo_subscription(&delegating_silicon, todo_id)
+        .await?;
+    assert_eq!(empty_override.version.get(), 0);
+    assert!(empty_override.subscription.is_none());
+    assert!(empty_override.updated_at.is_none());
+    assert!(matches!(
+        settings_service
+            .get_todo_subscription(&other_silicon, todo_id)
+            .await,
+        Err(AppError::Forbidden)
+    ));
+    assert!(matches!(
+        settings_service
+            .replace_todo_subscription(
+                &other_silicon,
+                todo_id,
+                TodoNotificationSubscriptionUpdate {
+                    subscription: Some(NotificationRuleInput {
+                        scope: NotificationScope::AnyUpdate,
+                        statuses: Vec::new(),
+                    }),
+                },
+                ExpectedNotificationVersion::new(0)?,
+                "req-notification-override-forbidden",
+            )
+            .await,
+        Err(AppError::Forbidden)
+    ));
+
+    let ignored_note_key = unique_key("notification-note-ignored")?;
+    let ignored_note_request = TodoNoteCreate {
+        body: "A status-only list rule must ignore this note.".to_owned(),
+    };
+    todo_service
+        .add_note(
+            &assignee,
+            todo_id,
+            ignored_note_request.clone(),
+            ignored_note_key.clone(),
+            "req-notification-note-ignored",
+        )
+        .await?;
+    let ignored_note_replay = todo_service
+        .add_note(
+            &assignee,
+            todo_id,
+            ignored_note_request,
+            ignored_note_key,
+            "req-notification-note-ignored-replay",
+        )
+        .await?;
+    assert!(ignored_note_replay.replayed);
+    assert_eq!(
+        notification_outbox_count(&pool, organization.id, todo_id).await?,
+        0
+    );
+
+    let first_status_patch = TodoPatch {
+        status: Some(TodoStatus::InProgress),
+        ..TodoPatch::default()
+    };
+    let first_status_key = unique_key("notification-status-first")?;
+    todo_service
+        .update(
+            &assignee,
+            todo_id,
+            first_status_patch.clone(),
+            first_status_key.clone(),
+            "req-notification-status-first",
+        )
+        .await?;
+    let first_status_replay = todo_service
+        .update(
+            &assignee,
+            todo_id,
+            first_status_patch,
+            first_status_key,
+            "req-notification-status-first-replay",
+        )
+        .await?;
+    assert!(first_status_replay.replayed);
+    assert_eq!(
+        notification_outbox_count(&pool, organization.id, todo_id).await?,
+        1
+    );
+
+    todo_service
+        .update(
+            &assignee,
+            todo_id,
+            TodoPatch {
+                status: Some(TodoStatus::InProgress),
+                ..TodoPatch::default()
+            },
+            unique_key("notification-status-noop")?,
+            "req-notification-status-noop",
+        )
+        .await?;
+    assert_eq!(
+        notification_outbox_count(&pool, organization.id, todo_id).await?,
+        1
+    );
+
+    let override_resource = settings_service
+        .replace_todo_subscription(
+            &delegating_silicon,
+            todo_id,
+            TodoNotificationSubscriptionUpdate {
+                subscription: Some(NotificationRuleInput {
+                    scope: NotificationScope::SpecificStatuses,
+                    statuses: vec![TodoStatus::Blocked],
+                }),
+            },
+            ExpectedNotificationVersion::new(0)?,
+            "req-notification-override-create",
+        )
+        .await?;
+    assert_eq!(override_resource.version.get(), 1);
+
+    todo_service
+        .update(
+            &assignee,
+            todo_id,
+            TodoPatch {
+                status: Some(TodoStatus::Completed),
+                ..TodoPatch::default()
+            },
+            unique_key("notification-override-nonmatch")?,
+            "req-notification-override-nonmatch",
+        )
+        .await?;
+    assert_eq!(
+        notification_outbox_count(&pool, organization.id, todo_id).await?,
+        1,
+        "an active nonmatching todo override must suppress list fallback"
+    );
+
+    todo_service
+        .update(
+            &assignee,
+            todo_id,
+            TodoPatch {
+                status: Some(TodoStatus::Blocked),
+                ..TodoPatch::default()
+            },
+            unique_key("notification-override-match")?,
+            "req-notification-override-match",
+        )
+        .await?;
+    assert_eq!(
+        notification_outbox_count(&pool, organization.id, todo_id).await?,
+        2
+    );
+
+    let fallback_resource = settings_service
+        .replace_todo_subscription(
+            &delegating_silicon,
+            todo_id,
+            TodoNotificationSubscriptionUpdate { subscription: None },
+            ExpectedNotificationVersion::new(override_resource.version.get().try_into()?)?,
+            "req-notification-override-fallback",
+        )
+        .await?;
+    assert_eq!(fallback_resource.version.get(), 2);
+    assert!(fallback_resource.subscription.is_none());
+
+    todo_service
+        .update(
+            &assignee,
+            todo_id,
+            TodoPatch {
+                status: Some(TodoStatus::InProgress),
+                ..TodoPatch::default()
+            },
+            unique_key("notification-list-fallback")?,
+            "req-notification-list-fallback",
+        )
+        .await?;
+    let snapshots_before_replacement =
+        notification_routing_snapshots(&pool, organization.id, todo_id).await?;
+    assert_eq!(snapshots_before_replacement.len(), 3);
+    assert_eq!(
+        snapshots_before_replacement
+            .iter()
+            .map(|snapshot| (
+                snapshot.payload_version,
+                snapshot.destination_version,
+                snapshot.subscription_level.as_str(),
+                snapshot.subscription_scope.as_str(),
+                snapshot.subscription_version,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (2, 1, "list", "status_updates", 1),
+            (2, 1, "todo", "specific_statuses", 1),
+            (2, 1, "list", "status_updates", 1),
+        ]
+    );
+    assert!(
+        snapshots_before_replacement
+            .iter()
+            .all(|snapshot| snapshot.webhook_url == webhook_v1)
+    );
+
+    let webhook_v2 = format!(
+        "https://hook.example.com/silicon/{}/D4E5F6",
+        delegating_silicon.actor.id
+    );
+    let replacement_settings = settings_service
+        .replace_settings(
+            &delegating_silicon,
+            NotificationSettingsUpdate {
+                webhook_url: Some(webhook_v2.clone()),
+                todo_list_subscription: Some(NotificationRuleInput {
+                    scope: NotificationScope::AnyUpdate,
+                    statuses: Vec::new(),
+                }),
+            },
+            ExpectedNotificationVersion::new(created_settings.version.get().try_into()?)?,
+            "req-notification-settings-replace",
+        )
+        .await?;
+    assert_eq!(replacement_settings.version.get(), 2);
+    assert_eq!(
+        notification_routing_snapshots(&pool, organization.id, todo_id).await?,
+        snapshots_before_replacement,
+        "later settings replacements must not rewrite durable routing decisions"
+    );
+
+    todo_service
+        .add_note(
+            &assignee,
+            todo_id,
+            TodoNoteCreate {
+                body: "The replacement any-update rule should select this note.".to_owned(),
+            },
+            unique_key("notification-note-selected")?,
+            "req-notification-note-selected",
+        )
+        .await?;
+    let snapshots_after_replacement =
+        notification_routing_snapshots(&pool, organization.id, todo_id).await?;
+    assert_eq!(snapshots_after_replacement.len(), 4);
+    assert_eq!(
+        snapshots_after_replacement[..3],
+        snapshots_before_replacement
+    );
+    let latest = snapshots_after_replacement
+        .last()
+        .context("replacement settings did not produce a new routed event")?;
+    assert_eq!(latest.event_type, "todo.note_added");
+    assert_eq!(latest.payload_version, 2);
+    assert_eq!(latest.webhook_url, webhook_v2);
+    assert_eq!(latest.destination_version, 2);
+    assert_eq!(latest.subscription_level, "list");
+    assert_eq!(latest.subscription_scope, "any_update");
+    assert_eq!(latest.subscription_version, 2);
+
+    let forged_routing_rewrite = sqlx::query(
+        r"
+        UPDATE commit.outbox_events
+           SET webhook_url = 'https://hook.example.com/silicon/forged/ABCDEF'
+         WHERE id = $1
+        ",
+    )
+    .bind(latest.event_id)
+    .execute(&pool)
+    .await;
+    assert_database_code(forged_routing_rewrite, "23514")?;
 
     Ok(())
 }
@@ -1458,7 +2061,7 @@ async fn retention_redacts_only_expired_tombstone_content() -> anyhow::Result<()
     sqlx::query(
         r"
         INSERT INTO commit.todo_attachments (
-            organization_id, todo_id, position, permanent_url, created_at
+            organization_id, todo_id, position, url, created_at
         ) VALUES (
             $1, $2, 0,
             'https://briefcase.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af553',
@@ -1841,6 +2444,64 @@ async fn test_pool() -> anyhow::Result<Option<PgPool>> {
     Ok(Some(pool))
 }
 
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct PersistedRoutingSnapshot {
+    event_id: Uuid,
+    event_type: String,
+    payload_version: i16,
+    webhook_url: String,
+    destination_version: i64,
+    subscription_level: String,
+    subscription_scope: String,
+    subscription_version: i64,
+}
+
+async fn notification_outbox_count(
+    pool: &PgPool,
+    organization_id: OrganizationId,
+    todo_id: TodoId,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        r"
+        SELECT count(*)
+          FROM commit.outbox_events
+         WHERE organization_id = $1
+           AND todo_id = $2
+        ",
+    )
+    .bind(organization_id.into_uuid())
+    .bind(todo_id.into_uuid())
+    .fetch_one(pool)
+    .await
+}
+
+async fn notification_routing_snapshots(
+    pool: &PgPool,
+    organization_id: OrganizationId,
+    todo_id: TodoId,
+) -> Result<Vec<PersistedRoutingSnapshot>, sqlx::Error> {
+    sqlx::query_as(
+        r"
+        SELECT id AS event_id,
+               event_type,
+               payload_version,
+               webhook_url,
+               destination_version,
+               subscription_level::text AS subscription_level,
+               subscription_scope::text AS subscription_scope,
+               subscription_version
+          FROM commit.outbox_events
+         WHERE organization_id = $1
+           AND todo_id = $2
+         ORDER BY created_at, id
+        ",
+    )
+    .bind(organization_id.into_uuid())
+    .bind(todo_id.into_uuid())
+    .fetch_all(pool)
+    .await
+}
+
 fn active_member(actor: &VerifiedActor) -> ActiveMember {
     ActiveMember {
         organization_id: actor.organization_id,
@@ -1850,9 +2511,9 @@ fn active_member(actor: &VerifiedActor) -> ActiveMember {
     }
 }
 
-fn attachment_policy() -> anyhow::Result<AttachmentUrlPolicy> {
+fn briefcase_policy() -> anyhow::Result<BriefcaseUrlPolicy> {
     let base = Url::parse("https://briefcase.example/api/v1")?;
-    AttachmentUrlPolicy::new([base]).map_err(Into::into)
+    BriefcaseUrlPolicy::new([base]).map_err(Into::into)
 }
 
 fn unique_key(prefix: &str) -> anyhow::Result<IdempotencyKey> {

@@ -130,7 +130,7 @@ impl HookPublisher for HookClient {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct InternalHookEvent<'a> {
     event_id: Uuid,
     org_id: &'a str,
@@ -143,11 +143,22 @@ struct InternalHookEvent<'a> {
     occurred_at: time::OffsetDateTime,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    destination_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_level: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription_version: Option<i64>,
     payload: &'a Value,
 }
 
 impl<'a> From<&'a HookEvent> for InternalHookEvent<'a> {
     fn from(event: &'a HookEvent) -> Self {
+        let routing = event.routing_snapshot.as_ref();
         Self {
             event_id: event.event_id,
             org_id: event.org_id.as_str(),
@@ -157,6 +168,11 @@ impl<'a> From<&'a HookEvent> for InternalHookEvent<'a> {
             payload_version: event.payload_version,
             occurred_at: event.occurred_at,
             trace_id: event.trace_id.as_deref(),
+            webhook_url: routing.map(|snapshot| snapshot.webhook_url().as_str()),
+            destination_version: routing.map(|snapshot| snapshot.destination_version().get()),
+            subscription_level: routing.map(|snapshot| snapshot.subscription_level().as_str()),
+            subscription_scope: routing.map(|snapshot| snapshot.subscription_scope().as_str()),
+            subscription_version: routing.map(|snapshot| snapshot.subscription_version().get()),
             payload: &event.payload,
         }
     }
@@ -188,11 +204,16 @@ fn validate_event(event: &HookEvent) -> Result<(), HookPublishError> {
     let valid_trace = event.trace_id.as_deref().is_none_or(|trace_id| {
         (1..=128).contains(&trace_id.len()) && !trace_id.chars().any(char::is_control)
     });
+    let valid_routing = matches!(
+        (event.payload_version, event.routing_snapshot.as_ref()),
+        (1, None) | (2.., Some(_))
+    );
     if event.event_id.is_nil()
         || event.payload_version == 0
         || !event.payload.is_object()
         || !valid_type
         || !valid_trace
+        || !valid_routing
     {
         return Err(HookPublishError::Rejected);
     }
@@ -216,10 +237,13 @@ mod tests {
     use time::OffsetDateTime;
     use uuid::Uuid;
 
-    use super::validate_event;
+    use super::{InternalHookEvent, validate_event};
     use crate::{
-        application::ports::HookEvent,
-        domain::ids::{ActorId, PublicOrganizationId},
+        application::ports::{HookEvent, HookRoutingSnapshot},
+        domain::{
+            ActorId, NotificationScope, NotificationSubscriptionLevel, NotificationVersion,
+            PublicOrganizationId, WebhookUrl,
+        },
     };
 
     #[test]
@@ -239,8 +263,90 @@ mod tests {
             payload_version: 1,
             occurred_at: OffsetDateTime::now_utc(),
             trace_id: None,
+            routing_snapshot: None,
             payload: json!(["not", "an", "object"]),
         };
+        assert!(validate_event(&event).is_err());
+    }
+
+    #[test]
+    fn serializes_the_snapshotted_destination_for_hook_dispatch() {
+        let org_id = PublicOrganizationId::new("tos");
+        let silicon_id = ActorId::new("silicon-one");
+        let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
+            return;
+        };
+        let webhook_url = WebhookUrl::new(
+            "https://hook.example.com/silicon/silicon-one/A1B2C3",
+            &silicon_id,
+        );
+        let (Ok(webhook_url), Ok(destination_version), Ok(subscription_version)) = (
+            webhook_url,
+            NotificationVersion::new(3),
+            NotificationVersion::new(5),
+        ) else {
+            return;
+        };
+        let routing_snapshot = HookRoutingSnapshot::new(
+            webhook_url,
+            destination_version,
+            NotificationSubscriptionLevel::Todo,
+            NotificationScope::StatusUpdates,
+            subscription_version,
+        );
+        let Ok(routing_snapshot) = routing_snapshot else {
+            return;
+        };
+        let event_id = Uuid::now_v7();
+        let event = HookEvent {
+            event_id,
+            org_id,
+            silicon_id,
+            event_type: "todo.status_changed".to_owned(),
+            payload_version: 2,
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            trace_id: Some("trace-1".to_owned()),
+            routing_snapshot: Some(routing_snapshot),
+            payload: json!({ "status": "completed" }),
+        };
+
+        assert!(validate_event(&event).is_ok());
+        let serialized = serde_json::to_value(InternalHookEvent::from(&event));
+        assert!(serialized.is_ok());
+        let Some(serialized) = serialized.ok() else {
+            return;
+        };
+        assert_eq!(serialized["event_id"], event_id.to_string());
+        assert_eq!(serialized["trace_id"], "trace-1");
+        assert_eq!(
+            serialized["webhook_url"],
+            "https://hook.example.com/silicon/silicon-one/A1B2C3"
+        );
+        assert_eq!(serialized["destination_version"], 3);
+        assert_eq!(serialized["subscription_level"], "todo");
+        assert_eq!(serialized["subscription_scope"], "status_updates");
+        assert_eq!(serialized["subscription_version"], 5);
+    }
+
+    #[test]
+    fn rejects_new_payloads_without_a_routing_snapshot() {
+        let org_id = PublicOrganizationId::new("tos");
+        let silicon_id = ActorId::new("silicon-one");
+        let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
+            return;
+        };
+        let event = HookEvent {
+            event_id: Uuid::now_v7(),
+            org_id,
+            silicon_id,
+            event_type: "todo.updated".to_owned(),
+            payload_version: 2,
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            trace_id: None,
+            routing_snapshot: None,
+            payload: json!({}),
+        };
+
         assert!(validate_event(&event).is_err());
     }
 }

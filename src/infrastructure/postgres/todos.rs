@@ -11,12 +11,12 @@ use uuid::Uuid;
 use crate::{
     application::{
         idempotency::{MutationIdentity, MutationResponse},
-        ports::{ActiveMember, VerifiedActor},
+        ports::{ActiveMember, HookRoutingSnapshot, VerifiedActor},
     },
     domain::{
-        Actor, ActorId, ActorType, CollectionQuery, CreatedAtRange, LimitedText, OrganizationId,
-        Page, PageCursor, PermanentAttachmentUrl, PrincipalId, PublicOrganizationId, RequiredText,
-        Todo, TodoId, TodoNote, TodoNoteId, TodoPage, TodoQuery, TodoStatus, TodoView,
+        Actor, ActorId, ActorType, AttachmentUrl, CollectionQuery, CreatedAtRange, LimitedText,
+        OrganizationId, Page, PageCursor, PrincipalId, PublicOrganizationId, RequiredText, Todo,
+        TodoId, TodoNote, TodoNoteId, TodoPage, TodoQuery, TodoStatus, TodoView,
     },
     error::AppError,
 };
@@ -41,7 +41,7 @@ const TODO_PROJECTION: &str = r#"
         assigned_to.actor_id AS assigned_to_actor_id,
         todo.status,
         ARRAY(
-            SELECT attachment.permanent_url
+            SELECT attachment.url
             FROM commit.todo_attachments AS attachment
             WHERE attachment.organization_id = todo.organization_id
               AND attachment.todo_id = todo.id
@@ -69,7 +69,7 @@ pub(crate) struct NewTodo<'a> {
     pub(crate) assigned_by_principal_id: PrincipalId,
     pub(crate) assigned_to_principal_id: PrincipalId,
     pub(crate) status: TodoStatus,
-    pub(crate) attachments: &'a [PermanentAttachmentUrl],
+    pub(crate) attachments: &'a [AttachmentUrl],
 }
 
 /// Full desired todo state after an authorized patch.
@@ -78,8 +78,19 @@ pub(crate) struct TodoReplacement<'a> {
     pub(crate) description: Option<&'a LimitedText>,
     pub(crate) assigned_to_principal_id: PrincipalId,
     pub(crate) status: TodoStatus,
-    pub(crate) attachments: &'a [PermanentAttachmentUrl],
+    pub(crate) attachments: &'a [AttachmentUrl],
     pub(crate) replace_attachments: bool,
+}
+
+/// Complete immutable Hook event selected within a todo mutation transaction.
+pub(crate) struct NewOutboxEvent<'a> {
+    pub(crate) id: Uuid,
+    pub(crate) organization_id: OrganizationId,
+    pub(crate) todo_id: TodoId,
+    pub(crate) recipient_silicon_principal_id: PrincipalId,
+    pub(crate) event_type: &'static str,
+    pub(crate) payload: &'a Value,
+    pub(crate) routing: &'a HookRoutingSnapshot,
 }
 
 /// Durable response read under an idempotency advisory lock.
@@ -488,7 +499,7 @@ async fn insert_attachments(
     connection: &mut PgConnection,
     organization_id: OrganizationId,
     todo_id: TodoId,
-    attachments: &[PermanentAttachmentUrl],
+    attachments: &[AttachmentUrl],
 ) -> Result<(), AppError> {
     if attachments.is_empty() {
         return Ok(());
@@ -504,13 +515,13 @@ async fn insert_attachments(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut builder = QueryBuilder::<Postgres>::new(
-        "INSERT INTO commit.todo_attachments (organization_id, todo_id, position, permanent_url) ",
+        "INSERT INTO commit.todo_attachments (organization_id, todo_id, position, url) ",
     );
-    builder.push_values(positioned, |mut row, (position, permanent_url)| {
+    builder.push_values(positioned, |mut row, (position, attachment_url)| {
         row.push_bind(organization_id.into_uuid())
             .push_bind(todo_id.into_uuid())
             .push_bind(position)
-            .push_bind(permanent_url);
+            .push_bind(attachment_url);
     });
     builder.build().execute(&mut *connection).await?;
     Ok(())
@@ -841,12 +852,7 @@ pub(crate) async fn insert_audit_event(
 /// Enqueues one delegated-Silicon Hook event in the domain transaction.
 pub(crate) async fn insert_outbox_event(
     connection: &mut PgConnection,
-    event_id: Uuid,
-    organization_id: OrganizationId,
-    todo_id: TodoId,
-    recipient_silicon_principal_id: PrincipalId,
-    event_type: &'static str,
-    payload: &Value,
+    event: &NewOutboxEvent<'_>,
 ) -> Result<(), AppError> {
     sqlx::query(
         r#"
@@ -857,17 +863,27 @@ pub(crate) async fn insert_outbox_event(
             recipient_silicon_principal_id,
             event_type,
             payload_version,
-            payload
+            payload,
+            webhook_url,
+            destination_version,
+            subscription_level,
+            subscription_scope,
+            subscription_version
         )
-        VALUES ($1, $2, $3, $4, $5, 1, $6)
+        VALUES ($1, $2, $3, $4, $5, 2, $6, $7, $8, $9, $10, $11)
         "#,
     )
-    .bind(event_id)
-    .bind(organization_id.into_uuid())
-    .bind(todo_id.into_uuid())
-    .bind(recipient_silicon_principal_id.into_uuid())
-    .bind(event_type)
-    .bind(payload)
+    .bind(event.id)
+    .bind(event.organization_id.into_uuid())
+    .bind(event.todo_id.into_uuid())
+    .bind(event.recipient_silicon_principal_id.into_uuid())
+    .bind(event.event_type)
+    .bind(event.payload)
+    .bind(event.routing.webhook_url().as_str())
+    .bind(event.routing.destination_version().get())
+    .bind(event.routing.subscription_level())
+    .bind(event.routing.subscription_scope())
+    .bind(event.routing.subscription_version().get())
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -907,7 +923,7 @@ impl TodoRecord {
             .attachments
             .into_iter()
             .map(|attachment| {
-                PermanentAttachmentUrl::from_persisted(attachment).map_err(corrupt_persisted_data)
+                AttachmentUrl::from_persisted(attachment).map_err(corrupt_persisted_data)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Todo {

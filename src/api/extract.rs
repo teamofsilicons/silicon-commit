@@ -13,7 +13,9 @@ use axum::{
 use serde::de::DeserializeOwned;
 
 use crate::{
-    application::idempotency::IdempotencyKey, domain::ExpectedDiaryVersion, error::AppError,
+    application::idempotency::IdempotencyKey,
+    domain::{ExpectedDiaryVersion, ExpectedNotificationVersion},
+    error::AppError,
 };
 
 /// JSON extractor that maps framework rejections into the public error shape.
@@ -186,7 +188,51 @@ where
     }
 }
 
+/// Required non-negative notification resource version from `If-Match`.
+#[derive(Clone, Copy, Debug)]
+pub struct NotificationIfMatch(pub ExpectedNotificationVersion);
+
+impl<S> FromRequestParts<S> for NotificationIfMatch
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    #[allow(clippy::unused_async_trait_impl)]
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let raw = unique_if_match(parts)?;
+        parse_notification_if_match(raw).map(Self)
+    }
+}
+
+fn unique_if_match(parts: &Parts) -> Result<&str, AppError> {
+    let mut values = parts.headers.get_all(http::header::IF_MATCH).iter();
+    let raw = values.next().ok_or(AppError::PreconditionRequired)?;
+    if values.next().is_some() {
+        return Err(AppError::BadRequest {
+            code: "invalid_if_match".into(),
+        });
+    }
+    raw.to_str().map_err(|_| AppError::BadRequest {
+        code: "invalid_if_match".into(),
+    })
+}
+
+fn parse_notification_if_match(raw: &str) -> Result<ExpectedNotificationVersion, AppError> {
+    let version = parse_strong_integer_etag(raw, true)?;
+    ExpectedNotificationVersion::new(version).map_err(|_| AppError::BadRequest {
+        code: "invalid_if_match".into(),
+    })
+}
+
 fn parse_if_match(raw: &str) -> Result<ExpectedDiaryVersion, AppError> {
+    let version = parse_strong_integer_etag(raw, false)?;
+    ExpectedDiaryVersion::new(version).map_err(|_| AppError::BadRequest {
+        code: "invalid_if_match".into(),
+    })
+}
+
+fn parse_strong_integer_etag(raw: &str, allow_zero: bool) -> Result<u64, AppError> {
     if raw.starts_with("W/") || raw == "*" {
         return Err(AppError::BadRequest {
             code: "invalid_if_match".into(),
@@ -198,7 +244,9 @@ fn parse_if_match(raw: &str) -> Result<ExpectedDiaryVersion, AppError> {
         .ok_or_else(|| AppError::BadRequest {
             code: "invalid_if_match".into(),
         })?;
-    if !matches!(raw.as_bytes(), [b'1'..=b'9', rest @ ..] if rest.iter().all(u8::is_ascii_digit)) {
+    let positive =
+        matches!(raw.as_bytes(), [b'1'..=b'9', rest @ ..] if rest.iter().all(u8::is_ascii_digit));
+    if !(positive || (allow_zero && raw == "0")) {
         return Err(AppError::BadRequest {
             code: "invalid_if_match".into(),
         });
@@ -206,14 +254,12 @@ fn parse_if_match(raw: &str) -> Result<ExpectedDiaryVersion, AppError> {
     let version = raw.parse::<u64>().map_err(|_| AppError::BadRequest {
         code: "invalid_if_match".into(),
     })?;
-    ExpectedDiaryVersion::new(version).map_err(|_| AppError::BadRequest {
-        code: "invalid_if_match".into(),
-    })
+    Ok(version)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{IfMatch, parse_if_match};
+    use super::{IfMatch, parse_if_match, parse_notification_if_match};
 
     #[test]
     fn if_match_wrapper_is_copyable() {
@@ -234,6 +280,26 @@ mod tests {
             "3", "W/\"3\"", "*", "\"\"", "\"0\"", "\"01\"", "\"+1\"", "\"3\"\"",
         ] {
             assert!(parse_if_match(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn notification_if_match_accepts_only_canonical_non_negative_versions() {
+        assert!(matches!(
+            parse_notification_if_match("\"0\"")
+                .map(crate::domain::ExpectedNotificationVersion::get),
+            Ok(0)
+        ));
+        assert!(matches!(
+            parse_notification_if_match("\"42\"")
+                .map(crate::domain::ExpectedNotificationVersion::get),
+            Ok(42)
+        ));
+        for invalid in ["0", "W/\"0\"", "*", "\"00\"", "\"01\"", "\"-1\""] {
+            assert!(
+                parse_notification_if_match(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
         }
     }
 }

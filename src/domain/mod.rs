@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod attachment;
 pub mod ids;
+pub mod notification;
 pub mod pagination;
 pub mod project;
 pub mod todo;
@@ -10,12 +11,19 @@ pub mod validation;
 
 pub use actor::{Actor, ActorRef, ActorType, ParseActorTypeError};
 pub use attachment::{
-    AttachmentPolicyError, AttachmentUrlError, AttachmentUrlPolicy, MAX_ATTACHMENT_URL_BYTES,
-    PermanentAttachmentUrl,
+    AttachmentUrl, AttachmentUrlError, BriefcaseAttachmentUrl, BriefcasePolicyError,
+    BriefcaseUrlError, BriefcaseUrlPolicy, MAX_ATTACHMENT_URL_BYTES,
 };
 pub use ids::{
     ActorId, MAX_PUBLIC_ID_CHARS, OrganizationId, PrincipalId, ProjectEntryId, ProjectId,
     ProjectTaskId, PublicIdError, PublicOrganizationId, TodoId, TodoNoteId,
+};
+pub use notification::{
+    ExpectedNotificationVersion, ExpectedNotificationVersionError, MAX_WEBHOOK_URL_BYTES,
+    NotificationRule, NotificationRuleInput, NotificationScope, NotificationSettings,
+    NotificationSettingsUpdate, NotificationSubscriptionLevel, NotificationVersion,
+    NotificationVersionError, TodoNotificationSubscription, TodoNotificationSubscriptionUpdate,
+    ValidatedNotificationSettingsUpdate, ValidatedTodoNotificationSubscriptionUpdate, WebhookUrl,
 };
 pub use pagination::{
     CollectionQuery, CreatedAtRange, CursorError, DEFAULT_PAGE_LIMIT, InvalidDateRange,

@@ -12,14 +12,14 @@ use crate::{
         ports::{ActiveMember, IdentityProvider, InboundCredential, ProviderError, VerifiedActor},
     },
     domain::{
-        Actor, ActorId, AttachmentUrlPolicy, CollectionQuery, DomainLimits, LimitedText,
-        NullablePatch, Page, PageCursor, PermanentAttachmentUrl, RequiredText, Todo, TodoCreate,
-        TodoId, TodoNote, TodoNoteCreate, TodoPage, TodoPatch, TodoQuery, TodoStatus,
-        ValidatedTodoPatch, ValidationError,
+        Actor, ActorId, AttachmentUrl, CollectionQuery, DomainLimits, LimitedText, NullablePatch,
+        Page, PageCursor, RequiredText, Todo, TodoCreate, TodoId, TodoNote, TodoNoteCreate,
+        TodoPage, TodoPatch, TodoQuery, TodoStatus, ValidatedTodoPatch, ValidationError,
     },
     error::AppError,
+    infrastructure::postgres::notifications as notification_store,
     infrastructure::postgres::todos::{
-        self as store, DeleteTarget, NewTodo, TodoActivityKind, TodoReplacement,
+        self as store, DeleteTarget, NewOutboxEvent, NewTodo, TodoActivityKind, TodoReplacement,
     },
 };
 
@@ -33,7 +33,6 @@ pub struct TodoService {
     pool: PgPool,
     identity_provider: Arc<dyn IdentityProvider>,
     limits: DomainLimits,
-    attachment_policy: AttachmentUrlPolicy,
     idempotency_ttl: Duration,
     audit_retention: Duration,
     tombstone_retention: Duration,
@@ -46,7 +45,6 @@ impl TodoService {
         pool: PgPool,
         identity_provider: Arc<dyn IdentityProvider>,
         limits: DomainLimits,
-        attachment_policy: AttachmentUrlPolicy,
         idempotency_ttl: Duration,
         audit_retention: Duration,
         tombstone_retention: Duration,
@@ -55,7 +53,6 @@ impl TodoService {
             pool,
             identity_provider,
             limits,
-            attachment_policy,
             idempotency_ttl,
             audit_retention,
             tombstone_retention,
@@ -99,9 +96,7 @@ impl TodoService {
             return Ok(response);
         }
 
-        let request = request
-            .validate(&self.limits, &self.attachment_policy)
-            .map_err(validation_error)?;
+        let request = request.validate(&self.limits).map_err(validation_error)?;
         let assignee = self.resolve_assignee(actor, &request.assigned_to).await?;
 
         let mut transaction = self.pool.begin().await?;
@@ -189,9 +184,7 @@ impl TodoService {
             return Ok(response);
         }
 
-        let patch = request
-            .validate(&self.limits, &self.attachment_policy)
-            .map_err(validation_error)?;
+        let patch = request.validate(&self.limits).map_err(validation_error)?;
         let authorization_snapshot = store::get_todo(&self.pool, actor.organization_id, todo_id)
             .await?
             .ok_or(AppError::NotFound)?;
@@ -277,15 +270,23 @@ impl TodoService {
             self.audit_retention,
         )
         .await?;
-        if current.should_notify_assigner() || updated.should_notify_assigner() {
+        if updated.should_notify_assigner() {
             let event_type = update_event_type(&desired.changed_fields);
+            let resulting_status = (current.status != updated.status).then_some(updated.status);
+            let mut notification_details =
+                Map::from_iter([("changed_fields".to_owned(), json!(desired.changed_fields))]);
+            if resulting_status.is_some() {
+                notification_details.insert("previous_status".to_owned(), json!(current.status));
+                notification_details.insert("status".to_owned(), json!(updated.status));
+            }
             enqueue_notification(
                 transaction.as_mut(),
                 actor,
                 &updated,
                 event_type,
                 request_id,
-                json!({ "changed_fields": desired.changed_fields }),
+                Value::Object(notification_details),
+                resulting_status,
             )
             .await?;
         }
@@ -374,6 +375,7 @@ impl TodoService {
                 "todo.deleted",
                 request_id,
                 json!({}),
+                None,
             )
             .await?;
         }
@@ -475,6 +477,7 @@ impl TodoService {
                 "todo.note_added",
                 request_id,
                 json!({ "note_id": note_id }),
+                None,
             )
             .await?;
         }
@@ -572,7 +575,7 @@ struct DesiredTodo {
     description: Option<LimitedText>,
     assigned_to: Actor,
     status: TodoStatus,
-    attachments: Vec<PermanentAttachmentUrl>,
+    attachments: Vec<AttachmentUrl>,
     replace_attachments: bool,
     changed_fields: Vec<&'static str>,
     activity_kind: TodoActivityKind,
@@ -690,7 +693,13 @@ async fn enqueue_notification(
     event_type: &'static str,
     request_id: &str,
     details: Value,
+    resulting_status: Option<TodoStatus>,
 ) -> Result<(), AppError> {
+    let Some(routing) =
+        notification_store::effective_routing_snapshot(connection, todo, resulting_status).await?
+    else {
+        return Ok(());
+    };
     let event_id = Uuid::now_v7();
     let payload = json!({
         "event_id": event_id,
@@ -703,12 +712,15 @@ async fn enqueue_notification(
     });
     store::insert_outbox_event(
         connection,
-        event_id,
-        actor.organization_id,
-        todo.id,
-        todo.assigned_by.principal_id,
-        event_type,
-        &payload,
+        &NewOutboxEvent {
+            id: event_id,
+            organization_id: actor.organization_id,
+            todo_id: todo.id,
+            recipient_silicon_principal_id: todo.assigned_by.principal_id,
+            event_type,
+            payload: &payload,
+            routing: &routing,
+        },
     )
     .await
 }

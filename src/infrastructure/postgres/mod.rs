@@ -12,6 +12,7 @@ use sqlx::{
 use crate::config::DatabaseSettings;
 
 mod identity_projection;
+pub mod notifications;
 pub mod projects;
 pub mod todos;
 

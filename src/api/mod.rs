@@ -28,6 +28,7 @@ use crate::{
     application::{
         attachments::{AttachmentService, map_provider_error},
         idempotency::MutationResponse,
+        notifications::NotificationSettingsService,
         ports::{BriefcaseProvider, IdentityProvider, VerifiedActor},
         projects::ProjectService,
         todos::TodoService,
@@ -37,7 +38,7 @@ use crate::{
     infrastructure::{
         clients::{
             ClientBuildError,
-            briefcase::{BriefcaseClient, permanent_url_policy},
+            briefcase::{BriefcaseClient, briefcase_url_policy},
             iam::{IamClient, TrustedHeaderIdentityProvider},
         },
         postgres,
@@ -48,6 +49,7 @@ use crate::{
 pub mod attachments;
 pub mod auth;
 pub mod extract;
+pub mod notifications;
 pub mod projects;
 pub mod todos;
 
@@ -63,6 +65,7 @@ pub struct AppState {
     pub(crate) todos: Arc<TodoService>,
     pub(crate) projects: Arc<ProjectService>,
     pub(crate) attachments: Arc<AttachmentService>,
+    pub(crate) notifications: Arc<NotificationSettingsService>,
     authentication_mode: AuthenticationMode,
     public_base_url: Url,
 }
@@ -80,6 +83,7 @@ impl AppState {
         todos: Arc<TodoService>,
         projects: Arc<ProjectService>,
         attachments: Arc<AttachmentService>,
+        notifications: Arc<NotificationSettingsService>,
         authentication_mode: AuthenticationMode,
         public_base_url: Url,
     ) -> Self {
@@ -89,6 +93,7 @@ impl AppState {
             todos,
             projects,
             attachments,
+            notifications,
             authentication_mode,
             public_base_url: normalized_base_url(public_base_url),
         }
@@ -100,7 +105,7 @@ impl AppState {
     /// # Errors
     ///
     /// Returns a redacted construction error when an external client or the
-    /// permanent attachment URL policy cannot be built safely.
+    /// Briefcase URL classifier cannot be built safely.
     pub fn from_settings(settings: &Settings, pool: PgPool) -> Result<Self, ApiBuildError> {
         if settings.runtime_profile != RuntimeProfile::Api {
             return Err(ApiBuildError::WrongSettingsProfile);
@@ -123,7 +128,7 @@ impl AppState {
             integrations.request_timeout,
             integrations.max_response_bytes,
         )?);
-        let attachment_policy = permanent_url_policy(&integrations.briefcase)?;
+        let briefcase_policy = briefcase_url_policy(&integrations.briefcase)?;
         let todo_limits = settings.limits.domain_limits();
         let project_limits = settings.limits.domain_limits();
         let idempotency_ttl = settings.limits.idempotency_ttl;
@@ -133,7 +138,6 @@ impl AppState {
             pool.clone(),
             Arc::clone(&identity),
             todo_limits,
-            attachment_policy.clone(),
             idempotency_ttl,
             audit_retention,
             tombstone_retention,
@@ -149,7 +153,11 @@ impl AppState {
             pool.clone(),
             Arc::clone(&identity),
             briefcase,
-            attachment_policy,
+            briefcase_policy,
+        ));
+        let notifications = Arc::new(NotificationSettingsService::new(
+            pool.clone(),
+            audit_retention,
         ));
 
         Ok(Self::new(
@@ -158,6 +166,7 @@ impl AppState {
             todos,
             projects,
             attachments,
+            notifications,
             integrations.iam.mode,
             settings.server.public_base_url.clone(),
         ))
@@ -239,6 +248,10 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiBuildError> {
     let api = Router::new()
         .route("/version", get(version))
+        .route(
+            "/notification-settings",
+            get(notifications::get_settings).put(notifications::replace_settings),
+        )
         .route("/todos", get(todos::list).post(todos::create))
         .route(
             "/todos/{todo_id}",
@@ -247,6 +260,10 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .route(
             "/todos/{todo_id}/notes",
             get(todos::list_notes).post(todos::add_note),
+        )
+        .route(
+            "/todos/{todo_id}/notification-subscription",
+            get(notifications::get_todo_subscription).put(notifications::replace_todo_subscription),
         )
         .route("/projects", get(projects::list).post(projects::create))
         .route(
@@ -575,7 +592,7 @@ mod tests {
         },
         config::ServerSettings,
         domain::{
-            ActorId, ActorType, AttachmentUrlPolicy, DomainLimits, PermanentAttachmentUrl,
+            ActorId, ActorType, BriefcaseAttachmentUrl, BriefcaseUrlPolicy, DomainLimits,
             PublicOrganizationId,
         },
     };
@@ -680,7 +697,7 @@ mod tests {
         async fn temporary_url(
             &self,
             _org_id: &PublicOrganizationId,
-            _attachment: &PermanentAttachmentUrl,
+            _attachment: &BriefcaseAttachmentUrl,
             _proof: &DelegatedOboProof,
         ) -> Result<TemporaryUrl, ProviderError> {
             Err(ProviderError::Forbidden)
@@ -746,6 +763,36 @@ mod tests {
                 Some(TODO_ID),
                 r#"{"body":"note"}"#,
             ),
+            operation(
+                Method::GET,
+                "/api/v1/notification-settings",
+                action::NOTIFICATION_SETTINGS_READ,
+                None,
+            ),
+            OperationCase {
+                method: Method::PUT,
+                uri: "/api/v1/notification-settings",
+                action: action::NOTIFICATION_SETTINGS_UPDATE,
+                resource: None,
+                body: Some(r#"{"webhook_url":null,"todo_list_subscription":null}"#),
+                idempotent: false,
+                if_match: true,
+            },
+            operation(
+                Method::GET,
+                "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription",
+                action::TODO_SUBSCRIPTION_READ,
+                Some(TODO_ID),
+            ),
+            OperationCase {
+                method: Method::PUT,
+                uri: "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription",
+                action: action::TODO_SUBSCRIPTION_UPDATE,
+                resource: Some(TODO_ID.to_owned()),
+                body: Some(r#"{"subscription":null}"#),
+                idempotent: false,
+                if_match: true,
+            },
             operation(Method::GET, "/api/v1/projects", action::PROJECTS_LIST, None),
             mutation(
                 Method::POST,
@@ -837,7 +884,7 @@ mod tests {
                 if_match: false,
             },
         ];
-        assert_eq!(cases.len(), 20);
+        assert_eq!(cases.len(), 24);
 
         let identity = Arc::new(RecordingIdentity::default());
         let state = test_state(identity.clone())?;
@@ -1098,14 +1145,13 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://postgres:postgres@127.0.0.1:1/commit")?;
         let identity: Arc<dyn IdentityProvider> = identity;
-        let policy = AttachmentUrlPolicy::new([Url::parse("https://briefcase.example/api/v1/")?])?;
+        let policy = BriefcaseUrlPolicy::new([Url::parse("https://briefcase.example/api/v1/")?])?;
         let limits = DomainLimits::default();
         let ttl = Duration::from_secs(60);
         let todos = Arc::new(TodoService::new(
             pool.clone(),
             Arc::clone(&identity),
             limits,
-            policy.clone(),
             ttl,
             Duration::from_secs(60),
             Duration::from_secs(60),
@@ -1124,12 +1170,17 @@ mod tests {
             briefcase,
             policy,
         ));
+        let notifications = Arc::new(NotificationSettingsService::new(
+            pool.clone(),
+            Duration::from_secs(60),
+        ));
         Ok(AppState::new(
             pool,
             identity,
             todos,
             projects,
             attachments,
+            notifications,
             AuthenticationMode::Iam,
             Url::parse("https://commit.example/api/v1/")?,
         ))

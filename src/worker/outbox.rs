@@ -8,9 +8,12 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::{
-    application::ports::{HookEvent, HookPublishError, HookPublisher},
+    application::ports::{HookEvent, HookPublishError, HookPublisher, HookRoutingSnapshot},
     config::WorkerSettings,
-    domain::{ActorId, PublicOrganizationId},
+    domain::{
+        ActorId, NotificationScope, NotificationSubscriptionLevel, NotificationVersion,
+        PublicOrganizationId, WebhookUrl,
+    },
 };
 
 /// Claims and delivers durable notification events for one worker replica.
@@ -183,6 +186,11 @@ impl OutboxProcessor {
                    recipient.actor_id AS silicon_id,
                    claimed.event_type,
                    claimed.payload_version,
+                   claimed.webhook_url,
+                   claimed.destination_version,
+                   claimed.subscription_level,
+                   claimed.subscription_scope,
+                   claimed.subscription_version,
                    claimed.payload,
                    claimed.created_at,
                    claimed.attempt_count
@@ -307,19 +315,23 @@ impl OutboxProcessor {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(FromRow)]
 struct ClaimedRow {
     id: Uuid,
     org_id: String,
     silicon_id: String,
     event_type: String,
     payload_version: i16,
+    webhook_url: Option<String>,
+    destination_version: Option<i64>,
+    subscription_level: Option<NotificationSubscriptionLevel>,
+    subscription_scope: Option<NotificationScope>,
+    subscription_version: Option<i64>,
     payload: serde_json::Value,
     created_at: OffsetDateTime,
     attempt_count: i32,
 }
 
-#[derive(Debug)]
 struct ClaimedEvent {
     event: HookEvent,
     attempt_count: i32,
@@ -335,6 +347,45 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
             ActorId::new(row.silicon_id).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
         let payload_version = u16::try_from(row.payload_version)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        let routing_snapshot = match (
+            row.webhook_url,
+            row.destination_version,
+            row.subscription_level,
+            row.subscription_scope,
+            row.subscription_version,
+        ) {
+            (None, None, None, None, None) => None,
+            (
+                Some(webhook_url),
+                Some(destination_version),
+                Some(subscription_level),
+                Some(subscription_scope),
+                Some(subscription_version),
+            ) => {
+                let webhook_url = WebhookUrl::from_persisted(webhook_url, &silicon_id)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+                let destination_version = NotificationVersion::new(destination_version)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+                let subscription_version = NotificationVersion::new(subscription_version)
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+                Some(
+                    HookRoutingSnapshot::new(
+                        webhook_url,
+                        destination_version,
+                        subscription_level,
+                        subscription_scope,
+                        subscription_version,
+                    )
+                    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+                )
+            }
+            _ => {
+                return Err(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "outbox routing snapshot is incomplete",
+                ))));
+            }
+        };
         let trace_id = row
             .payload
             .get("trace_id")
@@ -350,6 +401,7 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
                 payload_version,
                 occurred_at: row.created_at,
                 trace_id,
+                routing_snapshot,
                 payload: row.payload,
             },
             attempt_count: row.attempt_count,
@@ -376,6 +428,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{ClaimedEvent, ClaimedRow, retry_delay};
+    use crate::domain::{NotificationScope, NotificationSubscriptionLevel};
 
     #[test]
     fn retry_delay_is_positive_and_bounded() {
@@ -396,6 +449,11 @@ mod tests {
             silicon_id: "silicon-one".to_owned(),
             event_type: "todo.updated".to_owned(),
             payload_version: 1,
+            webhook_url: None,
+            destination_version: None,
+            subscription_level: None,
+            subscription_scope: None,
+            subscription_version: None,
             payload: serde_json::json!({ "request_id": request_id }),
             created_at: OffsetDateTime::UNIX_EPOCH,
             attempt_count: 1,
@@ -406,5 +464,61 @@ mod tests {
             claimed.ok().and_then(|claim| claim.event.trace_id),
             Some(request_id.to_owned())
         );
+    }
+
+    #[test]
+    fn claimed_event_reconstructs_the_immutable_routing_snapshot() {
+        let row = ClaimedRow {
+            id: Uuid::now_v7(),
+            org_id: "test-org".to_owned(),
+            silicon_id: "silicon-one".to_owned(),
+            event_type: "todo.status_changed".to_owned(),
+            payload_version: 2,
+            webhook_url: Some("https://hook.example.com/silicon/silicon-one/A1B2C3".to_owned()),
+            destination_version: Some(4),
+            subscription_level: Some(NotificationSubscriptionLevel::Todo),
+            subscription_scope: Some(NotificationScope::SpecificStatuses),
+            subscription_version: Some(7),
+            payload: serde_json::json!({ "status": "completed" }),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            attempt_count: 1,
+        };
+
+        let claimed = ClaimedEvent::try_from(row);
+        assert!(claimed.is_ok());
+        let Some(snapshot) = claimed.ok().and_then(|claim| claim.event.routing_snapshot) else {
+            return;
+        };
+        assert_eq!(snapshot.destination_version().get(), 4);
+        assert_eq!(
+            snapshot.subscription_level(),
+            NotificationSubscriptionLevel::Todo
+        );
+        assert_eq!(
+            snapshot.subscription_scope(),
+            NotificationScope::SpecificStatuses
+        );
+        assert_eq!(snapshot.subscription_version().get(), 7);
+    }
+
+    #[test]
+    fn claimed_event_rejects_an_incomplete_routing_snapshot() {
+        let row = ClaimedRow {
+            id: Uuid::now_v7(),
+            org_id: "test-org".to_owned(),
+            silicon_id: "silicon-one".to_owned(),
+            event_type: "todo.updated".to_owned(),
+            payload_version: 2,
+            webhook_url: Some("https://hook.example.com/silicon/silicon-one/A1B2C3".to_owned()),
+            destination_version: None,
+            subscription_level: None,
+            subscription_scope: None,
+            subscription_version: None,
+            payload: serde_json::json!({}),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            attempt_count: 1,
+        };
+
+        assert!(ClaimedEvent::try_from(row).is_err());
     }
 }
