@@ -1,0 +1,10 @@
+.git
+.github
+.env*
+!.env.example
+*.key
+*.p12
+*.pem
+target
+*.log
+.DS_Store
