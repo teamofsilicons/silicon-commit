@@ -1,0 +1,316 @@
+openapi: 3.1.0
+info:
+  title: Silicon Commit API
+  version: 0.1.0
+  description: Public organization work management for Carbon and Silicon todos and Silicon-managed projects.
+servers:
+  - url: https://commit.teamofsilicons.com/api/v1
+security:
+  - bearerAuth: []
+  - oboAccess: []
+tags:
+  - name: Todos
+  - name: Projects
+  - name: Project Diary
+  - name: Project Work
+  - name: Attachments
+paths:
+  /todos:
+    get:
+      tags: [Todos]
+      operationId: listTodos
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: view, in: query, schema: { type: string, enum: [assigned_to_me, delegated_by_me, all], default: assigned_to_me } }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/TodoStatus' } }
+        - { name: assigned_to, in: query, schema: { type: string } }
+        - { name: assigned_by, in: query, schema: { type: string } }
+        - { name: created_from, in: query, schema: { type: string, format: date-time } }
+        - { name: created_to, in: query, schema: { type: string, format: date-time } }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: Filtered todos, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Todo' } }, next_cursor: { type: [string, 'null'] } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Todos]
+      operationId: createTodo
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TodoCreate' }
+      responses:
+        '201': { description: Todo created, content: { application/json: { schema: { $ref: '#/components/schemas/Todo' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /todos/{todo_id}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/TodoId'
+    get:
+      tags: [Todos]
+      operationId: getTodo
+      responses:
+        '200': { description: Todo, content: { application/json: { schema: { $ref: '#/components/schemas/Todo' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Todos]
+      operationId: updateTodo
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                title: { type: string, minLength: 1 }
+                description: { type: [string, 'null'] }
+                assigned_to: { type: string }
+                status: { $ref: '#/components/schemas/TodoStatus' }
+                attachments: { type: array, items: { type: string, format: uri } }
+      responses:
+        '200': { description: Updated todo, content: { application/json: { schema: { $ref: '#/components/schemas/Todo' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Todos]
+      operationId: deleteTodo
+      responses:
+        '204': { description: Todo deleted }
+        default: { $ref: '#/components/responses/Error' }
+  /todos/{todo_id}/notes:
+    get:
+      tags: [Todos]
+      operationId: listTodoNotes
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/TodoId'
+      responses:
+        '200': { description: Notes, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Note' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Todos]
+      operationId: addTodoNote
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/TodoId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, minLength: 1 } } } } } }
+      responses:
+        '201': { description: Note created, content: { application/json: { schema: { $ref: '#/components/schemas/Note' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects:
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/ProjectStatus' } }
+        - { name: silicon_id, in: query, schema: { type: string } }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: Public organization projects, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Project' } }, next_cursor: { type: [string, 'null'] } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Projects]
+      operationId: createProject
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectCreate' } } } }
+      responses:
+        '201': { description: Project created, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Projects]
+      operationId: getProject
+      responses:
+        '200': { description: Project, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Projects]
+      operationId: updateProject
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, minProperties: 1, properties: { name: { type: string }, status: { $ref: '#/components/schemas/ProjectStatus' }, silicon_ids: { type: array, uniqueItems: true, items: { type: string } } } }
+      responses:
+        '200': { description: Updated project, content: { application/json: { schema: { $ref: '#/components/schemas/Project' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/diary:
+    get:
+      tags: [Project Diary]
+      operationId: getProjectDiary
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200': { description: Markdown diary, content: { application/json: { schema: { $ref: '#/components/schemas/Diary' } } } }
+        default: { $ref: '#/components/responses/Error' }
+    put:
+      tags: [Project Diary]
+      operationId: updateProjectDiary
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+        - { name: If-Match, in: header, required: true, schema: { type: integer, minimum: 0 } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [markdown], properties: { markdown: { type: string, description: 'Maximum 100,000 words' } } } } } }
+      responses:
+        '200': { description: Updated diary, content: { application/json: { schema: { $ref: '#/components/schemas/Diary' } } } }
+        '409': { description: Version conflict }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/tasks:
+    get:
+      tags: [Project Work]
+      operationId: listProjectTasks
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200': { description: Tasks and nested subtasks, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/ProjectTask' } } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Project Work]
+      operationId: createProjectTask
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectTaskCreate' } } } }
+      responses:
+        '201': { description: Task or subtask created, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectTask' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/tasks/{task_id}:
+    patch:
+      tags: [Project Work]
+      operationId: updateProjectTask
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+        - { name: task_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, minProperties: 1, properties: { title: { type: string }, description: { type: string }, status: { $ref: '#/components/schemas/TodoStatus' } } } } } }
+      responses:
+        '200': { description: Updated task, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectTask' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/blockers:
+    post:
+      tags: [Project Work]
+      operationId: createBlocker
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [title, description], properties: { title: { type: string }, description: { type: string }, status: { type: string, enum: [open, resolved], default: open } } } } } }
+      responses:
+        '201': { description: Blocker created, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectEntry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/updates:
+    post:
+      tags: [Project Work]
+      operationId: createProjectUpdate
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [title, description], properties: { title: { type: string }, description: { type: string } } } } } }
+      responses:
+        '201': { description: Update created, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectEntry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/completion:
+    post:
+      tags: [Project Work]
+      operationId: completeProject
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [title, description], properties: { title: { type: string }, description: { type: string } } } } } }
+      responses:
+        '201': { description: Completion entry created and project completed, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectEntry' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /attachments/temporary-url:
+    post:
+      tags: [Attachments]
+      operationId: createAttachmentTemporaryUrl
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], properties: { permanent_url: { type: string, format: uri } } } } } }
+      responses:
+        '201': { description: Briefcase temporary URL, content: { application/json: { schema: { type: object, required: [url, expires_at], properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
+    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: Short-lived IAM OBO Access proof; X-App-ID is also required }
+  parameters:
+    OrgId: { name: X-Org-ID, in: header, required: true, schema: { type: string } }
+    TodoId: { name: todo_id, in: path, required: true, schema: { type: string, format: uuid } }
+    ProjectId: { name: project_id, in: path, required: true, schema: { type: string } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 255 } }
+    Cursor: { name: cursor, in: query, schema: { type: string } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+  responses:
+    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    ActorRef:
+      type: object
+      required: [type, id]
+      properties: { type: { type: string, enum: [carbon, silicon] }, id: { type: string } }
+    TodoStatus: { type: string, enum: [completed, canceled, in_progress, blocked, yet_to_do] }
+    TodoCreate:
+      type: object
+      required: [title, assigned_to]
+      properties: { title: { type: string, minLength: 1 }, description: { type: string }, assigned_to: { type: string }, status: { $ref: '#/components/schemas/TodoStatus' }, attachments: { type: array, items: { type: string, format: uri } } }
+    Todo:
+      allOf:
+        - $ref: '#/components/schemas/TodoCreate'
+        - type: object
+          required: [id, org_id, assigned_by, created_at, updated_at]
+          properties: { id: { type: string, format: uuid }, org_id: { type: string }, assigned_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    Note:
+      type: object
+      required: [id, body, author, created_at]
+      properties: { id: { type: string, format: uuid }, body: { type: string }, author: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+    ProjectStatus: { type: string, enum: [completed, blocked, canceled, in_progress, yet_to_start] }
+    ProjectCreate:
+      type: object
+      required: [name, silicon_ids]
+      properties: { name: { type: string, minLength: 1 }, silicon_ids: { type: array, minItems: 1, uniqueItems: true, items: { type: string } } }
+    Project:
+      allOf:
+        - $ref: '#/components/schemas/ProjectCreate'
+        - type: object
+          required: [id, org_id, slug, uid, status, created_by, created_at, updated_at]
+          properties: { id: { type: string, format: uuid }, org_id: { type: string }, slug: { type: string }, uid: { type: string, description: Stable server-generated project identifier }, status: { $ref: '#/components/schemas/ProjectStatus' }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time }, updated_at: { type: string, format: date-time } }
+    Diary:
+      type: object
+      required: [project_id, markdown, version, updated_by, updated_at]
+      properties: { project_id: { type: string }, markdown: { type: string }, version: { type: integer, minimum: 1 }, updated_by: { $ref: '#/components/schemas/ActorRef' }, updated_at: { type: string, format: date-time } }
+    ProjectTaskCreate:
+      type: object
+      required: [title]
+      properties: { parent_task_id: { type: [string, 'null'], format: uuid }, title: { type: string }, description: { type: string }, status: { $ref: '#/components/schemas/TodoStatus' } }
+    ProjectTask:
+      allOf:
+        - $ref: '#/components/schemas/ProjectTaskCreate'
+        - type: object
+          required: [id, project_id, created_by, created_at]
+          properties: { id: { type: string, format: uuid }, project_id: { type: string }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+    ProjectEntry:
+      type: object
+      required: [id, project_id, type, title, description, created_by, created_at]
+      properties: { id: { type: string, format: uuid }, project_id: { type: string }, type: { type: string, enum: [blocker, update, completion] }, title: { type: string }, description: { type: string }, status: { type: string }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+    Error:
+      type: object
+      required: [error]
+      properties: { error: { type: object, required: [code, message], properties: { code: { type: string }, message: { type: string }, request_id: { type: string } } } }
