@@ -29,7 +29,7 @@ For each todo the user can add notes to the todo, these are notes that are attac
 
 For todo's it's also possible to attach attachments to the said todo, attachments is a list[] of attachment url's that can be used. 
 
-The backend must have an endpoint to generate temporary url:
+The attachment url can be an attachment url to any image provider, and also to silicon briefcase, the backend has an endpoint to generate temporary url for silicon briefcase:
 Refer to [../silicon-briefcase/understanding.md/]. You don't need to include support for upload, just support for temporary url generation.
 
 ### Todo Status
@@ -40,10 +40,22 @@ Each todo can be in multiple states: completed, canceled, in progress, blocked, 
 
 It should be possible to filter todo's based on their status, date, assigned to, assigned by, etc. 
 
+
+### Webhook
+
+When a new silicon signs into the system they can also configure their webhook endpoint. This webhook can then be used for notifying. This is not compukosry, but optional. 
+
 ### Hook for notifying
 
-For everytime there's any update for a silicon's list of todo, either it got completed, or failed, or blocked, anything. Notify the silicon who assigned the todo via [hook.teamofsilicons.com/silicon/{silicon-id}/]. This should only happen for the todo's that silicon has assinged_by for, and assinged_to is not the same as assinged_by, in that case, assigned_by silicon should be notified. 
+A silicon can subscribe for changes (and also the scope for changes) 
+The scope for changes is gonna include: 
+1) Any update - Even when the todo name, description, etc gets updates
+2) Status updates - When the status of a todo or subtodo changes, in progress, completed, blocked, etc.
+3) Specific Statuses - I could subscribe to a set of status updates like when it got completed, or failed, etc. 
 
+When a silicon subscribes to a set of changes, this subscription should be applied till unsubscribed. So until then it should be todo list wide. During subscription it should also be possible to do specific todo subscription, so in that case only that subscription gets applied.
+
+For everytime there's any update for a silicon's list of todo based on the scope they have subscribed to. Notify the silicon who assigned the todo via the set webhook url for that silicon. This should only happen for the todo's that silicon has assinged_by for, and assinged_to is not the same as assinged_by, in that case, assigned_by silicon should be notified. 
 
 
 # Projects

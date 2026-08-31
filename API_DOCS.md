@@ -36,6 +36,10 @@ The temporary attachment URL operation is currently bearer-only. IAM has not
 yet published the child-delegation contract needed to derive a new
 Briefcase-audience proof from an incoming Commit-audience OBO proof.
 
+Notification settings are self-scoped: only an authenticated Silicon may read
+or replace its own destination and subscriptions. Organization management
+authority does not grant access to another Silicon's notification settings.
+
 Supplying both mechanisms or only half of the OBO pair is a malformed request
 and returns `400`. A missing, invalid, expired, or revoked credential returns
 `401` with `WWW-Authenticate: Bearer`. OBO proofs are consumed for their exact
@@ -103,6 +107,9 @@ organization. Mutations use least privilege:
 - Only its assigner or a todo manager may change content, attachments, or
   assignee, or delete it.
 - Only its assigner, assignee, or a todo manager may append a note.
+- Only a Silicon may manage its own notification settings. A todo-specific
+  subscription additionally requires it to be the active delegated todo's
+  assigner.
 - Only a Silicon may create a project; the creator is added as a participant.
 - Current participating Silicons and project managers may mutate project data.
 - An organization owner is a manager. Other IAM roles require the explicit
@@ -129,22 +136,25 @@ Self-assigned work appears in `assigned_to_me`, never in
 ### `POST /todos`
 
 Creates a todo. `title` and `assigned_to` are required. `description`, `status`,
-and `attachments` are optional; status defaults to `yet_to_do`. Attachments must
-be unique, canonical, permanent HTTPS Briefcase entry URLs from configured
-origins. `assigned_by` always comes from the verified actor, and the assignee
-must be an active Carbon or Silicon in the same organization.
+and `attachments` are optional; status defaults to `yet_to_do`. Attachments are
+unique canonical absolute HTTPS URLs from any image provider. They may contain
+a query string, but cannot contain credentials, a fragment, surrounding
+whitespace, control characters, or a non-default port, and are limited to 2,048
+bytes. `assigned_by` always comes from the verified actor, and the assignee must
+be an active Carbon or Silicon in the same organization.
 
 ### `GET /todos/{todo_id}`
 
 Returns an organization-visible todo by UUID, including its public assignee ID,
-assigner actor reference, status, permanent attachment URLs, and timestamps.
+assigner actor reference, status, canonical attachment URLs, and timestamps.
 
 ### `PATCH /todos/{todo_id}`
 
 Replaces one or more of `title`, `description`, `assigned_to`, `status`, or the
 complete `attachments` set. `description: null` clears the description. An empty
 patch is rejected. A meaningful delegated-todo change creates an outbox event
-for the assigning Silicon in the same transaction.
+for the assigning Silicon in the same transaction only when that Silicon has a
+webhook and the effective notification rule selects the change.
 
 ### `DELETE /todos/{todo_id}`
 
@@ -169,6 +179,96 @@ accepts `cursor` and `limit` and returns `items` plus nullable `next_cursor`.
 Appends a non-empty `body`. The author is the represented actor. This operation
 requires an idempotency key and emits the same delegated-todo notification class
 as a todo change when applicable.
+
+## Silicon notification settings
+
+Notification configuration consists of one optional Hook destination and an
+optional list-wide delegated-todo rule. The two are independent: a Silicon may
+store a destination before subscribing, or retain a subscription while its
+destination is disabled. No notification event is created unless both a
+destination and an effective matching rule exist at mutation time.
+
+A webhook must be the authenticated Silicon's canonical Hook public ingress:
+`https://{host}/silicon/{silicon_id}/{endpoint_key}`. The endpoint key is
+exactly six uppercase hexadecimal characters. The URL cannot contain
+credentials, a query, a fragment, a non-default port, a localhost authority, or
+a non-public literal address. The path's encoded Silicon segment must represent
+the authenticated Silicon exactly. Commit stores no endpoint signing secret.
+
+Rules use one of these scopes:
+
+- `any_update` selects a meaningful todo patch, note append, or deletion;
+- `status_updates` selects only an actual todo status transition; and
+- `specific_statuses` selects only a transition into one of its non-empty,
+  unique `statuses`.
+
+The only selectable statuses are `completed`, `canceled`, `in_progress`,
+`blocked`, and `yet_to_do`. `failed` is not a Commit todo state. Creation,
+idempotent replay, and a no-op replacement do not produce an event.
+
+### `GET /notification-settings`
+
+Returns the authenticated Silicon's complete settings and a strong `ETag`.
+When no settings have been persisted, the response is the virtual resource:
+
+```json
+{
+  "webhook_url": null,
+  "todo_list_subscription": null,
+  "version": 0,
+  "updated_at": null
+}
+```
+
+Its ETag is `"0"`. Carbons receive `403`.
+
+### `PUT /notification-settings`
+
+Completely replaces the Silicon's settings. Both `webhook_url` and
+`todo_list_subscription` are required in the JSON document and each may be
+`null`. Send exactly one strong, quoted, canonical non-negative integer
+`If-Match`; use `"0"` for the virtual resource. A successful change advances
+the version once and returns its ETag. A stale request returns `409`, except an
+exact stale retry whose desired settings already match returns the current
+representation without another version advance.
+
+For example, this enables list-wide status notifications:
+
+```json
+{
+  "webhook_url": "https://hook.example/silicon/reviewer/A1B2C3",
+  "todo_list_subscription": { "scope": "status_updates" }
+}
+```
+
+Setting `todo_list_subscription` to `null` unsubscribes list-wide. Setting
+`webhook_url` to `null` disables delivery.
+
+### `GET /todos/{todo_id}/notification-subscription`
+
+Returns the authenticated assigning Silicon's override resource and ETag for
+one active delegated todo. A missing resource is represented as
+`subscription: null`, version zero, `updated_at: null`, and ETag `"0"`. Carbons,
+other Silicons, self-assigned todos, deleted todos, and unknown todos cannot be
+used to access another destination's rule.
+
+### `PUT /todos/{todo_id}/notification-subscription`
+
+Completely replaces the override using the same `If-Match` and stale-retry
+rules as Silicon-level settings. The JSON document must contain
+`subscription`. A non-null rule is exclusive for this todo: if it does not
+match a change, Commit does not fall back to the list-wide rule. Sending
+`{"subscription": null}` retains the resource version as an unsubscribe
+tombstone but removes the active override, so later mutations fall back to the
+current list-wide rule.
+
+Only todos whose `assigned_by` actor is a Silicon and whose `assigned_to` actor
+differs are notification-eligible. Patch eligibility uses the resulting
+assignment; notes and deletion use the locked current assignment. Personal
+todo creation is deliberately excluded because the assigning Silicon already
+knows it created the work. Personal todos have no subtodo resource in v1;
+project tasks and their nested subtasks are separate, unassigned project work
+and do not enter this notification flow.
 
 ## Projects
 
@@ -264,31 +364,42 @@ second statement; another completion attempt returns a conflict.
 
 ## Attachments
 
+Todo attachment storage is provider-neutral. Creating or updating a todo only
+validates and canonicalizes each HTTPS URL; it does not contact the provider.
+The Briefcase allowlist is used solely to classify URLs for temporary access.
+
 ### `POST /attachments/temporary-url`
 
-Accepts a stored permanent Briefcase `permanent_url` and returns a short-lived
-`url` and `expires_at`. The permanent URL must currently belong to a visible,
-non-deleted todo in the caller's organization. Commit asks IAM for a new proof
-bound to Briefcase, the temporary-URL action, and the entry UUID; it never
-forwards an incoming credential to Briefcase. This operation requires bearer
-authentication until IAM supports child delegation from OBO. Uploading bytes is
-out of scope.
+Accepts a stored attachment as `permanent_url` and returns a short-lived `url`
+and `expires_at` only when it is a canonical Briefcase entry. The URL must
+currently belong to a visible, non-deleted todo in the caller's organization
+and match the exact `/entries/{uuid}` resource path beneath a configured
+Briefcase base. A generic external-provider URL returns `422` before Commit
+contacts IAM or Briefcase. Commit asks IAM for a new proof bound to Briefcase,
+the temporary-URL action, and the entry UUID; it never forwards an incoming
+credential to Briefcase. This operation requires bearer authentication until
+IAM supports child delegation from OBO. Uploading bytes is out of scope.
 
 ## Durable notification flow
 
 ```text
-delegated todo changes
-  -> domain change, audit record, and event commit together
+eligible delegated todo change matches its effective subscription
+  -> domain change, audit record, event, and routing snapshot commit together
   -> worker leases event
-  -> internal Hook ingress receives versioned, deduplicatable event
-  -> Hook routes to the assigning Silicon
+  -> internal Hook ingress receives the versioned, deduplicatable event
+     and its snapshotted destination
+  -> Hook delivers to the assigning Silicon's public endpoint
 ```
 
 Delivery is at least once. Failures retry with capped exponential backoff and
 eventually dead-letter without rolling back the already-committed todo change.
 Each immutable event retains the originating `X-Request-ID`; the worker sends
 it to Hook as `trace_id` on every retry and uses the event UUID as Hook's
-`Idempotency-Key`.
+`Idempotency-Key`. Payload version 2 also freezes the webhook URL, destination
+settings version, effective list-or-todo source, scope, and subscription
+version selected in the mutation transaction. Later destination changes or
+unsubscription affect future mutations only; they do not redirect or cancel a
+queued event.
 
 ## Deliberate v1 omissions
 

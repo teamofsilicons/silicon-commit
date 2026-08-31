@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Silicon Commit API
   version: 0.1.0
-  description: Authenticated, organization-visible work management for Carbon and Silicon todos and Silicon-managed projects.
+  description: Authenticated, organization-visible work management and Silicon-owned delegated-todo notifications for Carbon and Silicon todos and Silicon-managed projects.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -15,6 +15,8 @@ security:
 tags:
   - name: Operations
     description: Public build metadata for deployment verification.
+  - name: Notifications
+    description: Silicon-owned Hook destination and delegated-todo subscriptions.
   - name: Todos
     description: Personal and delegated organization-visible work.
   - name: Projects
@@ -24,7 +26,7 @@ tags:
   - name: Project Work
     description: Project tasks, blockers, updates, and completion.
   - name: Attachments
-    description: Temporary access to permanent Briefcase attachments.
+    description: Provider-neutral attachment references and Briefcase-only temporary access.
 paths:
   /version:
     get:
@@ -44,6 +46,55 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Version' }
         '400': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
+  /notification-settings:
+    get:
+      tags: [Notifications]
+      summary: Get the authenticated Silicon's notification settings
+      operationId: getNotificationSettings
+      description: Returns virtual version zero when the authenticated Silicon has never persisted settings. Carbons are forbidden.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Complete optional Hook destination and list-wide subscription.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            ETag: { $ref: '#/components/headers/NotificationETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationSettings' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+    put:
+      tags: [Notifications]
+      summary: Replace the authenticated Silicon's notification settings
+      operationId: replaceNotificationSettings
+      description: Complete optimistic-concurrency replacement. Both nullable properties must be sent explicitly.
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/NotificationIfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationSettingsUpdate' }
+      responses:
+        '200':
+          description: Current settings after replacement or an exact stale retry.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            ETag: { $ref: '#/components/headers/NotificationETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationSettings' }
+        '409': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
         default: { $ref: '#/components/responses/Error' }
   /todos:
     get:
@@ -136,7 +187,7 @@ paths:
                 description: { $ref: '#/components/schemas/NullableDescriptionText' }
                 assigned_to: { $ref: '#/components/schemas/ActorId' }
                 status: { $ref: '#/components/schemas/TodoStatus' }
-                attachments: { type: array, maxItems: 20, uniqueItems: true, items: { $ref: '#/components/schemas/PermanentAttachmentUrl' } }
+                attachments: { type: array, maxItems: 20, uniqueItems: true, items: { $ref: '#/components/schemas/AttachmentUrl' } }
       responses:
         '200':
           description: Updated todo.
@@ -203,6 +254,54 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Note' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+  /todos/{todo_id}/notification-subscription:
+    parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/TodoId'
+    get:
+      tags: [Notifications]
+      summary: Get the authenticated Silicon's todo-specific subscription
+      operationId: getTodoNotificationSubscription
+      description: Available only to the Silicon which assigned this active delegated todo. Returns virtual version zero when no override resource exists.
+      responses:
+        '200':
+          description: Todo-specific override; a null subscription falls back to the current list-wide rule.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            ETag: { $ref: '#/components/headers/NotificationETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TodoNotificationSubscription' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
+    put:
+      tags: [Notifications]
+      summary: Replace the authenticated Silicon's todo-specific subscription
+      operationId: replaceTodoNotificationSubscription
+      description: Complete optimistic-concurrency replacement. A non-null rule exclusively overrides the list rule; null removes the active override and restores list-rule fallback.
+      parameters:
+        - $ref: '#/components/parameters/NotificationIfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TodoNotificationSubscriptionUpdate' }
+      responses:
+        '200':
+          description: Current todo-specific resource after replacement or an exact stale retry.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            ETag: { $ref: '#/components/headers/NotificationETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TodoNotificationSubscription' }
+        '409': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
         default: { $ref: '#/components/responses/Error' }
   /projects:
@@ -477,13 +576,13 @@ paths:
       tags: [Attachments]
       summary: Create an attachment temporary URL
       operationId: createAttachmentTemporaryUrl
-      description: Bearer-only until IAM publishes child delegation from an incoming OBO proof.
+      description: Bearer-only until IAM publishes child delegation from an incoming OBO proof. The URL must already be attached to a visible active todo and classify as a canonical entry under a configured Briefcase base; other provider URLs return 422 without contacting IAM or Briefcase.
       security:
         - bearerAuth: []
       parameters:
         - $ref: '#/components/parameters/OrgId'
         - $ref: '#/components/parameters/RequestId'
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], additionalProperties: false, properties: { permanent_url: { $ref: '#/components/schemas/PermanentAttachmentUrl' } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], additionalProperties: false, properties: { permanent_url: { $ref: '#/components/schemas/AttachmentUrl' } } } } } }
       responses:
         '201':
           description: Briefcase temporary URL.
@@ -493,6 +592,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TemporaryUrl' }
+        '422': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
         default: { $ref: '#/components/responses/Error' }
 components:
@@ -507,6 +607,7 @@ components:
     ProjectId: { name: project_id, in: path, required: true, description: 'Project UUID or exact stable UID, bounded to 2,048 UTF-8 bytes. Bare slugs are not accepted; percent-encode a UID as exactly one path segment.', schema: { type: string, maxLength: 2048 } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: true, description: Opaque case-sensitive replay key containing visible ASCII only., schema: { type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]+$' } }
     IfMatch: { name: If-Match, in: header, required: true, description: Strong quoted ETag containing the last observed positive diary version., schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+    NotificationIfMatch: { name: If-Match, in: header, required: true, description: 'One strong quoted canonical non-negative notification-resource version. Send "0" to create from the virtual absent resource.', schema: { type: string, pattern: '^"(?:0|[1-9][0-9]*)"$' } }
     Cursor: { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 1024 } }
     Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
   responses:
@@ -534,6 +635,7 @@ components:
     IdempotencyReplayed: { description: Whether this exact response was replayed from durable idempotency state., schema: { type: boolean } }
     Location: { description: Absolute canonical URL of the created resource., schema: { type: string, format: uri } }
     ETag: { description: Strong quoted diary version., schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
+    NotificationETag: { description: Strong quoted canonical non-negative notification-resource version., schema: { type: string, pattern: '^"(?:0|[1-9][0-9]*)"$' } }
     RetryAfter: { description: Minimum whole seconds before retrying a rate-limited request., schema: { type: integer, minimum: 1 } }
     WwwAuthenticate: { description: Present on 401 responses to advertise bearer authentication., schema: { type: string, const: Bearer } }
   schemas:
@@ -590,17 +692,88 @@ components:
       maxLength: 255
       pattern: '^(?=[\s\S]*\S)[^\u0000-\u001F\u007F-\u009F]*$'
       description: Nonblank public IAM organization identifier. Raw surrounding whitespace counts toward the limit and is trimmed; control characters are forbidden.
-    PermanentAttachmentUrl:
+    AttachmentUrl:
       type: string
       format: uri
       maxLength: 2048
-      description: Canonical permanent HTTPS Briefcase entry URL from an allowlisted origin.
+      pattern: '^https://'
+      description: Canonical absolute HTTPS URL from any image provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed.
     ActorRef:
       type: object
       required: [type, id]
       additionalProperties: false
       properties: { type: { type: string, enum: [carbon, silicon] }, id: { $ref: '#/components/schemas/ActorId' } }
     TodoStatus: { type: string, enum: [completed, canceled, in_progress, blocked, yet_to_do] }
+    NotificationRule:
+      description: A normalized delegated-todo event rule. `specific_statuses` matches transitions into one of the listed existing todo states.
+      oneOf:
+        - type: object
+          required: [scope]
+          additionalProperties: false
+          properties:
+            scope: { type: string, enum: [any_update, status_updates] }
+            statuses: { type: array, maxItems: 0, uniqueItems: true, default: [], items: { $ref: '#/components/schemas/TodoStatus' } }
+        - type: object
+          required: [scope, statuses]
+          additionalProperties: false
+          properties:
+            scope: { type: string, const: specific_statuses }
+            statuses: { type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: { $ref: '#/components/schemas/TodoStatus' } }
+    WebhookUrl:
+      type: string
+      format: uri
+      maxLength: 2048
+      pattern: '^https://[^/?#@]+/silicon/[^/?#]+/[0-9A-F]{6}$'
+      description: Canonical actor-bound Silicon Hook public ingress URL. The Silicon path segment must equal the authenticated Silicon ID; credentials, query, fragment, non-default port, localhost, and non-public literal addresses are forbidden.
+    NotificationSettingsUpdate:
+      type: object
+      required: [webhook_url, todo_list_subscription]
+      additionalProperties: false
+      properties:
+        webhook_url:
+          oneOf:
+            - $ref: '#/components/schemas/WebhookUrl'
+            - type: 'null'
+        todo_list_subscription:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationRule'
+            - type: 'null'
+    NotificationSettings:
+      type: object
+      required: [webhook_url, todo_list_subscription, version, updated_at]
+      additionalProperties: false
+      properties:
+        webhook_url:
+          oneOf:
+            - $ref: '#/components/schemas/WebhookUrl'
+            - type: 'null'
+        todo_list_subscription:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationRule'
+            - type: 'null'
+        version: { type: integer, format: int64, minimum: 0 }
+        updated_at: { type: [string, 'null'], format: date-time, description: Null only for the virtual version-zero resource. }
+    TodoNotificationSubscriptionUpdate:
+      type: object
+      required: [subscription]
+      additionalProperties: false
+      properties:
+        subscription:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationRule'
+            - type: 'null'
+    TodoNotificationSubscription:
+      type: object
+      required: [todo_id, subscription, version, updated_at]
+      additionalProperties: false
+      properties:
+        todo_id: { type: string, format: uuid }
+        subscription:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationRule'
+            - type: 'null'
+        version: { type: integer, format: int64, minimum: 0 }
+        updated_at: { type: [string, 'null'], format: date-time, description: Null only for the virtual version-zero resource. }
     TodoCreate:
       type: object
       required: [title, assigned_to]
@@ -610,7 +783,7 @@ components:
         description: { $ref: '#/components/schemas/NullableDescriptionText' }
         assigned_to: { $ref: '#/components/schemas/ActorId' }
         status: { allOf: [{ $ref: '#/components/schemas/TodoStatus' }], default: yet_to_do }
-        attachments: { type: array, maxItems: 20, uniqueItems: true, default: [], items: { $ref: '#/components/schemas/PermanentAttachmentUrl' } }
+        attachments: { type: array, maxItems: 20, uniqueItems: true, default: [], items: { $ref: '#/components/schemas/AttachmentUrl' } }
     Todo:
       type: object
       required: [id, org_id, title, description, assigned_to, assigned_by, status, attachments, created_at, updated_at]
@@ -623,7 +796,7 @@ components:
         assigned_to: { $ref: '#/components/schemas/ActorId' }
         assigned_by: { $ref: '#/components/schemas/ActorRef' }
         status: { $ref: '#/components/schemas/TodoStatus' }
-        attachments: { type: array, maxItems: 20, uniqueItems: true, items: { $ref: '#/components/schemas/PermanentAttachmentUrl' } }
+        attachments: { type: array, maxItems: 20, uniqueItems: true, items: { $ref: '#/components/schemas/AttachmentUrl' } }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     TodoPage:

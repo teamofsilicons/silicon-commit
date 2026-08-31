@@ -837,3 +837,98 @@ key/container formats (`*.key`, `*.pem`, and `*.p12`). The checked-in
 `.env.example` is the sole exception and contains placeholders only. Runtime
 credentials remain deployment inputs; they are never copied into the OCI image
 or committed as developer-specific configuration.
+
+## D-050 — Attachment storage is provider-neutral; temporary exchange is Briefcase-only
+
+**Status:** Accepted; supersedes D-012
+
+Todo attachments accept canonical absolute HTTPS URLs from any image provider,
+not only configured Briefcase origins. Ingress rejects credentials, fragments,
+control characters, surrounding whitespace, non-default ports, missing hosts,
+and values longer than 2,048 bytes; query strings are permitted because image
+providers commonly use them for stable transformations. Commit stores the
+canonical URL and makes no provider request while creating or updating a todo.
+
+`POST /attachments/temporary-url` remains a deliberately narrower capability.
+The supplied `permanent_url` must be an attachment on a visible active todo and
+must classify as the exact canonical `/entries/{uuid}` resource beneath a
+configured Briefcase base URL. A provider-neutral URL that is not Briefcase is
+rejected as semantic input before IAM child-proof exchange or a Briefcase
+request. Commit still stores no temporary URL and uploading remains outside its
+scope. D-022 continues to govern the Briefcase-audience OBO exchange.
+
+## D-051 — Notification settings are optional, Silicon-owned versioned resources
+
+**Status:** Accepted; supersedes the operation count in D-001 and extends D-034
+
+The authenticated v1 product surface has 24 operations, plus the unauthenticated
+`GET /version` operation. Four self-scoped operations expose Silicon
+notification configuration: `GET` and `PUT /notification-settings`, and `GET`
+and `PUT /todos/{todo_id}/notification-subscription`. Only an authenticated
+Silicon may access its own settings. A per-todo resource is additionally
+available only while the caller is that active delegated todo's assigner;
+organization management authority does not transfer ownership of another
+Silicon's notification destination.
+
+The optional webhook is a canonical actor-bound Hook public ingress URL with
+the exact `/silicon/{authenticated-silicon-id}/{UPPERCASE-HEX-KEY}` shape,
+where the key is six characters. It must use HTTPS and a host, cannot contain
+credentials, a query, a fragment, a non-default port, a localhost authority, or
+a non-public literal address, and cannot identify another Silicon. Commit
+stores the URL but never a Hook endpoint signing secret, and audit summaries
+record only whether one is configured.
+
+Both resource types use complete replacement and optimistic concurrency. An
+absent resource is represented virtually with version zero, `updated_at: null`,
+and `ETag: "0"`; every persisted replacement has a positive integer version.
+`PUT` requires the one canonical strong quoted non-negative integer
+`If-Match`, and nullable properties must be sent explicitly. An exact stale
+retry whose desired configuration already matches returns the current
+representation; another stale write returns `409`.
+
+## D-052 — Per-todo notification rules exclusively override list rules
+
+**Status:** Accepted; clarifies the subscription scope in UNDERSTANDING.md
+
+A Silicon's list-wide rule remains active until explicitly replaced with
+`null`. `any_update` selects a meaningful todo patch, note append, or deletion;
+`status_updates` selects only an actual todo-status transition; and
+`specific_statuses` selects only a transition whose resulting status is in its
+non-empty unique status set. Creation, idempotent replay, and no-op replacement
+do not produce a notification event.
+
+An active non-null per-todo rule is the exclusive rule for that todo. If it
+does not match an event, Commit does not fall back to the list-wide rule. A
+per-todo `subscription: null` is retained as a versioned unsubscribe tombstone
+but semantically removes the override, so future mutations fall back to the
+current list-wide rule. The only selectable statuses are Commit's existing
+todo states: `completed`, `canceled`, `in_progress`, `blocked`, and
+`yet_to_do`; the prose example `failed` does not add an undocumented state.
+
+## D-053 — Notification eligibility and routing are frozen at mutation commit
+
+**Status:** Accepted; supersedes D-015 and D-023, and extends D-034
+
+Commit considers a todo notification only when `assigned_by` is a Silicon and
+the todo is delegated to a different actor. Patches use the resulting
+assignment; notes and deletion use the locked current assignment. A todo's
+creator is not notified of creation. The v1 personal-todo model has no subtodo
+resource; project tasks and their nested subtasks are separate unassigned
+project work and do not participate in delegated-todo notifications.
+
+When an eligible mutation matches an effective rule and the assigning Silicon
+has a webhook, the same database transaction stores payload version 2 plus an
+immutable routing snapshot: canonical webhook URL, notification-settings
+version, list-or-todo source, effective scope, and source-resource version.
+Changing the webhook, replacing a rule, or unsubscribing affects only later
+mutations; it neither redirects nor cancels already durable events. The worker
+continues at-least-once delivery with the event UUID as its idempotency key and
+the original request ID as correlation.
+
+Commit's worker sends that snapshotted destination and rule metadata to one
+service-authenticated Hook ingress and never retains or handles the public
+endpoint's signing secret. The sibling Hook service does not yet publish that
+internal route, so production release remains gated on a compatible ingress
+contract accepting payload version 2. Absence or failure of that route leaves
+the already-committed event retryable or dead-lettered; it does not roll back
+the todo mutation.

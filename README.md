@@ -1,8 +1,8 @@
 # Silicon Commit backend
 
 Silicon Commit is the organization-scoped work manager for Carbons and
-Silicons. It implements the v1 todo, note, project, diary, project-work, and
-Briefcase temporary-URL contract in Rust.
+Silicons. It implements the v1 todo, note, notification-subscription, project,
+diary, project-work, and Briefcase temporary-URL contract in Rust.
 
 The product intent lives in [`UNDERSTANDING.md`](./UNDERSTANDING.md), the HTTP
 contract in [`openapi.yaml`](./openapi.yaml) and [`API_DOCS.md`](./API_DOCS.md),
@@ -25,8 +25,9 @@ authentication and current membership; its local identity projection retains
 stable relationship keys but never grants authority. Before any product data
 access, Commit checks the freshly verified organization and actor against both
 directions of every retained public/internal identity mapping. Todo
-notifications are committed to an outbox with the todo update and delivered to
-Hook at least once.
+notifications that match an assigning Silicon's subscription are committed to
+an outbox with an immutable destination snapshot and delivered to Hook at least
+once.
 
 Claim batch size and outbound Hook concurrency are configured independently;
 the smaller value bounds each leased delivery set so a backlog cannot create
@@ -64,7 +65,7 @@ make test
   request admission and timeout middleware, so a saturated API replica can
   still be observed accurately.
 - `GET /api/v1/version` reports the service build version.
-- The 20 product operations are mounted below `/api/v1` exactly as described
+- The 24 product operations are mounted below `/api/v1` exactly as described
   by `openapi.yaml`.
 
 ## Security model
@@ -78,10 +79,16 @@ make test
 - Organization owners have management authority. IAM admins need explicit
   `commit.todos.manage` or `commit.projects.manage` capabilities.
 - All resource lookups are organization-qualified and return scoped absence.
-- Briefcase URLs are canonical allowlisted permanent entry URLs. Commit obtains
-  a new Briefcase-audience OBO proof; it never forwards incoming credentials.
-  Temporary-URL issuance is bearer-only until IAM supports child delegation
-  from an incoming OBO proof.
+- Todo attachments are canonical HTTPS URLs from any image provider. Only the
+  temporary-URL endpoint classifies configured canonical Briefcase entries;
+  external-provider URLs are rejected before IAM or Briefcase is contacted.
+  Commit obtains a new Briefcase-audience OBO proof and never forwards incoming
+  credentials. Temporary-URL issuance is bearer-only until IAM supports child
+  delegation from an incoming OBO proof.
+- Notification settings belong to the authenticated Silicon. Hook endpoints
+  are optional, actor-bound public ingress URLs; Commit stores no endpoint
+  signing secret. Per-todo rules exclusively override the list rule until a
+  null override restores list-wide fallback.
 - Secrets, authorization headers, bodies, and provider payloads are excluded
   from telemetry.
 
@@ -189,9 +196,11 @@ responses), and note creation all write the link atomically with their response.
 DELETE has no stored response body, while any earlier linked responses continue
 to protect content until they expire.
 
-Delegated-todo events retain the originating request ID in their immutable
-payload. The worker promotes that correlation to Hook's top-level `trace_id`
-on every attempt and uses the stable event UUID as Hook's `Idempotency-Key`, so
+Delegated-todo events retain the originating request ID and the mutation-time
+webhook/rule decision in their immutable payload and routing columns. A later
+unsubscription or webhook replacement affects only future mutations. The
+worker promotes the original correlation to Hook's top-level `trace_id` on
+every attempt and uses the stable event UUID as Hook's `Idempotency-Key`, so
 retries remain both traceable and deduplicatable.
 
 ## Cross-service release gates
@@ -216,8 +225,9 @@ release still requires these contracts from the sibling services:
   OBO-authenticated caller can request a Briefcase temporary URL. Commit rejects
   that path today instead of forwarding or broadening the proof.
 - Hook must publish the authenticated internal event-ingress contract configured
-  by `COMMIT_HOOK_PUBLISH_URL`. Outbox events remain durable when it is absent or
-  unavailable.
+  by `COMMIT_HOOK_PUBLISH_URL`, including payload-version-2 snapshotted webhook
+  and subscription-routing metadata. Outbox events remain durable when it is
+  absent or unavailable.
 
 These dependencies are also captured, without credentials or implementation
 guesswork, in [`decisions.md`](./decisions.md).
