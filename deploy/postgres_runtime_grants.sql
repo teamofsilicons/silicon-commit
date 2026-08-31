@@ -139,7 +139,9 @@ REVOKE ALL
             commit.project_entry_type,
             commit.blocker_status,
             commit.todo_activity_type,
-            commit.outbox_status
+            commit.outbox_status,
+            commit.notification_scope,
+            commit.notification_subscription_level
     FROM :"api_role", :"worker_role";
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA commit FROM :"api_role", :"worker_role";
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA commit_private FROM :"api_role", :"worker_role";
@@ -153,7 +155,9 @@ GRANT SELECT, INSERT, UPDATE
     ON TABLE commit.todos,
              commit.projects,
              commit.project_diaries,
-             commit.project_tasks
+             commit.project_tasks,
+             commit.silicon_notification_settings,
+             commit.todo_notification_subscriptions
     TO :"api_role";
 GRANT SELECT, INSERT, DELETE
     ON TABLE commit.todo_attachments
@@ -231,7 +235,9 @@ GRANT USAGE
             commit.project_entry_type,
             commit.blocker_status,
             commit.todo_activity_type,
-            commit.outbox_status
+            commit.outbox_status,
+            commit.notification_scope,
+            commit.notification_subscription_level
     TO :"api_role", :"worker_role";
 
 COMMIT;

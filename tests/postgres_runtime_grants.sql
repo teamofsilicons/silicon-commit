@@ -15,7 +15,24 @@ SELECT has_schema_privilege(:'api_role', 'commit', 'USAGE')
        AND NOT has_schema_privilege(:'api_role', 'public', 'USAGE')
        AND has_table_privilege(:'api_role', 'commit.todos', 'SELECT')
        AND has_table_privilege(:'api_role', 'commit.projects', 'SELECT')
+       AND has_table_privilege(
+           :'api_role',
+           'commit.silicon_notification_settings',
+           'SELECT, INSERT, UPDATE'
+       )
+       AND has_table_privilege(
+           :'api_role',
+           'commit.todo_notification_subscriptions',
+           'SELECT, INSERT, UPDATE'
+       )
+       AND has_table_privilege(:'api_role', 'commit.outbox_events', 'INSERT')
        AND NOT has_table_privilege(:'api_role', 'commit.outbox_events', 'UPDATE')
+       AND has_type_privilege(:'api_role', 'commit.notification_scope', 'USAGE')
+       AND has_type_privilege(
+           :'api_role',
+           'commit.notification_subscription_level',
+           'USAGE'
+       )
        AND NOT has_schema_privilege(:'api_role', 'commit_private', 'USAGE')
        AS api_grants_match
 \gset
@@ -52,6 +69,28 @@ SELECT has_schema_privilege(:'worker_role', 'commit', 'USAGE')
            'commit.outbox_events',
            'updated_at',
            'UPDATE'
+       )
+       AND NOT has_column_privilege(
+           :'worker_role',
+           'commit.outbox_events',
+           'webhook_url',
+           'UPDATE'
+       )
+       AND NOT has_table_privilege(
+           :'worker_role',
+           'commit.silicon_notification_settings',
+           'SELECT'
+       )
+       AND NOT has_table_privilege(
+           :'worker_role',
+           'commit.todo_notification_subscriptions',
+           'SELECT'
+       )
+       AND has_type_privilege(:'worker_role', 'commit.notification_scope', 'USAGE')
+       AND has_type_privilege(
+           :'worker_role',
+           'commit.notification_subscription_level',
+           'USAGE'
        )
        AND NOT has_table_privilege(:'worker_role', 'commit.todos', 'SELECT')
        AND NOT has_column_privilege(:'worker_role', 'commit.todos', 'title', 'UPDATE')
@@ -130,6 +169,8 @@ BEGIN;
 SET LOCAL ROLE :"api_role";
 SET LOCAL search_path TO commit, pg_catalog;
 SELECT count(*) FROM commit.todos;
+SELECT count(*) FROM commit.silicon_notification_settings;
+SELECT count(*) FROM commit.todo_notification_subscriptions;
 ROLLBACK;
 
 BEGIN;
@@ -151,10 +192,24 @@ SET LOCAL ROLE :"worker_role";
 UPDATE commit.todo_activity SET changes = '{}'::jsonb WHERE false;
 \set worker_activity_update_sqlstate :SQLSTATE
 ROLLBACK;
+
+BEGIN;
+SET LOCAL ROLE :"worker_role";
+SELECT count(*) FROM commit.silicon_notification_settings;
+\set worker_notification_settings_select_sqlstate :SQLSTATE
+ROLLBACK;
+
+BEGIN;
+SET LOCAL ROLE :"worker_role";
+UPDATE commit.outbox_events SET webhook_url = webhook_url WHERE false;
+\set worker_routing_snapshot_update_sqlstate :SQLSTATE
+ROLLBACK;
 \set ON_ERROR_STOP on
 
 SELECT :'worker_todo_update_sqlstate' = '42501'
        AND :'worker_activity_update_sqlstate' = '42501'
+       AND :'worker_notification_settings_select_sqlstate' = '42501'
+       AND :'worker_routing_snapshot_update_sqlstate' = '42501'
        AS worker_direct_content_mutation_denied
 \gset
 
