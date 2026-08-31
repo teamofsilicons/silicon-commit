@@ -1,0 +1,8 @@
+/target/
+.env*
+!.env.example
+*.key
+*.p12
+*.pem
+.DS_Store
+*.log
