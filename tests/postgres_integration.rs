@@ -5,7 +5,7 @@ use std::{
     env,
     num::{NonZeroU32, NonZeroUsize},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -163,6 +163,24 @@ impl IdentityProvider for TestDirectory {
 struct AttachmentDependencyProbe {
     iam_calls: AtomicUsize,
     briefcase_calls: AtomicUsize,
+    child_proof_requests: Mutex<Vec<ChildProofRequest>>,
+    briefcase_requests: Mutex<Vec<(PublicOrganizationId, String)>>,
+}
+
+impl AttachmentDependencyProbe {
+    fn child_proof_requests(&self) -> Vec<ChildProofRequest> {
+        self.child_proof_requests.lock().map_or_else(
+            |poisoned| poisoned.into_inner().clone(),
+            |requests| requests.clone(),
+        )
+    }
+
+    fn briefcase_requests(&self) -> Vec<(PublicOrganizationId, String)> {
+        self.briefcase_requests.lock().map_or_else(
+            |poisoned| poisoned.into_inner().clone(),
+            |requests| requests.clone(),
+        )
+    }
 }
 
 #[async_trait]
@@ -186,10 +204,19 @@ impl IdentityProvider for AttachmentDependencyProbe {
     async fn exchange_child_proof(
         &self,
         _actor: &VerifiedActor,
-        _request: &ChildProofRequest,
+        request: &ChildProofRequest,
     ) -> Result<DelegatedOboProof, ProviderError> {
         self.iam_calls.fetch_add(1, Ordering::Relaxed);
-        Err(ProviderError::Unavailable)
+        self.child_proof_requests
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .push(request.clone());
+        DelegatedOboProof::new(
+            "commit-test".to_owned(),
+            SecretString::from("delegated-test-proof"),
+            OffsetDateTime::now_utc() + Duration::from_secs(300),
+        )
+        .map_err(|_| ProviderError::InvalidResponse)
     }
 }
 
@@ -197,12 +224,20 @@ impl IdentityProvider for AttachmentDependencyProbe {
 impl BriefcaseProvider for AttachmentDependencyProbe {
     async fn temporary_url(
         &self,
-        _org_id: &PublicOrganizationId,
-        _attachment: &BriefcaseAttachmentUrl,
+        org_id: &PublicOrganizationId,
+        attachment: &BriefcaseAttachmentUrl,
         _proof: &DelegatedOboProof,
     ) -> Result<TemporaryUrl, ProviderError> {
         self.briefcase_calls.fetch_add(1, Ordering::Relaxed);
-        Err(ProviderError::Unavailable)
+        self.briefcase_requests
+            .lock()
+            .map_err(|_| ProviderError::Unavailable)?
+            .push((org_id.clone(), attachment.as_str().to_owned()));
+        Ok(TemporaryUrl {
+            url: Url::parse("https://cdn.briefcase.example/render/test?signature=opaque")
+                .map_err(|_| ProviderError::InvalidResponse)?,
+            expires_at: OffsetDateTime::now_utc() + Duration::from_secs(3_600),
+        })
     }
 }
 
@@ -594,9 +629,10 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
         )
         .await?;
     assert_eq!(notification_settings.version.get(), 1);
+    let attachment_id = Uuid::new_v4();
     let attachment = format!(
         "https://briefcase.example/api/v1/entries/{}",
-        Uuid::new_v4().hyphenated()
+        attachment_id.hyphenated()
     );
     let external_attachment = format!(
         "https://images.example/assets/{}.png?variant=large",
@@ -649,7 +685,7 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     .await?;
     assert_eq!(
         stored_attachments,
-        vec![attachment, external_attachment.clone()]
+        vec![attachment.clone(), external_attachment.clone()]
     );
 
     let dependency_probe = Arc::new(AttachmentDependencyProbe::default());
@@ -672,6 +708,56 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     ));
     assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 0);
     assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 0);
+
+    let temporary_url = attachment_service
+        .temporary_url(
+            &assigner,
+            TemporaryUrlRequest {
+                permanent_url: AttachmentUrl::new(&attachment)?,
+            },
+        )
+        .await?;
+    assert_eq!(
+        temporary_url.url.as_str(),
+        "https://cdn.briefcase.example/render/test?signature=opaque"
+    );
+    assert!(temporary_url.expires_at > OffsetDateTime::now_utc());
+    assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        dependency_probe.child_proof_requests(),
+        vec![ChildProofRequest::briefcase_temporary_url(attachment_id)]
+    );
+    assert_eq!(
+        dependency_probe.briefcase_requests(),
+        vec![(organization.public_id.clone(), attachment.clone())]
+    );
+
+    let unattached_briefcase_url = format!(
+        "https://briefcase.example/api/v1/entries/{}",
+        Uuid::new_v4().hyphenated()
+    );
+    let unattached = attachment_service
+        .temporary_url(
+            &assigner,
+            TemporaryUrlRequest {
+                permanent_url: AttachmentUrl::new(&unattached_briefcase_url)?,
+            },
+        )
+        .await;
+    assert!(matches!(unattached, Err(AppError::NotFound)));
+
+    let cross_organization = attachment_service
+        .temporary_url(
+            &other_tenant_actor,
+            TemporaryUrlRequest {
+                permanent_url: AttachmentUrl::new(&attachment)?,
+            },
+        )
+        .await;
+    assert!(matches!(cross_organization, Err(AppError::NotFound)));
+    assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 1);
     let initial_projection_versions = sqlx::query_as::<_, (i64, i64, i64)>(
         r"
         SELECT organization.xmin::text::bigint,
