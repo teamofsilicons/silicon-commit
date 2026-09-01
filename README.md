@@ -81,10 +81,12 @@ make test
 - All resource lookups are organization-qualified and return scoped absence.
 - Todo attachments are canonical HTTPS URLs from any image provider. Only the
   temporary-URL endpoint classifies configured canonical Briefcase entries;
-  external-provider URLs are rejected before IAM or Briefcase is contacted.
-  Commit obtains a new Briefcase-audience OBO proof and never forwards incoming
-  credentials. Temporary-URL issuance is bearer-only until IAM supports child
-  delegation from an incoming OBO proof.
+  external-provider URLs round-trip in todo representations for direct client
+  rendering. Temporary-URL requests are authenticated normally, then a
+  non-Briefcase URL is rejected before any IAM child-proof exchange or
+  Briefcase call. Commit obtains a new Briefcase-audience OBO proof and never
+  forwards incoming credentials. Temporary-URL issuance is bearer-only until
+  IAM supports child delegation from an incoming OBO proof.
 - Notification settings belong to the authenticated Silicon. Hook endpoints
   are optional, actor-bound public ingress URLs; Commit stores no endpoint
   signing secret. Per-todo rules exclusively override the list rule until a

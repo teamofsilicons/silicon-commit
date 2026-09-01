@@ -366,7 +366,10 @@ second statement; another completion attempt returns a conflict.
 
 Todo attachment storage is provider-neutral. Creating or updating a todo only
 validates and canonicalizes each HTTPS URL; it does not contact the provider.
-The Briefcase allowlist is used solely to classify URLs for temporary access.
+Todo representations return those canonical permanent references. Clients use
+external-provider URLs directly when rendering; Commit does not fetch or proxy
+them. The Briefcase allowlist is used solely to classify URLs whose rendering
+requires temporary access.
 
 ### `POST /attachments/temporary-url`
 
@@ -374,11 +377,13 @@ Accepts a stored attachment as `permanent_url` and returns a short-lived `url`
 and `expires_at` only when it is a canonical Briefcase entry. The URL must
 currently belong to a visible, non-deleted todo in the caller's organization
 and match the exact `/entries/{uuid}` resource path beneath a configured
-Briefcase base. A generic external-provider URL returns `422` before Commit
-contacts IAM or Briefcase. Commit asks IAM for a new proof bound to Briefcase,
-the temporary-URL action, and the entry UUID; it never forwards an incoming
-credential to Briefcase. This operation requires bearer authentication until
-IAM supports child delegation from OBO. Uploading bytes is out of scope.
+Briefcase base. This is not a general-purpose URL resolver: a generic
+external-provider URL returns `422` after normal request authentication but
+before an IAM child-proof exchange or Briefcase call. Commit asks IAM for a new
+proof bound to Briefcase, the temporary-URL action, and the entry UUID; it never
+forwards an incoming credential to Briefcase. This operation requires bearer
+authentication until IAM supports child delegation from OBO. Uploading bytes is
+out of scope.
 
 ## Durable notification flow
 

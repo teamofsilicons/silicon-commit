@@ -848,14 +848,18 @@ control characters, surrounding whitespace, non-default ports, missing hosts,
 and values longer than 2,048 bytes; query strings are permitted because image
 providers commonly use them for stable transformations. Commit stores the
 canonical URL and makes no provider request while creating or updating a todo.
+Todo representations return that stored canonical reference. Clients render an
+external-provider URL directly; Commit neither fetches nor proxies it.
 
 `POST /attachments/temporary-url` remains a deliberately narrower capability.
 The supplied `permanent_url` must be an attachment on a visible active todo and
 must classify as the exact canonical `/entries/{uuid}` resource beneath a
 configured Briefcase base URL. A provider-neutral URL that is not Briefcase is
-rejected as semantic input before IAM child-proof exchange or a Briefcase
-request. Commit still stores no temporary URL and uploading remains outside its
-scope. D-022 continues to govern the Briefcase-audience OBO exchange.
+rejected as semantic input after normal Commit request authentication but before
+IAM child-proof exchange or a Briefcase request. The operation is not a generic
+resolver for external URLs. Commit still stores no temporary URL and uploading
+remains outside its scope. D-022 continues to govern the Briefcase-audience OBO
+exchange.
 
 ## D-051 — Notification settings are optional, Silicon-owned versioned resources
 

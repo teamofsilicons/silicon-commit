@@ -32,6 +32,10 @@ For todo's it's also possible to attach attachments to the said todo, attachment
 The attachment url can be an attachment url to any image provider, and also to silicon briefcase, the backend has an endpoint to generate temporary url for silicon briefcase:
 Refer to [../silicon-briefcase/understanding.md/]. You don't need to include support for upload, just support for temporary url generation.
 
+There must be endpoints in backend for generating the said temporary link.
+
+The attachment link can also be link other than the link to silicon-briefcase. We just have support for silicon-briefcase so temporary link generation endpoint for that case. Otherwise it would just be rendered in place. 
+
 ### Todo Status
 
 Each todo can be in multiple states: completed, canceled, in progress, blocked, yet to do. 

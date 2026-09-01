@@ -576,7 +576,7 @@ paths:
       tags: [Attachments]
       summary: Create an attachment temporary URL
       operationId: createAttachmentTemporaryUrl
-      description: Bearer-only until IAM publishes child delegation from an incoming OBO proof. The URL must already be attached to a visible active todo and classify as a canonical entry under a configured Briefcase base; other provider URLs return 422 without contacting IAM or Briefcase.
+      description: Bearer-only until IAM publishes child delegation from an incoming OBO proof. The URL must already be attached to a visible active todo and classify as a canonical entry under a configured Briefcase base. Other provider URLs are rendered directly from todo representations and return 422 here after normal request authentication but before IAM child-proof exchange or a Briefcase call.
       security:
         - bearerAuth: []
       parameters:
@@ -697,7 +697,7 @@ components:
       format: uri
       maxLength: 2048
       pattern: '^https://'
-      description: Canonical absolute HTTPS URL from any image provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed.
+      description: Canonical absolute HTTPS URL from any image provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed. Todo representations return the stored canonical value, and clients render non-Briefcase URLs directly.
     ActorRef:
       type: object
       required: [type, id]
@@ -905,7 +905,17 @@ components:
       type: object
       required: [url, expires_at]
       additionalProperties: false
-      properties: { url: { type: string, format: uri }, expires_at: { type: string, format: date-time } }
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 8192
+          pattern: '^https://'
+          description: Short-lived HTTPS delivery URL. Credentials, fragments, and non-default ports are rejected; an opaque query string is allowed.
+        expires_at:
+          type: string
+          format: date-time
+          description: Future provider expiry no later than twelve hours when Commit receives the response.
     Error:
       type: object
       required: [error]
