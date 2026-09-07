@@ -8,6 +8,8 @@ ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
 COPY src ./src
+COPY client ./client
+COPY cli ./cli
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
