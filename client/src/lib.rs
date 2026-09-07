@@ -106,9 +106,9 @@ impl Mutation {
     }
     pub fn with_key(key: impl Into<String>) -> Result<Self, Error> {
         let key = key.into();
-        if !(16..=255).contains(&key.len()) || !key.bytes().all(|b| b.is_ascii_graphic()) {
+        if !(8..=255).contains(&key.len()) || !key.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(Error::Invalid(
-                "idempotency key must be 16–255 visible ASCII characters",
+                "idempotency key must be 8–255 visible ASCII characters",
             ));
         }
         Ok(Self { key, version: None })
@@ -225,7 +225,12 @@ impl Client {
             .await
     }
     pub async fn version(&self) -> Result<Value, Error> {
-        self.get(&["version"], &[]).await
+        // `/version` is intentionally public; do not disclose caller context.
+        let mut public = self.clone();
+        public.bearer = None;
+        public.org_id = None;
+        public.test_key = None;
+        public.get(&["version"], &[]).await
     }
     pub async fn login_with_slt(&self, slt: &str) -> Result<SessionTokens, Error> {
         decode(
@@ -434,6 +439,10 @@ impl Client {
         body: &T,
     ) -> Result<Value, Error> {
         self.write(Method::POST, &["test-environments"], body).await
+    }
+    /// GET /api/v1/test-environments/{id}/key.
+    pub async fn retrieve_test_environment_key(&self, id: &str) -> Result<Value, Error> {
+        self.get(&["test-environments", id, "key"], &[]).await
     }
     /// POST /api/v1/test-environments/{id}/rotate.
     pub async fn rotate_test_environment(&self, id: &str) -> Result<Value, Error> {

@@ -112,3 +112,9 @@ async fn malformed_test_keys_and_base_urls_cannot_reach_a_production_route()
     }
     Ok(())
 }
+
+#[test]
+fn mutation_accepts_backend_minimum_idempotency_key_length() {
+    assert!(Mutation::with_key("12345678").is_ok());
+    assert!(Mutation::with_key("1234567").is_err());
+}

@@ -220,13 +220,13 @@ pub async fn run_once(pool: &PgPool, policy: RetentionPolicy) -> anyhow::Result<
     .fetch_one(pool)
     .await?;
     let mut report: RetentionReport = row.try_into()?;
-    let expired = sqlx::query("UPDATE commit.testing_environments SET status='deleted',deleted_at=clock_timestamp(),purge_after=clock_timestamp()+interval '30 days',version=version+1,updated_at=clock_timestamp() WHERE status='active' AND last_activity_at < clock_timestamp()-interval '15 days'").execute(pool).await?.rows_affected();
-    let purged: i64 = sqlx::query_scalar("SELECT commit.purge_testing_environments($1)")
-        .bind(batch_size)
-        .fetch_one(pool)
-        .await?;
-    report.testing_environments_expired = expired;
-    report.testing_environments_purged = u64::try_from(purged)?;
+    let (testing_environments_expired, testing_environments_purged): (i64, i64) =
+        sqlx::query_as("SELECT expired, purged FROM commit.run_testing_environment_retention($1)")
+            .bind(batch_size)
+            .fetch_one(pool)
+            .await?;
+    report.testing_environments_expired = u64::try_from(testing_environments_expired)?;
+    report.testing_environments_purged = u64::try_from(testing_environments_purged)?;
     Ok(report)
 }
 

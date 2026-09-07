@@ -204,6 +204,9 @@ GRANT UPDATE (
 GRANT EXECUTE
     ON FUNCTION commit.run_retention_pass(integer)
     TO :"worker_role";
+GRANT EXECUTE
+    ON FUNCTION commit.run_testing_environment_retention(integer)
+    TO :"worker_role";
 
 -- Future objects remain inaccessible until this explicit table map is updated
 -- and the template is rerun. Default privileges prevent PUBLIC or stale role

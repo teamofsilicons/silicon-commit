@@ -27,6 +27,8 @@ tags:
     description: Project tasks, blockers, updates, and completion.
   - name: Attachments
     description: Provider-neutral attachment references and Briefcase-only temporary access.
+  - name: Testing Environments
+    description: Organization-owned isolated Commit environments linked to IAM testing environments.
 paths:
   /version:
     get:
@@ -46,6 +48,148 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Version' }
         '400': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/login:
+    post:
+      tags: [Operations]
+      summary: Exchange an IAM short-lived token for a Commit session
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slt]
+              additionalProperties: false
+              properties: { slt: { type: string, minLength: 1 } }
+      responses:
+        '200': { description: Session tokens and verified actor context., content: { application/json: { schema: { type: object } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/refresh:
+    post:
+      tags: [Operations]
+      summary: Rotate a Commit refresh token
+      operationId: refreshSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              additionalProperties: false
+              properties: { refresh_token: { type: string, minLength: 1 } }
+      responses:
+        '200': { description: Rotated session tokens., content: { application/json: { schema: { type: object } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/logout:
+    post:
+      tags: [Operations]
+      summary: Revoke a Commit session family
+      operationId: logout
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              additionalProperties: false
+              properties: { token: { type: string, minLength: 1 } }
+      responses:
+        '204': { description: Session family revoked. }
+        default: { $ref: '#/components/responses/Error' }
+  /webhook/:
+    post:
+      tags: [Operations]
+      summary: Receive an authenticated IAM event
+      operationId: receiveIamWebhook
+      security: []
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object } } }
+      responses:
+        '204': { description: Event accepted or already durably recorded. }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments:
+    get:
+      tags: [Testing Environments]
+      summary: List organization testing environments
+      operationId: listTestEnvironments
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      responses:
+        '200': { description: Environment metadata., content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/TestEnvironment' } } } } }
+        default: { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Testing Environments]
+      summary: Create an isolated testing environment
+      operationId: createTestEnvironment
+      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, iam_test_key]
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                description: { type: [string, 'null'], maxLength: 20000 }
+                iam_test_key: { type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$' }
+      responses:
+        '200': { description: Created environment and one-time key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments/{id}/key:
+    get:
+      tags: [Testing Environments]
+      summary: Retrieve the current environment key
+      operationId: getTestEnvironmentKey
+      parameters:
+        - { $ref: '#/components/parameters/OrgId' }
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Current key., content: { application/json: { schema: { type: object, required: [environment_id, key], properties: { environment_id: { type: string, format: uuid }, key: { type: string, pattern: '^[A-Za-z0-9]{32}$' } } } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments/{id}/rotate:
+    post:
+      tags: [Testing Environments]
+      summary: Rotate an environment key
+      operationId: rotateTestEnvironment
+      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Environment with new key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments/{id}/restore:
+    post:
+      tags: [Testing Environments]
+      summary: Restore a deleted environment during its recovery window
+      operationId: restoreTestEnvironment
+      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Restored environment with new key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments/{id}/clean:
+    post:
+      tags: [Testing Environments]
+      summary: Remove all isolated data while retaining the environment
+      operationId: cleanTestEnvironment
+      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Cleaned environment metadata., content: { application/json: { schema: { $ref: '#/components/schemas/TestEnvironment' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments/{id}:
+    delete:
+      tags: [Testing Environments]
+      summary: Soft-delete an environment for 30-day recovery
+      operationId: deleteTestEnvironment
+      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: Deleted environment metadata., content: { application/json: { schema: { $ref: '#/components/schemas/TestEnvironment' } } } }
         default: { $ref: '#/components/responses/Error' }
   /notification-settings:
     get:
@@ -680,6 +824,25 @@ components:
         api_version: { type: string, const: v1 }
         version: { type: string, minLength: 1 }
         commit: { type: string, minLength: 1 }
+    TestEnvironment:
+      type: object
+      required: [environment_id, name, status, version]
+      additionalProperties: false
+      properties:
+        environment_id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 20000 }
+        status: { type: string, enum: [active, deleted] }
+        version: { type: integer, minimum: 1 }
+        deleted_at: { type: [string, 'null'], format: date-time }
+        purge_after: { type: [string, 'null'], format: date-time }
+    CreatedTestEnvironment:
+      allOf:
+        - $ref: '#/components/schemas/TestEnvironment'
+        - type: object
+          required: [key]
+          properties:
+            key: { type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$' }
     ActorId:
       type: string
       minLength: 1

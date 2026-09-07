@@ -12,8 +12,12 @@ use std::{fs, path::PathBuf};
     after_help = "Set COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use. Writes accept --data '<json>' and support --if-match."
 )]
 struct Root {
-    #[arg(long, env = "COMMIT_API_URL", default_value = "http://127.0.0.1:8080")]
-    api_url: String,
+    #[arg(
+        long,
+        env = "COMMIT_API_URL",
+        help = "Commit API origin or /api/v1 URL"
+    )]
+    api_url: Option<String>,
     #[arg(long, env = "COMMIT_ACCESS_TOKEN")]
     token: Option<String>,
     #[arg(long, env = "COMMIT_ORG_ID")]
@@ -67,9 +71,37 @@ struct Login {
     #[arg(long, help = "Print tokens instead of saving them locally")]
     no_save: bool,
 }
+#[derive(Args, Default)]
+struct TodoList {
+    #[arg(long, help = "assigned_to_me, delegated_by_me, or all")]
+    view: Option<String>,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    assigned_to: Option<String>,
+    #[arg(long)]
+    assigned_by: Option<String>,
+    #[arg(long, help = "RFC 3339 lower creation bound")]
+    created_from: Option<String>,
+    #[arg(long, help = "RFC 3339 upper creation bound")]
+    created_to: Option<String>,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+    limit: u16,
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
+#[derive(Args, Clone)]
+struct PageArgs {
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+    limit: u16,
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum TodoCommand {
-    List,
+    List(TodoList),
     Get {
         id: String,
     },
@@ -84,6 +116,8 @@ enum TodoCommand {
     },
     Notes {
         id: String,
+        #[command(flatten)]
+        page: PageArgs,
     },
     AddNote {
         id: String,
@@ -99,9 +133,21 @@ enum TodoCommand {
         data: Data,
     },
 }
+#[derive(Args, Default)]
+struct ProjectList {
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    silicon_id: Option<String>,
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+    limit: u16,
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum ProjectCommand {
-    List,
+    List(ProjectList),
     Get {
         id: String,
     },
@@ -121,6 +167,8 @@ enum ProjectCommand {
     },
     Tasks {
         id: String,
+        #[command(flatten)]
+        page: PageArgs,
     },
     CreateTask {
         id: String,
@@ -154,6 +202,7 @@ enum TestCommand {
     List,
     Create(Data),
     Rotate { id: String },
+    Key { id: String },
     Restore { id: String },
     Clean { id: String },
     Delete { id: String },
@@ -206,7 +255,11 @@ fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a = Root::parse();
     let saved = load_session();
-    let api = a.api_url.clone();
+    let api = a
+        .api_url
+        .clone()
+        .or_else(|| saved.as_ref().map(|s| s.api_url.clone()))
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_owned());
     let token = a
         .token
         .clone()
@@ -243,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     access_token: s.access_token.clone(),
                     refresh_token: s.refresh_token.clone(),
                     api_url: api,
-                    org_id: None,
+                    org_id: s.org_id.clone(),
                 })?;
             }
             serde_json::to_value(s)?
@@ -252,14 +305,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Ready => c.ready().await?,
         Command::Version => c.version().await?,
         Command::Todos { command } => match command {
-            TodoCommand::List => c.list_todos(&[]).await?,
+            TodoCommand::List(q) => {
+                let mut params = Vec::new();
+                if let Some(v) = q.view.as_deref() {
+                    params.push(("view", v));
+                }
+                if let Some(v) = q.status.as_deref() {
+                    params.push(("status", v));
+                }
+                if let Some(v) = q.assigned_to.as_deref() {
+                    params.push(("assigned_to", v));
+                }
+                if let Some(v) = q.assigned_by.as_deref() {
+                    params.push(("assigned_by", v));
+                }
+                if let Some(v) = q.created_from.as_deref() {
+                    params.push(("created_from", v));
+                }
+                if let Some(v) = q.created_to.as_deref() {
+                    params.push(("created_to", v));
+                }
+                let limit = q.limit.to_string();
+                params.push(("limit", &limit));
+                if let Some(v) = q.cursor.as_deref() {
+                    params.push(("cursor", v));
+                }
+                c.list_todos(&params).await?
+            }
             TodoCommand::Get { id } => c.get_todo(&id).await?,
             TodoCommand::Create(d) => c.create_todo(&parse_data(&d.data)?).await?,
             TodoCommand::Update { id, data } => {
                 c.update_todo(&id, &parse_data(&data.data)?).await?
             }
             TodoCommand::Delete { id } => c.delete_todo(&id).await?,
-            TodoCommand::Notes { id } => c.list_notes(&id, &[]).await?,
+            TodoCommand::Notes { id, page } => {
+                let limit = page.limit.to_string();
+                let mut params = vec![("limit", limit.as_str())];
+                if let Some(cursor) = page.cursor.as_deref() {
+                    params.push(("cursor", cursor));
+                }
+                c.list_notes(&id, &params).await?
+            }
             TodoCommand::AddNote { id, data } => c.add_note(&id, &parse_data(&data.data)?).await?,
             TodoCommand::Subscription { id } => c.todo_subscription(&id).await?,
             TodoCommand::SetSubscription { id, data } => {
@@ -268,7 +354,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Projects { command } => match command {
-            ProjectCommand::List => c.list_projects(&[]).await?,
+            ProjectCommand::List(q) => {
+                let mut params = Vec::new();
+                if let Some(v) = q.status.as_deref() {
+                    params.push(("status", v));
+                }
+                if let Some(v) = q.silicon_id.as_deref() {
+                    params.push(("silicon_id", v));
+                }
+                let limit = q.limit.to_string();
+                params.push(("limit", &limit));
+                if let Some(v) = q.cursor.as_deref() {
+                    params.push(("cursor", v));
+                }
+                c.list_projects(&params).await?
+            }
             ProjectCommand::Get { id } => c.get_project(&id).await?,
             ProjectCommand::Create(d) => c.create_project(&parse_data(&d.data)?).await?,
             ProjectCommand::Update { id, data } => {
@@ -279,7 +379,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 c.replace_project_diary(&id, &parse_data(&data.data)?)
                     .await?
             }
-            ProjectCommand::Tasks { id } => c.project_tasks(&id, &[]).await?,
+            ProjectCommand::Tasks { id, page } => {
+                let limit = page.limit.to_string();
+                let mut params = vec![("limit", limit.as_str())];
+                if let Some(cursor) = page.cursor.as_deref() {
+                    params.push(("cursor", cursor));
+                }
+                c.project_tasks(&id, &params).await?
+            }
             ProjectCommand::CreateTask { id, data } => {
                 c.create_project_task(&id, &parse_data(&data.data)?).await?
             }
@@ -314,6 +421,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             TestCommand::List => c.list_test_environments().await?,
             TestCommand::Create(d) => c.create_test_environment(&parse_data(&d.data)?).await?,
             TestCommand::Rotate { id } => c.rotate_test_environment(&id).await?,
+            TestCommand::Key { id } => c.retrieve_test_environment_key(&id).await?,
             TestCommand::Restore { id } => c.restore_test_environment(&id).await?,
             TestCommand::Clean { id } => c.clean_test_environment(&id).await?,
             TestCommand::Delete { id } => c.delete_test_environment(&id).await?,

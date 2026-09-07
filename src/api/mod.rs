@@ -282,6 +282,10 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             post(test_environments::rotate),
         )
         .route(
+            "/test-environments/{id}/key",
+            get(test_environments::retrieve_key),
+        )
+        .route(
             "/test-environments/{id}/restore",
             post(test_environments::restore),
         )

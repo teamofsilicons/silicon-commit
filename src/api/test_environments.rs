@@ -98,8 +98,11 @@ pub(crate) async fn create(
     let iam_ciphertext = encrypt_iam_key(&input.iam_test_key).ok_or(AppError::Internal(
         anyhow::anyhow!("test environment encryption is not configured"),
     ))?;
-    let environment = sqlx::query_as::<_, Environment>("INSERT INTO commit.testing_environments (environment_id,organization_id,creator_principal_id,name,description,iam_test_key_digest,iam_test_key_ciphertext,key_digest) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING environment_id,name,description,status,version,deleted_at,purge_after")
-        .bind(id).bind(actor.organization_id.as_uuid()).bind(actor.actor.principal_id.as_uuid()).bind(input.name.trim()).bind(input.description.as_deref().map(str::trim)).bind(digest(&input.iam_test_key)).bind(iam_ciphertext).bind(commit_key_digest).fetch_one(&state.pool).await.map_err(|e| if let sqlx::Error::Database(db)=&e && db.constraint().is_some_and(|c| c=="testing_environments_organization_id_name_key") { AppError::Conflict { code: "test_environment_name_taken".into() } } else { internal(e) })?;
+    let key_ciphertext = encrypt_iam_key(&key).ok_or(AppError::Internal(anyhow::anyhow!(
+        "test environment encryption is not configured"
+    )))?;
+    let environment = sqlx::query_as::<_, Environment>("INSERT INTO commit.testing_environments (environment_id,organization_id,creator_principal_id,name,description,iam_test_key_digest,iam_test_key_ciphertext,key_digest,key_ciphertext) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING environment_id,name,description,status,version,deleted_at,purge_after")
+        .bind(id).bind(actor.organization_id.as_uuid()).bind(actor.actor.principal_id.as_uuid()).bind(input.name.trim()).bind(input.description.as_deref().map(str::trim)).bind(digest(&input.iam_test_key)).bind(iam_ciphertext).bind(commit_key_digest).bind(key_ciphertext).fetch_one(&state.pool).await.map_err(|e| if let sqlx::Error::Database(db)=&e && db.constraint().is_some_and(|c| c=="testing_environments_organization_id_name_key") { AppError::Conflict { code: "test_environment_name_taken".into() } } else { internal(e) })?;
     Ok(Json(Created { environment, key }))
 }
 
@@ -112,6 +115,46 @@ pub(crate) async fn list(
         .await?;
     let environments = sqlx::query_as::<_, Environment>("SELECT environment_id,name,description,status,version,deleted_at,purge_after FROM commit.testing_environments WHERE organization_id=$1 ORDER BY created_at DESC").bind(actor.organization_id.as_uuid()).fetch_all(&state.pool).await.map_err(internal)?;
     Ok(Json(environments))
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RetrievedKey {
+    pub environment_id: Uuid,
+    pub key: String,
+}
+
+/// Retrieves the current Commit test key for an environment.
+///
+/// Access is limited to organization operators authorized for environment
+/// management. The key is decrypted only in memory and is never persisted in
+/// plaintext.
+pub(crate) async fn retrieve_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RetrievedKey>, AppError> {
+    let actor = state
+        .authenticate(
+            &headers,
+            action::TEST_ENVIRONMENTS_MANAGE,
+            Some(id.to_string()),
+        )
+        .await?;
+    let ciphertext = sqlx::query_scalar::<_, Option<Vec<u8>>>(
+        "SELECT key_ciphertext FROM commit.testing_environments WHERE environment_id=$1 AND organization_id=$2 AND status='active'",
+    )
+    .bind(id)
+    .bind(actor.organization_id.as_uuid())
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(internal)?
+    .flatten()
+    .ok_or(AppError::NotFound)?;
+    let key = decrypt_iam_key(&ciphertext).ok_or(AppError::ProviderUnavailable)?;
+    Ok(Json(RetrievedKey {
+        environment_id: id,
+        key,
+    }))
 }
 
 pub(crate) async fn rotate(
@@ -127,7 +170,10 @@ pub(crate) async fn rotate(
         )
         .await?;
     let key = generate_key();
-    let result=sqlx::query_as::<_,Environment>("UPDATE commit.testing_environments SET key_digest=$1,version=version+1,updated_at=clock_timestamp() WHERE environment_id=$2 AND organization_id=$3 AND status='active' RETURNING environment_id,name,description,status,version,deleted_at,purge_after").bind(digest(&key)).bind(id).bind(actor.organization_id.as_uuid()).fetch_optional(&state.pool).await.map_err(internal)?;
+    let key_ciphertext = encrypt_iam_key(&key).ok_or(AppError::Internal(anyhow::anyhow!(
+        "test environment encryption is not configured"
+    )))?;
+    let result=sqlx::query_as::<_,Environment>("UPDATE commit.testing_environments SET key_digest=$1,key_ciphertext=$2,version=version+1,updated_at=clock_timestamp() WHERE environment_id=$3 AND organization_id=$4 AND status='active' RETURNING environment_id,name,description,status,version,deleted_at,purge_after").bind(digest(&key)).bind(key_ciphertext).bind(id).bind(actor.organization_id.as_uuid()).fetch_optional(&state.pool).await.map_err(internal)?;
     result
         .map(|environment| Json(Created { environment, key }))
         .ok_or(AppError::NotFound)
@@ -162,8 +208,11 @@ pub(crate) async fn restore(
         )
         .await?;
     let key = generate_key();
-    let environment = sqlx::query_as::<_, Environment>("UPDATE commit.testing_environments SET status='active',deleted_at=NULL,purge_after=NULL,key_digest=$1,version=version+1,updated_at=clock_timestamp(),last_activity_at=clock_timestamp() WHERE environment_id=$2 AND organization_id=$3 AND status='deleted' AND purge_after > clock_timestamp() RETURNING environment_id,name,description,status,version,deleted_at,purge_after")
-        .bind(digest(&key)).bind(id).bind(actor.organization_id.as_uuid()).fetch_optional(&state.pool).await.map_err(internal)?;
+    let key_ciphertext = encrypt_iam_key(&key).ok_or(AppError::Internal(anyhow::anyhow!(
+        "test environment encryption is not configured"
+    )))?;
+    let environment = sqlx::query_as::<_, Environment>("UPDATE commit.testing_environments SET status='active',key_ciphertext=$1,deleted_at=NULL,purge_after=NULL,key_digest=$2,version=version+1,updated_at=clock_timestamp(),last_activity_at=clock_timestamp() WHERE environment_id=$3 AND organization_id=$4 AND status='deleted' AND purge_after > clock_timestamp() RETURNING environment_id,name,description,status,version,deleted_at,purge_after")
+        .bind(key_ciphertext).bind(digest(&key)).bind(id).bind(actor.organization_id.as_uuid()).fetch_optional(&state.pool).await.map_err(internal)?;
     environment
         .map(|environment| Json(Created { environment, key }))
         .ok_or(AppError::NotFound)
