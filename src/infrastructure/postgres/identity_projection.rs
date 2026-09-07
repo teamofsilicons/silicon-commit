@@ -26,11 +26,12 @@ pub(super) async fn assert_consistent(
                    FROM commit.organization_projection AS organization
                    WHERE (
                            organization.organization_id = $1
-                           OR organization.org_id = $2
+                           OR (organization.org_id = $2 AND organization.environment_id IS NOT DISTINCT FROM $7)
                        )
                      AND NOT (
                          organization.organization_id = $1
                          AND organization.org_id = $2
+                         AND organization.environment_id IS NOT DISTINCT FROM $7
                      )
                )
                OR EXISTS (
@@ -60,6 +61,7 @@ pub(super) async fn assert_consistent(
     .bind(actor.membership_id)
     .bind(actor.actor.actor_type)
     .bind(actor.actor.id.as_str())
+    .bind(crate::request_context::testing_scope().map(|s| s.id))
     .fetch_one(pool)
     .await?;
 
@@ -83,9 +85,11 @@ pub(super) async fn persist_identity(
         SELECT org_id
         FROM commit.organization_projection
         WHERE organization_id = $1
+          AND environment_id IS NOT DISTINCT FROM $2
         "#,
     )
     .bind(organization_id.into_uuid())
+    .bind(crate::request_context::testing_scope().map(|s| s.id))
     .fetch_optional(&mut *connection)
     .await?;
     if let Some(existing_org_id) = existing_org_id {
@@ -95,13 +99,14 @@ pub(super) async fn persist_identity(
     } else {
         sqlx::query(
             r#"
-            INSERT INTO commit.organization_projection (organization_id, org_id)
-            VALUES ($1, $2)
+            INSERT INTO commit.organization_projection (organization_id, org_id, environment_id)
+            VALUES ($1, $2, $3)
             ON CONFLICT DO NOTHING
             "#,
         )
         .bind(organization_id.into_uuid())
         .bind(org_id.as_str())
+        .bind(crate::request_context::testing_scope().map(|s| s.id))
         .execute(&mut *connection)
         .await?;
 
@@ -112,11 +117,13 @@ pub(super) async fn persist_identity(
                 FROM commit.organization_projection
                 WHERE organization_id = $1
                   AND org_id = $2
+                  AND environment_id IS NOT DISTINCT FROM $3
             )
             "#,
         )
         .bind(organization_id.into_uuid())
         .bind(org_id.as_str())
+        .bind(crate::request_context::testing_scope().map(|s| s.id))
         .fetch_one(&mut *connection)
         .await?;
         if !organization_matches {

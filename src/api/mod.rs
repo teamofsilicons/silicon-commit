@@ -51,7 +51,10 @@ pub mod auth;
 pub mod extract;
 pub mod notifications;
 pub mod projects;
+pub mod sessions;
+pub mod test_environments;
 pub mod todos;
+mod webhooks;
 
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const IDEMPOTENCY_REPLAYED_HEADER: HeaderName = HeaderName::from_static("idempotency-replayed");
@@ -66,6 +69,8 @@ pub struct AppState {
     pub(crate) projects: Arc<ProjectService>,
     pub(crate) attachments: Arc<AttachmentService>,
     pub(crate) notifications: Arc<NotificationSettingsService>,
+    pub(crate) sessions: Option<Arc<sessions::SessionService>>,
+    pub(crate) webhook_verifier: Option<Arc<silicon_iam_client::webhook::WebhookVerifier>>,
     authentication_mode: AuthenticationMode,
     public_base_url: Url,
 }
@@ -94,6 +99,8 @@ impl AppState {
             projects,
             attachments,
             notifications,
+            sessions: None,
+            webhook_verifier: None,
             authentication_mode,
             public_base_url: normalized_base_url(public_base_url),
         }
@@ -122,6 +129,12 @@ impl AppState {
                 Arc::new(TrustedHeaderIdentityProvider::default())
             }
         };
+        let identity: Arc<dyn IdentityProvider> = Arc::new(
+            crate::infrastructure::clients::scoped_identity::ScopedIdentity::new(
+                identity,
+                pool.clone(),
+            ),
+        );
         let briefcase: Arc<dyn BriefcaseProvider> = Arc::new(BriefcaseClient::new(
             &integrations.briefcase,
             integrations.connect_timeout,
@@ -160,7 +173,7 @@ impl AppState {
             audit_retention,
         ));
 
-        Ok(Self::new(
+        let mut state = Self::new(
             pool,
             identity,
             todos,
@@ -169,7 +182,15 @@ impl AppState {
             notifications,
             integrations.iam.mode,
             settings.server.public_base_url.clone(),
-        ))
+        );
+        if integrations.iam.mode == AuthenticationMode::Iam {
+            state.sessions = Some(Arc::new(sessions::SessionService::new(
+                &integrations.iam,
+                integrations.request_timeout,
+            )?));
+        }
+        state.webhook_verifier = webhooks::verifier(&integrations.iam)?.map(Arc::new);
+        Ok(state)
     }
 
     pub(crate) async fn authenticate(
@@ -179,6 +200,7 @@ impl AppState {
         resource: Option<String>,
     ) -> Result<VerifiedActor, AppError> {
         let request = auth::request(headers, self.authentication_mode, action, resource)?;
+        test_environments::resolve_context(&self.pool, headers).await?;
         let actor = self
             .identity
             .authenticate(&request)
@@ -248,6 +270,29 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiBuildError> {
     let api = Router::new()
         .route("/version", get(version))
+        .route("/auth/login", post(sessions::login))
+        .route("/auth/refresh", post(sessions::refresh))
+        .route("/auth/logout", post(sessions::logout))
+        .route(
+            "/test-environments",
+            get(test_environments::list).post(test_environments::create),
+        )
+        .route(
+            "/test-environments/{id}/rotate",
+            post(test_environments::rotate),
+        )
+        .route(
+            "/test-environments/{id}/restore",
+            post(test_environments::restore),
+        )
+        .route(
+            "/test-environments/{id}/clean",
+            post(test_environments::clean),
+        )
+        .route(
+            "/test-environments/{id}",
+            axum::routing::delete(test_environments::delete),
+        )
         .route(
             "/notification-settings",
             get(notifications::get_settings).put(notifications::replace_settings),
@@ -307,10 +352,13 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         HeaderName::from_static("x-test-membership-id"),
         HeaderName::from_static("x-test-principal-id"),
         HeaderName::from_static("x-test-actor-id"),
+        HeaderName::from_static("x-testing-environment-key"),
+        HeaderName::from_static("x-silicon-iam-signature"),
     ];
     let concurrency = Arc::new(Semaphore::new(settings.concurrency_limit));
     let product_api = Router::new()
         .nest("/api/v1", api)
+        .route("/webhook/", post(webhooks::receive))
         .layer(DefaultBodyLimit::max(settings.max_body_bytes))
         .layer(middleware::from_fn_with_state(
             concurrency,
@@ -1163,6 +1211,12 @@ mod tests {
             ttl,
             Duration::from_secs(60),
         ));
+        let identity: Arc<dyn IdentityProvider> = Arc::new(
+            crate::infrastructure::clients::scoped_identity::ScopedIdentity::new(
+                identity,
+                pool.clone(),
+            ),
+        );
         let briefcase: Arc<dyn BriefcaseProvider> = Arc::new(RejectingBriefcase);
         let attachments = Arc::new(AttachmentService::new(
             pool.clone(),

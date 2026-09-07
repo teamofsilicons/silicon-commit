@@ -16,6 +16,10 @@ use crate::{
 
 /// Stable IAM OBO action names for each Commit operation.
 pub mod action {
+    /// Create a testing environment.
+    pub const TEST_ENVIRONMENTS_CREATE: &str = "commit.test_environments.create";
+    /// Manage a testing environment.
+    pub const TEST_ENVIRONMENTS_MANAGE: &str = "commit.test_environments.manage";
     /// Read the represented Silicon's notification settings.
     pub const NOTIFICATION_SETTINGS_READ: &str = "commit.notification_settings.read";
     /// Replace the represented Silicon's notification settings.
@@ -78,6 +82,15 @@ pub fn request(
     action: &str,
     resource: Option<String>,
 ) -> Result<AuthenticationRequest, AppError> {
+    let environment_key = optional_header(headers, "x-testing-environment-key")?;
+    if let Some(key) = environment_key.as_deref()
+        && (key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        return Err(AppError::BadRequest {
+            code: "invalid_testing_environment_key".into(),
+        });
+    }
+    crate::request_context::set_environment_key(environment_key);
     let org_id = required_header(headers, "x-org-id")?
         .parse::<PublicOrganizationId>()
         .map_err(|_| invalid_header("x-org-id"))?;

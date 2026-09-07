@@ -57,6 +57,7 @@ impl NotificationSettingsService {
         let desired = request.validate(&actor.actor.id).map_err(AppError::from)?;
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_actor_notifications(
             transaction.as_mut(),
             actor.organization_id,
@@ -170,6 +171,7 @@ impl NotificationSettingsService {
         let desired = request.validate().map_err(AppError::from)?;
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let target = store::lock_todo_notification_target(
             transaction.as_mut(),
             actor.organization_id,

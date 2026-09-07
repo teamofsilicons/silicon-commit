@@ -1,3 +1,7 @@
+[workspace]
+members = ["client", "cli"]
+resolver = "2"
+
 [package]
 name = "silicon-commit"
 version = "0.1.0"
@@ -27,6 +31,8 @@ anyhow = "1.0.100"
 async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["http2", "json", "macros", "matched-path"] }
 base64 = "0.22.1"
+chacha20poly1305 = "0.10.1"
+rand = "0.10.0"
 dotenvy = "0.15.7"
 hex = "0.4.3"
 http = "1.3.1"
@@ -41,6 +47,7 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+silicon-iam-client = "1.2.1"
 slug = "0.1.6"
 sqlx = { version = "0.9.0", default-features = false, features = [
   "json",
@@ -76,6 +83,7 @@ url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.26.0", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
+hmac = "0.12.1"
 http-body-util = "0.1.3"
 proptest = "1.8.0"
 wiremock = "0.6.5"

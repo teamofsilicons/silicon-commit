@@ -100,6 +100,7 @@ impl TodoService {
         let assignee = self.resolve_assignee(actor, &request.assigned_to).await?;
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -107,6 +108,7 @@ impl TodoService {
             return Ok(response);
         }
 
+        crate::infrastructure::postgres::testing::capacity(&mut transaction, false).await?;
         store::upsert_verified_actor(transaction.as_mut(), actor).await?;
         store::upsert_active_member(transaction.as_mut(), &assignee).await?;
         let todo_id = TodoId::new();
@@ -195,6 +197,7 @@ impl TodoService {
         };
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -314,6 +317,7 @@ impl TodoService {
     ) -> Result<(), AppError> {
         validate_request_id(request_id)?;
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let current =
             match store::lock_delete_target(transaction.as_mut(), actor.organization_id, todo_id)
                 .await?
@@ -423,6 +427,7 @@ impl TodoService {
         let request = request.validate(&self.limits).map_err(validation_error)?;
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -502,6 +507,7 @@ impl TodoService {
         mutation: &MutationIdentity,
     ) -> Result<Option<MutationResponse>, AppError> {
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, mutation).await?;
         let response = replay_on_connection(transaction.as_mut(), actor, mutation).await?;
         transaction.commit().await?;

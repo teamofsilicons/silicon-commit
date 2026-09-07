@@ -55,6 +55,10 @@ pub struct RetentionReport {
     pub delivered_outbox_purged: u64,
     /// Dead-lettered outbox rows past diagnostic retention.
     pub dead_letter_outbox_purged: u64,
+    /// Test environments automatically retired after inactivity.
+    pub testing_environments_expired: u64,
+    /// Test-environment metadata permanently purged after its recovery TTL.
+    pub testing_environments_purged: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, FromRow, PartialEq)]
@@ -84,6 +88,8 @@ impl TryFrom<RetentionRow> for RetentionReport {
             audit_purged: u64::try_from(row.audit_purged)?,
             delivered_outbox_purged: u64::try_from(row.delivered_outbox_purged)?,
             dead_letter_outbox_purged: u64::try_from(row.dead_letter_outbox_purged)?,
+            testing_environments_expired: 0,
+            testing_environments_purged: 0,
         })
     }
 }
@@ -126,6 +132,12 @@ impl RetentionReport {
         self.dead_letter_outbox_purged = self
             .dead_letter_outbox_purged
             .saturating_add(pass.dead_letter_outbox_purged);
+        self.testing_environments_expired = self
+            .testing_environments_expired
+            .saturating_add(pass.testing_environments_expired);
+        self.testing_environments_purged = self
+            .testing_environments_purged
+            .saturating_add(pass.testing_environments_purged);
     }
 }
 
@@ -207,7 +219,15 @@ pub async fn run_once(pool: &PgPool, policy: RetentionPolicy) -> anyhow::Result<
     .bind(batch_size)
     .fetch_one(pool)
     .await?;
-    Ok(row.try_into()?)
+    let mut report: RetentionReport = row.try_into()?;
+    let expired = sqlx::query("UPDATE commit.testing_environments SET status='deleted',deleted_at=clock_timestamp(),purge_after=clock_timestamp()+interval '30 days',version=version+1,updated_at=clock_timestamp() WHERE status='active' AND last_activity_at < clock_timestamp()-interval '15 days'").execute(pool).await?.rows_affected();
+    let purged: i64 = sqlx::query_scalar("SELECT commit.purge_testing_environments($1)")
+        .bind(batch_size)
+        .fetch_one(pool)
+        .await?;
+    report.testing_environments_expired = expired;
+    report.testing_environments_purged = u64::try_from(purged)?;
+    Ok(report)
 }
 
 #[cfg(test)]

@@ -141,6 +141,10 @@ pub struct IamSettings {
     pub audience: String,
     /// Optional service bearer used for directory membership reads.
     pub directory_token: Option<SecretString>,
+    /// Secret used to authenticate exact-byte incoming IAM webhooks.
+    pub webhook_secret: Option<SecretString>,
+    /// Positive IAM signing-secret version accepted by this deployment.
+    pub webhook_key_version: i64,
 }
 
 /// Silicon Briefcase adapter settings.
@@ -370,6 +374,8 @@ fn load_integrations(
                 app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
                 audience: value_or("COMMIT_IAM_AUDIENCE", "silicon-commit"),
                 directory_token: optional_secret("COMMIT_IAM_DIRECTORY_TOKEN"),
+                webhook_secret: optional_secret("COMMIT_WEBHOOK_SIGNING_SECRET"),
+                webhook_key_version: parse_or("COMMIT_WEBHOOK_KEY_VERSION", "1")?,
             },
             BriefcaseSettings {
                 base_url: parse_url_or(
@@ -391,6 +397,8 @@ fn load_integrations(
                 app_secret: None,
                 audience: String::new(),
                 directory_token: None,
+                webhook_secret: None,
+                webhook_key_version: 1,
             },
             BriefcaseSettings {
                 base_url: parse_url_value("COMMIT_BRIEFCASE_BASE_URL", "http://unused.invalid/")?,
@@ -1323,6 +1331,8 @@ mod tests {
                 base_url: url("https://iam.example.test/api/v1/"),
                 app_id: Some("silicon-commit".to_owned()),
                 app_secret: Some(SecretString::from("app-secret")),
+                webhook_secret: None,
+                webhook_key_version: 1,
                 audience: "silicon-commit".to_owned(),
                 directory_token: Some(SecretString::from("directory-token")),
             },

@@ -137,12 +137,14 @@ impl ProjectService {
         let participants = self.resolve_silicons(actor, &command.silicon_ids).await?;
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
             transaction.commit().await?;
             return Ok(response);
         }
+        crate::infrastructure::postgres::testing::capacity(&mut transaction, true).await?;
         postgres::upsert_verified_actor(&mut transaction, actor).await?;
         for participant in &participants {
             postgres::upsert_active_member(&mut transaction, participant).await?;
@@ -231,6 +233,7 @@ impl ProjectService {
         };
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
@@ -327,6 +330,7 @@ impl ProjectService {
         validate_request_id(request_id)?;
         let command = request.validate().map_err(validation_error)?;
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let project_id = self
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?
@@ -424,6 +428,7 @@ impl ProjectService {
         let command = request.validate(&self.limits).map_err(validation_error)?;
 
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
@@ -498,6 +503,7 @@ impl ProjectService {
         validate_request_id(request_id)?;
         let command = request.validate(&self.limits).map_err(validation_error)?;
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let project_id = self
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?
@@ -660,6 +666,7 @@ impl ProjectService {
         audit_action: &'static str,
     ) -> Result<MutationResponse, AppError> {
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
@@ -773,6 +780,7 @@ impl ProjectService {
         identity: &MutationIdentity,
     ) -> Result<Option<MutationResponse>, AppError> {
         let mut transaction = self.pool.begin().await?;
+        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let response = postgres::acquire_idempotency(&mut transaction, actor, identity).await?;
         transaction.commit().await?;
         Ok(response)

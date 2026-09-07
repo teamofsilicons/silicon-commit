@@ -103,7 +103,7 @@ impl IamClient {
         token: &SecretString,
         request: &AuthenticationRequest,
     ) -> Result<VerifiedActor, ProviderError> {
-        let response = self
+        let mut outbound = self
             .client
             .post(self.introspection_url.clone())
             .header(
@@ -111,7 +111,11 @@ impl IamClient {
                 self.application_authorization.clone(),
             )
             .header("x-org-id", org_header(&request.org_id)?)
-            .form(&[("token", token.expose_secret())])
+            .form(&[("token", token.expose_secret())]);
+        if let Some(key) = crate::request_context::current_iam_environment_key() {
+            outbound = outbound.header("x-testing-environment-key", key);
+        }
+        let response = outbound
             .send()
             .await
             .map_err(|_| ProviderError::Unavailable)?;
@@ -164,7 +168,7 @@ impl IamClient {
         // essential: reusing a deterministic key would make IAM replay its
         // first success and authorize a second, fresh Commit operation.
         let idempotency_key = fresh_verification_key();
-        let response = self
+        let mut outbound = self
             .client
             .post(self.obo_verify_url.clone())
             .header(
@@ -173,7 +177,11 @@ impl IamClient {
             )
             .header("x-org-id", org_header(&request.org_id)?)
             .header("idempotency-key", idempotency_key)
-            .json(&body)
+            .json(&body);
+        if let Some(key) = crate::request_context::current_iam_environment_key() {
+            outbound = outbound.header("x-testing-environment-key", key);
+        }
+        let response = outbound
             .send()
             .await
             .map_err(|_| ProviderError::Unavailable)?;
@@ -281,10 +289,14 @@ impl IamClient {
     ) -> Result<OrganizationResponse, ProviderError> {
         let authorization = self.directory_header()?;
         let url = self.organization_endpoint(org_id, &[])?;
-        let response = self
+        let mut request = self
             .client
             .get(url)
-            .header(header::AUTHORIZATION, authorization)
+            .header(header::AUTHORIZATION, authorization);
+        if let Some(key) = crate::request_context::current_iam_environment_key() {
+            request = request.header("x-testing-environment-key", key);
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| ProviderError::Unavailable)?;
@@ -350,6 +362,9 @@ impl IamClient {
             if let Some(cursor) = cursor.as_deref() {
                 request = request.query(&[("cursor", cursor)]);
             }
+            if let Some(key) = crate::request_context::current_iam_environment_key() {
+                request = request.header("x-testing-environment-key", key);
+            }
             let response = request
                 .send()
                 .await
@@ -406,10 +421,14 @@ impl IamClient {
         let authorization = self.directory_header()?;
         let membership = membership_id.hyphenated().to_string();
         let url = self.organization_endpoint(org_id, &["members", &membership])?;
-        let response = self
+        let mut request = self
             .client
             .get(url)
-            .header(header::AUTHORIZATION, authorization)
+            .header(header::AUTHORIZATION, authorization);
+        if let Some(key) = crate::request_context::current_iam_environment_key() {
+            request = request.header("x-testing-environment-key", key);
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| ProviderError::Unavailable)?;
@@ -424,10 +443,14 @@ impl IamClient {
         let authorization = self.directory_header()?;
         let membership = membership_id.hyphenated().to_string();
         let url = self.organization_endpoint(org_id, &["members", &membership, "authorization"])?;
-        let response = self
+        let mut request = self
             .client
             .get(url)
-            .header(header::AUTHORIZATION, authorization)
+            .header(header::AUTHORIZATION, authorization);
+        if let Some(key) = crate::request_context::current_iam_environment_key() {
+            request = request.header("x-testing-environment-key", key);
+        }
+        let response = request
             .send()
             .await
             .map_err(|_| ProviderError::Unavailable)?;
@@ -550,7 +573,7 @@ impl IdentityProvider for IamClient {
             &request.action,
             Some(&request.resource),
         );
-        let response = self
+        let mut outbound = self
             .client
             .post(self.obo_exchange_url.clone())
             .header(
@@ -559,7 +582,11 @@ impl IdentityProvider for IamClient {
             )
             .header("x-org-id", org_header(&actor.org_id)?)
             .header("idempotency-key", idempotency_key)
-            .json(&body)
+            .json(&body);
+        if let Some(key) = crate::request_context::current_iam_environment_key() {
+            outbound = outbound.header("x-testing-environment-key", key);
+        }
+        let response = outbound
             .send()
             .await
             .map_err(|_| ProviderError::Unavailable)?;
@@ -960,7 +987,7 @@ fn fresh_verification_key() -> String {
 fn valid_app_id(value: &str) -> bool {
     (3..=80).contains(&value.len())
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'>')
         })
 }
 
@@ -1005,6 +1032,8 @@ mod tests {
 
     fn settings(server: &MockServer) -> Result<IamSettings, Box<dyn std::error::Error>> {
         Ok(IamSettings {
+            webhook_secret: None,
+            webhook_key_version: 1,
             mode: AuthenticationMode::Iam,
             base_url: Url::parse(&format!("{}/api/v1/", server.uri()))?,
             app_id: Some("silicon-commit".to_owned()),

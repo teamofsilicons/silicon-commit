@@ -1,0 +1,3 @@
+# Test environments
+
+A test environment is an organization-owned isolated Commit instance linked to an IAm test environment. It is addressed with a generated 32-character key and uses the same API, client, and CLI contracts as production. Test-only operations carry the IAM-compatible `x-testing-environment-key` header (or CLI `--test`). Each environment is capped at 10 projects and 100 todos. Rotation invalidates the previous key; deletion enters a 30-day recovery window, and 15 days without activity triggers automatic deletion. Commit stores the IAm root key encrypted at rest using key material derived from the application secret, and decrypts it only for the matching authenticated request. Cleanup removes the isolated organization’s rows transactionally.

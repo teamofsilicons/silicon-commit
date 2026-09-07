@@ -131,3 +131,5 @@ fn valid_http_url(url: &Url) -> bool {
         && url.username().is_empty()
         && !url.cannot_be_a_base()
 }
+
+pub mod scoped_identity;
