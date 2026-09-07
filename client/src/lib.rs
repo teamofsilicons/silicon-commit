@@ -22,14 +22,28 @@ pub struct RegistryRelease {
 /// This is deliberately separate from API requests and never updates a running
 /// process; callers decide whether and how to install a newer binary/package.
 pub async fn latest_release() -> Result<RegistryRelease, Error> {
+    latest_release_for("silicon-commit-client").await
+}
+
+/// Returns the latest published CLI version when the registry is reachable.
+/// The CLI package is separate from the client library and therefore has its
+/// own registry check.
+pub async fn latest_cli_release() -> Result<RegistryRelease, Error> {
+    latest_release_for("commit").await
+}
+
+async fn latest_release_for(crate_name: &str) -> Result<RegistryRelease, Error> {
     let http = HttpClient::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(transport)?;
     let response = http
-        .get("https://crates.io/api/v1/crates/silicon-commit-client")
-        .header("user-agent", "silicon-commit-client")
+        .get(format!("https://crates.io/api/v1/crates/{crate_name}"))
+        .header(
+            "user-agent",
+            format!("{crate_name}/{}", env!("CARGO_PKG_VERSION")),
+        )
         .send()
         .await
         .map_err(transport)?;
