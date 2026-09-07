@@ -45,6 +45,10 @@ struct Root {
 #[derive(Subcommand)]
 enum Command {
     Login(Login),
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Health,
     Ready,
     Version,
@@ -64,6 +68,12 @@ enum Command {
         #[command(subcommand)]
         command: TestCommand,
     },
+}
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Set the home directory used for Commit's local state.
+    #[command(name = "set_home_dir")]
+    SetHomeDir { location: PathBuf },
 }
 #[derive(Args)]
 struct Login {
@@ -228,10 +238,51 @@ fn parse_data(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(&text)?)
 }
 fn session_path() -> PathBuf {
+    configured_home_dir()
+        .unwrap_or_else(default_home_dir)
+        .join(".commit/session.json")
+}
+fn default_home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".commit/session.json")
+}
+fn home_dir_config_path() -> PathBuf {
+    default_home_dir().join(".commit/home_dir")
+}
+fn configured_home_dir() -> Option<PathBuf> {
+    let path = fs::read_to_string(home_dir_config_path()).ok()?;
+    let path = PathBuf::from(path.trim());
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+fn set_home_dir(location: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let location = expand_home(location);
+    if !location.is_dir() {
+        return Err(format!("not a directory: {}", location.display()).into());
+    }
+    let location = fs::canonicalize(location)?;
+    let config = home_dir_config_path();
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&config, location.to_string_lossy().as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
+    }
+    println!("Commit home directory set to {}", location.display());
+    Ok(())
+}
+fn expand_home(location: PathBuf) -> PathBuf {
+    let Some(text) = location.to_str().map(str::to_owned) else {
+        return location;
+    };
+    if text == "~" {
+        return default_home_dir();
+    }
+    text.strip_prefix("~/")
+        .map_or(location, |rest| default_home_dir().join(rest))
 }
 fn load_session() -> Option<Session> {
     fs::read_to_string(session_path())
@@ -254,6 +305,12 @@ fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a = Root::parse();
+    if let Command::Config {
+        command: ConfigCommand::SetHomeDir { location },
+    } = &a.command
+    {
+        return set_home_dir(location.clone());
+    }
     let saved = load_session();
     let api = a
         .api_url
@@ -289,6 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         c = c.with_test_key(k)?;
     }
     let output = match a.command {
+        Command::Config { .. } => unreachable!("config commands return before API setup"),
         Command::Login(x) => {
             let s = c.login_with_slt(&x.slt).await?;
             if !x.no_save {
@@ -436,12 +494,9 @@ async fn maybe_check_update(disabled: bool) {
     if disabled {
         return;
     }
-    let Some(dir) = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .map(|p| p.join(".commit"))
-    else {
-        return;
-    };
+    let dir = configured_home_dir()
+        .unwrap_or_else(default_home_dir)
+        .join(".commit");
     let marker = dir.join("last-update-check");
     let now = std::time::SystemTime::now();
     if let Ok(meta) = fs::metadata(&marker)
@@ -452,7 +507,7 @@ async fn maybe_check_update(disabled: bool) {
     }
     let _ = fs::create_dir_all(&dir);
     let _ = fs::write(&marker, b"checked");
-    if let Ok(release) = silicon_commit_client::latest_release().await
+    if let Ok(release) = silicon_commit_client::latest_cli_release().await
         && release.version != env!("CARGO_PKG_VERSION")
     {
         eprintln!(

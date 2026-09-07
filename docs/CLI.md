@@ -2,10 +2,11 @@
 
 Build with `cargo build -p commit`; invoke the resulting binary as `commit`. Run `commit --help` or `commit <command> --help` for the complete grammar. Output is pretty JSON and is suitable for scripting.
 
-Configure `COMMIT_API_URL`, `COMMIT_ACCESS_TOKEN`, and `COMMIT_ORG_ID`, or pass `--api-url`, `--token`, and `--org-id`. `commit login <slt>` exchanges a Silicon IAm short-lived token. Tokens are saved with mode `0600` under `~/.commit/session.json`; `--no-save` prints them without writing. The saved API URL is reused on later invocations. `--idempotency-key` reuses a write key after a transport failure and `--if-match VERSION` sends an ETag precondition.
+Configure `COMMIT_API_URL`, `COMMIT_ACCESS_TOKEN`, and `COMMIT_ORG_ID`, or pass `--api-url`, `--token`, and `--org-id`. `commit login <slt>` exchanges a Silicon IAm short-lived token. Tokens are saved with mode `0600` under `{home_dir}/.commit/session.json`; the default home directory is the operating-system `HOME`. Change it with `commit config set_home_dir {location}`; the location must already be a directory. `--no-save` prints tokens without writing them. The saved API URL is reused on later invocations. `--idempotency-key` reuses a write key after a transport failure and `--if-match VERSION` sends an ETag precondition.
 
 Commands:
 
+- `config set_home_dir LOCATION`
 - `health`, `ready`, `version`
 - `todos list [--view assigned_to_me|delegated_by_me|all] [--status STATUS] [--assigned-to ID] [--assigned-by ID] [--created-from RFC3339] [--created-to RFC3339] [--limit 1..100] [--cursor CURSOR]`; `get`, `create`, `update`, `delete`, `notes [--limit N] [--cursor CURSOR]`, `add-note`, `subscription`, and `set-subscription`.
 - `projects list [--status STATUS] [--silicon-id ID] [--limit 1..100] [--cursor CURSOR]`; `get`, `create`, `update`, `diary`, `set-diary`, `tasks [--limit N] [--cursor CURSOR]`, `create-task`, `update-task`, `blocker`, `create-update`, and `complete`.
