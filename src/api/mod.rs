@@ -26,10 +26,9 @@ use uuid::Uuid;
 
 use crate::{
     application::{
-        attachments::{AttachmentService, map_provider_error},
         idempotency::MutationResponse,
         notifications::NotificationSettingsService,
-        ports::{BriefcaseProvider, IdentityProvider, VerifiedActor},
+        ports::{IdentityProvider, VerifiedActor},
         projects::ProjectService,
         todos::TodoService,
     },
@@ -38,7 +37,6 @@ use crate::{
     infrastructure::{
         clients::{
             ClientBuildError,
-            briefcase::{BriefcaseClient, briefcase_url_policy},
             iam::{IamClient, TrustedHeaderIdentityProvider},
         },
         postgres,
@@ -46,7 +44,6 @@ use crate::{
     request_context, shutdown,
 };
 
-pub mod attachments;
 pub mod auth;
 pub mod extract;
 pub mod notifications;
@@ -67,7 +64,6 @@ pub struct AppState {
     pub(crate) identity: Arc<dyn IdentityProvider>,
     pub(crate) todos: Arc<TodoService>,
     pub(crate) projects: Arc<ProjectService>,
-    pub(crate) attachments: Arc<AttachmentService>,
     pub(crate) notifications: Arc<NotificationSettingsService>,
     pub(crate) sessions: Option<Arc<sessions::SessionService>>,
     pub(crate) webhook_verifier: Option<Arc<silicon_iam_client::webhook::WebhookVerifier>>,
@@ -78,8 +74,8 @@ pub struct AppState {
 impl AppState {
     /// Creates an application state from already-composed dependencies.
     ///
-    /// This constructor keeps transport tests independent from live IAM,
-    /// Briefcase, and PostgreSQL services.
+    /// This constructor keeps transport tests independent from live IAM and
+    /// PostgreSQL services.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -87,7 +83,6 @@ impl AppState {
         identity: Arc<dyn IdentityProvider>,
         todos: Arc<TodoService>,
         projects: Arc<ProjectService>,
-        attachments: Arc<AttachmentService>,
         notifications: Arc<NotificationSettingsService>,
         authentication_mode: AuthenticationMode,
         public_base_url: Url,
@@ -97,7 +92,6 @@ impl AppState {
             identity,
             todos,
             projects,
-            attachments,
             notifications,
             sessions: None,
             webhook_verifier: None,
@@ -111,8 +105,8 @@ impl AppState {
     ///
     /// # Errors
     ///
-    /// Returns a redacted construction error when an external client or the
-    /// Briefcase URL classifier cannot be built safely.
+    /// Returns a redacted construction error when an external client cannot
+    /// be built safely.
     pub fn from_settings(settings: &Settings, pool: PgPool) -> Result<Self, ApiBuildError> {
         if settings.runtime_profile != RuntimeProfile::Api {
             return Err(ApiBuildError::WrongSettingsProfile);
@@ -135,13 +129,6 @@ impl AppState {
                 pool.clone(),
             ),
         );
-        let briefcase: Arc<dyn BriefcaseProvider> = Arc::new(BriefcaseClient::new(
-            &integrations.briefcase,
-            integrations.connect_timeout,
-            integrations.request_timeout,
-            integrations.max_response_bytes,
-        )?);
-        let briefcase_policy = briefcase_url_policy(&integrations.briefcase)?;
         let todo_limits = settings.limits.domain_limits();
         let project_limits = settings.limits.domain_limits();
         let idempotency_ttl = settings.limits.idempotency_ttl;
@@ -162,12 +149,6 @@ impl AppState {
             idempotency_ttl,
             audit_retention,
         ));
-        let attachments = Arc::new(AttachmentService::new(
-            pool.clone(),
-            Arc::clone(&identity),
-            briefcase,
-            briefcase_policy,
-        ));
         let notifications = Arc::new(NotificationSettingsService::new(
             pool.clone(),
             audit_retention,
@@ -178,7 +159,6 @@ impl AppState {
             identity,
             todos,
             projects,
-            attachments,
             notifications,
             integrations.iam.mode,
             settings.server.public_base_url.clone(),
@@ -342,10 +322,6 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .route(
             "/projects/{project_id}/completion",
             post(projects::complete),
-        )
-        .route(
-            "/attachments/temporary-url",
-            post(attachments::temporary_url),
         );
 
     let sensitive_headers = [
@@ -389,6 +365,24 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .layer(middleware::from_fn(ensure_response_request_id))
         .layer(middleware::from_fn(no_store));
     Ok(app)
+}
+
+fn map_provider_error(error: crate::application::ports::ProviderError) -> AppError {
+    match error {
+        crate::application::ports::ProviderError::Unauthenticated => AppError::Unauthenticated,
+        crate::application::ports::ProviderError::Forbidden => AppError::Forbidden,
+        crate::application::ports::ProviderError::NotFound => AppError::NotFound,
+        crate::application::ports::ProviderError::Conflict => AppError::Conflict {
+            code: "provider_conflict".into(),
+        },
+        crate::application::ports::ProviderError::RateLimited { retry_after } => {
+            AppError::RateLimited {
+                retry_after_seconds: retry_after.map_or(1, |duration| duration.as_secs().max(1)),
+            }
+        }
+        crate::application::ports::ProviderError::InvalidResponse => AppError::BadGateway,
+        crate::application::ports::ProviderError::Unavailable => AppError::ProviderUnavailable,
+    }
 }
 
 async fn health() -> Json<Health> {
@@ -640,13 +634,10 @@ mod tests {
         api::auth::action,
         application::ports::{
             ActiveMember, AuthenticationRequest, ChildProofRequest, DelegatedOboProof,
-            ProviderError, TemporaryUrl,
+            ProviderError,
         },
         config::ServerSettings,
-        domain::{
-            ActorId, ActorType, BriefcaseAttachmentUrl, BriefcaseUrlPolicy, DomainLimits,
-            PublicOrganizationId,
-        },
+        domain::{ActorId, ActorType, DomainLimits, PublicOrganizationId},
     };
 
     use super::*;
@@ -741,21 +732,6 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct RejectingBriefcase;
-
-    #[async_trait]
-    impl BriefcaseProvider for RejectingBriefcase {
-        async fn temporary_url(
-            &self,
-            _org_id: &PublicOrganizationId,
-            _attachment: &BriefcaseAttachmentUrl,
-            _proof: &DelegatedOboProof,
-        ) -> Result<TemporaryUrl, ProviderError> {
-            Err(ProviderError::Forbidden)
-        }
-    }
-
     struct OperationCase {
         method: Method,
         uri: &'static str,
@@ -771,8 +747,6 @@ mod tests {
         const TODO_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af553";
         const PROJECT_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af554";
         const TASK_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af555";
-        const PERMANENT_URL: &str =
-            "https://briefcase.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af556";
 
         let cases = vec![
             operation(Method::GET, "/api/v1/todos", action::TODOS_LIST, None),
@@ -924,19 +898,8 @@ mod tests {
                 Some(PROJECT_ID),
                 r#"{"title":"complete","description":"done"}"#,
             ),
-            OperationCase {
-                method: Method::POST,
-                uri: "/api/v1/attachments/temporary-url",
-                action: action::ATTACHMENTS_TEMPORARY_URL,
-                resource: Some(PERMANENT_URL.to_owned()),
-                body: Some(
-                    r#"{"permanent_url":"https://briefcase.example/api/v1/entries/018f268d-715a-7b72-8f0f-41f16f9af556"}"#,
-                ),
-                idempotent: false,
-                if_match: false,
-            },
         ];
-        assert_eq!(cases.len(), 24);
+        assert_eq!(cases.len(), 23);
 
         let identity = Arc::new(RecordingIdentity::default());
         let state = test_state(identity.clone())?;
@@ -1197,7 +1160,6 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://postgres:postgres@127.0.0.1:1/commit")?;
         let identity: Arc<dyn IdentityProvider> = identity;
-        let policy = BriefcaseUrlPolicy::new([Url::parse("https://briefcase.example/api/v1/")?])?;
         let limits = DomainLimits::default();
         let ttl = Duration::from_secs(60);
         let todos = Arc::new(TodoService::new(
@@ -1221,13 +1183,6 @@ mod tests {
                 pool.clone(),
             ),
         );
-        let briefcase: Arc<dyn BriefcaseProvider> = Arc::new(RejectingBriefcase);
-        let attachments = Arc::new(AttachmentService::new(
-            pool.clone(),
-            Arc::clone(&identity),
-            briefcase,
-            policy,
-        ));
         let notifications = Arc::new(NotificationSettingsService::new(
             pool.clone(),
             Duration::from_secs(60),
@@ -1237,7 +1192,6 @@ mod tests {
             identity,
             todos,
             projects,
-            attachments,
             notifications,
             AuthenticationMode::Iam,
             Url::parse("https://commit.example/api/v1/")?,

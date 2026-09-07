@@ -1,46 +1,31 @@
-//! Authenticated internal Silicon Hook publication adapter.
+//! Direct Silicon webhook publication adapter.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderValue, StatusCode, header};
-use secrecy::{ExposeSecret as _, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 use uuid::Uuid;
 
-use crate::{
-    application::ports::{HookEvent, HookPublishError, HookPublisher},
-    config::HookSettings,
-};
+use crate::application::ports::{WebhookEvent, WebhookPublishError, WebhookPublisher};
 
-use super::{
-    BoundedBodyError, ClientBuildError, exact_endpoint, http_client, is_json, read_bounded,
-    retry_after,
-};
+use super::{BoundedBodyError, ClientBuildError, http_client, read_bounded, retry_after};
 
-/// Redirect-free client for Hook's single service-authenticated ingress.
+/// Redirect-free client for direct webhook delivery.
 #[derive(Clone, Debug)]
-pub struct HookClient {
+pub struct WebhookClient {
     client: reqwest::Client,
-    publish_url: Option<Url>,
-    authorization: Option<HeaderValue>,
     max_response_bytes: usize,
 }
 
-impl HookClient {
-    /// Builds an internal Hook publisher.
+impl WebhookClient {
+    /// Builds a direct webhook publisher.
     ///
-    /// A development configuration may omit both URL and service credential;
-    /// publication then fails as retryable rather than pretending delivery.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redacted construction error for a partial configuration,
-    /// unsafe URL, malformed credential, or HTTP client failure.
+    /// Destination URLs are taken from each immutable outbox routing snapshot.
+    /// No intermediary service URL or credential is required.
     pub fn new(
-        settings: &HookSettings,
         connect_timeout: Duration,
         request_timeout: Duration,
         max_response_bytes: usize,
@@ -48,41 +33,28 @@ impl HookClient {
         if max_response_bytes == 0 {
             return Err(ClientBuildError::InvalidEndpoint);
         }
-        let (publish_url, authorization) = match (&settings.publish_url, &settings.service_token) {
-            (Some(url), Some(token)) => (
-                Some(exact_endpoint(url)?),
-                Some(service_authorization(token)?),
-            ),
-            (None, None) => (None, None),
-            _ => return Err(ClientBuildError::InvalidCredential),
-        };
         Ok(Self {
             client: http_client(connect_timeout, request_timeout)?,
-            publish_url,
-            authorization,
             max_response_bytes,
         })
     }
 }
 
 #[async_trait]
-impl HookPublisher for HookClient {
-    async fn publish(&self, event: &HookEvent) -> Result<(), HookPublishError> {
+impl WebhookPublisher for WebhookClient {
+    async fn publish(&self, event: &WebhookEvent) -> Result<(), WebhookPublishError> {
         validate_event(event)?;
-        let publish_url = self
-            .publish_url
-            .clone()
-            .ok_or(HookPublishError::Unavailable)?;
-        let authorization = self
-            .authorization
-            .clone()
-            .ok_or(HookPublishError::Unavailable)?;
-        let body = InternalHookEvent::from(event);
-        let serialized = serde_json::to_vec(&body).map_err(|_| HookPublishError::Rejected)?;
+        let publish_url = event
+            .routing_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.webhook_url().as_str())
+            .ok_or(WebhookPublishError::Unavailable)
+            .and_then(|url| Url::parse(url).map_err(|_| WebhookPublishError::Rejected))?;
+        let body = InternalWebhookEvent::from(event);
+        let serialized = serde_json::to_vec(&body).map_err(|_| WebhookPublishError::Rejected)?;
         let response = self
             .client
             .post(publish_url)
-            .header(header::AUTHORIZATION, authorization)
             .header(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/json"),
@@ -91,47 +63,38 @@ impl HookPublisher for HookClient {
             .body(serialized)
             .send()
             .await
-            .map_err(|_| HookPublishError::Unavailable)?;
+            .map_err(|_| WebhookPublishError::Unavailable)?;
 
         let status = response.status();
         let headers = response.headers().clone();
-        let response_is_json = is_json(&headers);
-        let response_body = read_bounded(response, self.max_response_bytes)
+        let _response_body = read_bounded(response, self.max_response_bytes)
             .await
             .map_err(|error| match error {
-                BoundedBodyError::Transport => HookPublishError::Unavailable,
-                BoundedBodyError::TooLarge => HookPublishError::InvalidResponse,
+                BoundedBodyError::Transport => WebhookPublishError::Unavailable,
+                BoundedBodyError::TooLarge => WebhookPublishError::InvalidResponse,
             })?;
 
-        if status == StatusCode::ACCEPTED {
-            if response_body.is_empty() {
-                return Ok(());
-            }
-            if !response_is_json {
-                return Err(HookPublishError::InvalidResponse);
-            }
-            let acceptance: Acceptance = serde_json::from_slice(&response_body)
-                .map_err(|_| HookPublishError::InvalidResponse)?;
-            if acceptance.event_id != event.event_id || acceptance.status != "accepted" {
-                return Err(HookPublishError::InvalidResponse);
-            }
+        if status.is_success() {
             return Ok(());
         }
 
         match status {
             StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
             | StatusCode::PAYLOAD_TOO_LARGE
-            | StatusCode::UNPROCESSABLE_ENTITY => Err(HookPublishError::Rejected),
-            StatusCode::TOO_MANY_REQUESTS => Err(HookPublishError::RateLimited {
+            | StatusCode::UNPROCESSABLE_ENTITY => Err(WebhookPublishError::Rejected),
+            StatusCode::TOO_MANY_REQUESTS => Err(WebhookPublishError::RateLimited {
                 retry_after: retry_after(&headers),
             }),
-            _ => Err(HookPublishError::Unavailable),
+            _ => Err(WebhookPublishError::Unavailable),
         }
     }
 }
 
 #[derive(Serialize)]
-struct InternalHookEvent<'a> {
+struct InternalWebhookEvent<'a> {
     event_id: Uuid,
     org_id: &'a str,
     silicon_id: &'a str,
@@ -156,8 +119,8 @@ struct InternalHookEvent<'a> {
     payload: &'a Value,
 }
 
-impl<'a> From<&'a HookEvent> for InternalHookEvent<'a> {
-    fn from(event: &'a HookEvent) -> Self {
+impl<'a> From<&'a WebhookEvent> for InternalWebhookEvent<'a> {
+    fn from(event: &'a WebhookEvent) -> Self {
         let routing = event.routing_snapshot.as_ref();
         Self {
             event_id: event.event_id,
@@ -178,13 +141,7 @@ impl<'a> From<&'a HookEvent> for InternalHookEvent<'a> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct Acceptance {
-    event_id: Uuid,
-    status: String,
-}
-
-fn validate_event(event: &HookEvent) -> Result<(), HookPublishError> {
+fn validate_event(event: &WebhookEvent) -> Result<(), WebhookPublishError> {
     let valid_type = event
         .event_type
         .strip_prefix("todo.")
@@ -215,20 +172,9 @@ fn validate_event(event: &HookEvent) -> Result<(), HookPublishError> {
         || !valid_trace
         || !valid_routing
     {
-        return Err(HookPublishError::Rejected);
+        return Err(WebhookPublishError::Rejected);
     }
     Ok(())
-}
-
-fn service_authorization(token: &SecretString) -> Result<HeaderValue, ClientBuildError> {
-    let token = token.expose_secret();
-    if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
-        return Err(ClientBuildError::InvalidCredential);
-    }
-    let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
-        .map_err(|_| ClientBuildError::InvalidCredential)?;
-    authorization.set_sensitive(true);
-    Ok(authorization)
 }
 
 #[cfg(test)]
@@ -237,9 +183,9 @@ mod tests {
     use time::OffsetDateTime;
     use uuid::Uuid;
 
-    use super::{InternalHookEvent, validate_event};
+    use super::{InternalWebhookEvent, validate_event};
     use crate::{
-        application::ports::{HookEvent, HookRoutingSnapshot},
+        application::ports::{WebhookEvent, WebhookRoutingSnapshot},
         domain::{
             ActorId, NotificationScope, NotificationSubscriptionLevel, NotificationVersion,
             PublicOrganizationId, WebhookUrl,
@@ -255,7 +201,7 @@ mod tests {
         let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
             return;
         };
-        let event = HookEvent {
+        let event = WebhookEvent {
             event_id: Uuid::now_v7(),
             org_id,
             silicon_id,
@@ -270,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_the_snapshotted_destination_for_hook_dispatch() {
+    fn serializes_the_snapshotted_destination_for_webhook_dispatch() {
         let org_id = PublicOrganizationId::new("tos");
         let silicon_id = ActorId::new("silicon-one");
         let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
@@ -287,7 +233,7 @@ mod tests {
         ) else {
             return;
         };
-        let routing_snapshot = HookRoutingSnapshot::new(
+        let routing_snapshot = WebhookRoutingSnapshot::new(
             webhook_url,
             destination_version,
             NotificationSubscriptionLevel::Todo,
@@ -298,7 +244,7 @@ mod tests {
             return;
         };
         let event_id = Uuid::now_v7();
-        let event = HookEvent {
+        let event = WebhookEvent {
             event_id,
             org_id,
             silicon_id,
@@ -311,7 +257,7 @@ mod tests {
         };
 
         assert!(validate_event(&event).is_ok());
-        let serialized = serde_json::to_value(InternalHookEvent::from(&event));
+        let serialized = serde_json::to_value(InternalWebhookEvent::from(&event));
         assert!(serialized.is_ok());
         let Some(serialized) = serialized.ok() else {
             return;
@@ -335,7 +281,7 @@ mod tests {
         let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
             return;
         };
-        let event = HookEvent {
+        let event = WebhookEvent {
             event_id: Uuid::now_v7(),
             org_id,
             silicon_id,

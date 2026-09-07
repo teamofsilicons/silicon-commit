@@ -257,7 +257,7 @@ CREATE TABLE commit.outbox_events (
 );
 
 COMMENT ON TABLE commit.outbox_events IS
-    'At-least-once Hook notification queue committed atomically with delegated todo mutations.';
+    'At-least-once webhook notification queue committed atomically with delegated todo mutations.';
 COMMENT ON COLUMN commit.outbox_events.payload IS
     'Versioned non-secret event body containing stable event and todo IDs for consumer deduplication.';
 COMMENT ON COLUMN commit.outbox_events.last_error_code IS

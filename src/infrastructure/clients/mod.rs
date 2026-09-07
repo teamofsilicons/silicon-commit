@@ -1,4 +1,4 @@
-//! Hardened HTTP adapters for Silicon IAM, Briefcase, and Hook.
+//! Hardened HTTP adapters for Silicon IAM and direct webhooks.
 
 use std::time::Duration;
 
@@ -8,9 +8,8 @@ use url::Url;
 
 use crate::application::ports::ProviderError;
 
-pub mod briefcase;
-pub mod hook;
 pub mod iam;
+pub mod webhook;
 
 /// Redacted adapter construction failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -57,13 +56,6 @@ pub(crate) fn endpoint(base: &Url, relative: &str) -> Result<Url, ClientBuildErr
     normalized
         .join(relative)
         .map_err(|_| ClientBuildError::InvalidEndpoint)
-}
-
-pub(crate) fn exact_endpoint(url: &Url) -> Result<Url, ClientBuildError> {
-    if !valid_http_url(url) || url.query().is_some() || url.fragment().is_some() {
-        return Err(ClientBuildError::InvalidEndpoint);
-    }
-    Ok(url.clone())
 }
 
 pub(crate) async fn read_bounded(

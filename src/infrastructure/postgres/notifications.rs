@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    application::ports::{HookRoutingSnapshot, VerifiedActor},
+    application::ports::{VerifiedActor, WebhookRoutingSnapshot},
     domain::{
         ActorId, NotificationRule, NotificationScope, NotificationSettings,
         NotificationSubscriptionLevel, NotificationVersion, OrganizationId, PrincipalId, Todo,
@@ -63,7 +63,7 @@ pub(crate) async fn effective_routing_snapshot(
     connection: &mut PgConnection,
     todo: &Todo,
     resulting_status: Option<TodoStatus>,
-) -> Result<Option<HookRoutingSnapshot>, AppError> {
+) -> Result<Option<WebhookRoutingSnapshot>, AppError> {
     lock_actor_notifications(
         connection,
         todo.organization_id,
@@ -494,7 +494,7 @@ impl EffectiveRoutingRow {
         self,
         todo: &Todo,
         resulting_status: Option<TodoStatus>,
-    ) -> Result<Option<HookRoutingSnapshot>, AppError> {
+    ) -> Result<Option<WebhookRoutingSnapshot>, AppError> {
         let Some(webhook_url) = self.webhook_url else {
             return Ok(None);
         };
@@ -528,7 +528,7 @@ impl EffectiveRoutingRow {
             return Ok(None);
         }
 
-        HookRoutingSnapshot::new(
+        WebhookRoutingSnapshot::new(
             webhook_url,
             destination_version,
             subscription_level,

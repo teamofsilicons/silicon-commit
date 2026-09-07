@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::{RuntimeProfile, Settings},
-    infrastructure::{clients::hook::HookClient, postgres},
+    infrastructure::{clients::webhook::WebhookClient, postgres},
     shutdown,
 };
 
@@ -30,14 +30,13 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     );
     let pool = postgres::connect(&settings.database, "commit-worker").await?;
     let integrations = &settings.integrations;
-    let hook = HookClient::new(
-        &integrations.hook,
+    let webhook = WebhookClient::new(
         integrations.connect_timeout,
         integrations.request_timeout,
         integrations.max_response_bytes,
     )?;
     let processor =
-        outbox::OutboxProcessor::new(pool.clone(), Arc::new(hook), settings.worker.clone());
+        outbox::OutboxProcessor::new(pool.clone(), Arc::new(webhook), settings.worker.clone());
     let retention_policy = retention::RetentionPolicy::from(&settings.worker);
     let mut poll = interval(settings.worker.poll_interval);
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);

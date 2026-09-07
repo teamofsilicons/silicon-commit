@@ -169,6 +169,8 @@ Testing in the test enviorment should also be possible via both cli, and the pac
 
 Testing enviorment in cli, for testing enviorment in cli i should just be able to `commit --test <test_id> <command>` infront of the same command and it should treat that as a test command. Same for test only commands even they would have the same style just without specifying --test for them would return this action is only possible for test enviorment.  
 
+Fo
+
 --- logging in via cli ---
 
 For logging in via the cli or the package for any carbon/silicon you don't ask for their credentials or redirect them anywhere, instead you just request for their short lived token. This short lived token would then be used for the same login logic, the short lived token would be compared and you will get the refresh and auth token. 

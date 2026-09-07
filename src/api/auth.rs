@@ -66,8 +66,6 @@ pub mod action {
     pub const PROJECT_UPDATES_CREATE: &str = "commit.project_updates.create";
     /// Complete a project.
     pub const PROJECT_COMPLETION_CREATE: &str = "commit.project_completion.create";
-    /// Generate a temporary Briefcase URL.
-    pub const ATTACHMENTS_TEMPORARY_URL: &str = "commit.attachments.temporary_url";
 }
 
 /// Parses authentication headers under the configured runtime safety mode.

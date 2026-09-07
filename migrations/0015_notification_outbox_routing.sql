@@ -1,4 +1,4 @@
--- Immutable notification-destination decisions for durable Hook delivery.
+-- Immutable notification-destination decisions for durable webhook delivery.
 
 CREATE TYPE commit.notification_subscription_level AS ENUM (
     'list',
@@ -34,7 +34,7 @@ ALTER TABLE commit.outbox_events
     );
 
 COMMENT ON COLUMN commit.outbox_events.webhook_url IS
-    'Immutable actor-bound Hook endpoint selected transactionally when the event was committed; NULL only on legacy payload-v1 rows.';
+    'Immutable webhook endpoint selected transactionally when the event was committed; NULL only on legacy payload-v1 rows.';
 COMMENT ON COLUMN commit.outbox_events.destination_version IS
     'Silicon notification-settings version which supplied webhook_url.';
 COMMENT ON COLUMN commit.outbox_events.subscription_level IS

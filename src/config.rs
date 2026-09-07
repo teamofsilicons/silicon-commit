@@ -60,9 +60,9 @@ pub enum RuntimeEnvironment {
 /// Process-specific configuration capability set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeProfile {
-    /// HTTP API, IAM, and Briefcase capability set.
+    /// HTTP API and IAM capability set.
     Api,
-    /// Outbox worker and Hook capability set.
+    /// Outbox worker capability set.
     Worker,
 }
 
@@ -114,10 +114,6 @@ pub struct DatabaseSettings {
 pub struct IntegrationSettings {
     /// IAM authentication and directory settings.
     pub iam: IamSettings,
-    /// Briefcase temporary-URL adapter settings.
-    pub briefcase: BriefcaseSettings,
-    /// Hook delivery settings.
-    pub hook: HookSettings,
     /// Outbound connect deadline.
     pub connect_timeout: Duration,
     /// Outbound request deadline.
@@ -147,24 +143,6 @@ pub struct IamSettings {
     pub webhook_key_version: i64,
 }
 
-/// Silicon Briefcase adapter settings.
-#[derive(Clone, Debug)]
-pub struct BriefcaseSettings {
-    /// Briefcase API base URL.
-    pub base_url: Url,
-    /// HTTPS origins classified as Briefcase entries for temporary access.
-    pub allowed_origins: Vec<Url>,
-}
-
-/// Silicon Hook delivery adapter settings.
-#[derive(Clone, Debug)]
-pub struct HookSettings {
-    /// Internal Hook event-publication endpoint for snapshotted destinations.
-    pub publish_url: Option<Url>,
-    /// IAM service credential scoped to the internal Hook audience.
-    pub service_token: Option<SecretString>,
-}
-
 /// Defensive domain input limits.
 #[derive(Clone, Debug)]
 pub struct LimitSettings {
@@ -189,7 +167,7 @@ pub struct LimitSettings {
 pub struct WorkerSettings {
     /// Maximum events recovered or considered in one database batch.
     pub batch_size: NonZeroUsize,
-    /// Maximum Hook requests executing concurrently in one worker replica.
+    /// Maximum webhook requests executing concurrently in one worker replica.
     pub delivery_concurrency: NonZeroUsize,
     /// Delay between empty polls.
     pub poll_interval: Duration,
@@ -241,7 +219,7 @@ impl Settings {
 
     /// Loads and validates settings for the outbox worker process.
     ///
-    /// IAM, Briefcase, authentication, and HTTP-listener environment variables
+    /// IAM, authentication, and HTTP-listener environment variables
     /// are deliberately not read by this profile.
     ///
     /// # Errors
@@ -362,64 +340,34 @@ fn inactive_server_settings() -> Result<ServerSettings, SettingsError> {
 fn load_integrations(
     runtime_profile: RuntimeProfile,
 ) -> Result<IntegrationSettings, SettingsError> {
-    let (iam, briefcase, hook) = match runtime_profile {
-        RuntimeProfile::Api => (
-            IamSettings {
-                mode: parse_or("COMMIT_AUTH_MODE", "iam")?,
-                base_url: parse_url_or(
-                    "COMMIT_IAM_BASE_URL",
-                    "https://iam.teamofsilicons.com/api/v1/",
-                )?,
-                app_id: optional("COMMIT_IAM_APP_ID"),
-                app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
-                audience: value_or("COMMIT_IAM_AUDIENCE", "silicon-commit"),
-                directory_token: optional_secret("COMMIT_IAM_DIRECTORY_TOKEN"),
-                webhook_secret: optional_secret("COMMIT_WEBHOOK_SIGNING_SECRET"),
-                webhook_key_version: parse_or("COMMIT_WEBHOOK_KEY_VERSION", "1")?,
-            },
-            BriefcaseSettings {
-                base_url: parse_url_or(
-                    "COMMIT_BRIEFCASE_BASE_URL",
-                    "https://briefcase.teamofsilicons.com/api/v1/",
-                )?,
-                allowed_origins: parse_origins("COMMIT_BRIEFCASE_ALLOWED_ORIGINS")?,
-            },
-            HookSettings {
-                publish_url: None,
-                service_token: None,
-            },
-        ),
-        RuntimeProfile::Worker => (
-            IamSettings {
-                mode: AuthenticationMode::Iam,
-                base_url: parse_url_value("COMMIT_IAM_BASE_URL", "http://unused.invalid/")?,
-                app_id: None,
-                app_secret: None,
-                audience: String::new(),
-                directory_token: None,
-                webhook_secret: None,
-                webhook_key_version: 1,
-            },
-            BriefcaseSettings {
-                base_url: parse_url_value("COMMIT_BRIEFCASE_BASE_URL", "http://unused.invalid/")?,
-                allowed_origins: Vec::new(),
-            },
-            HookSettings {
-                publish_url: optional("COMMIT_HOOK_PUBLISH_URL")
-                    .map(|value| {
-                        Url::parse(&value)
-                            .map_err(|error| invalid("COMMIT_HOOK_PUBLISH_URL", error.to_string()))
-                    })
-                    .transpose()?,
-                service_token: optional_secret("COMMIT_HOOK_SERVICE_TOKEN"),
-            },
-        ),
+    let iam = match runtime_profile {
+        RuntimeProfile::Api => IamSettings {
+            mode: parse_or("COMMIT_AUTH_MODE", "iam")?,
+            base_url: parse_url_or(
+                "COMMIT_IAM_BASE_URL",
+                "https://iam.teamofsilicons.com/api/v1/",
+            )?,
+            app_id: optional("COMMIT_IAM_APP_ID"),
+            app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
+            audience: value_or("COMMIT_IAM_AUDIENCE", "silicon-commit"),
+            directory_token: optional_secret("COMMIT_IAM_DIRECTORY_TOKEN"),
+            webhook_secret: optional_secret("COMMIT_WEBHOOK_SIGNING_SECRET"),
+            webhook_key_version: parse_or("COMMIT_WEBHOOK_KEY_VERSION", "1")?,
+        },
+        RuntimeProfile::Worker => IamSettings {
+            mode: AuthenticationMode::Iam,
+            base_url: parse_url_value("COMMIT_IAM_BASE_URL", "http://unused.invalid/")?,
+            app_id: None,
+            app_secret: None,
+            audience: String::new(),
+            directory_token: None,
+            webhook_secret: None,
+            webhook_key_version: 1,
+        },
     };
 
     Ok(IntegrationSettings {
         iam,
-        briefcase,
-        hook,
         connect_timeout: duration_millis("COMMIT_PROVIDER_CONNECT_TIMEOUT_MS", 1_000)?,
         request_timeout: duration_secs("COMMIT_PROVIDER_TIMEOUT_SECONDS", 5)?,
         max_response_bytes: parse_or("COMMIT_PROVIDER_MAX_RESPONSE_BYTES", "1048576")?,
@@ -644,7 +592,11 @@ fn validate_integrations(
 
     match runtime_profile {
         RuntimeProfile::Api => validate_api_integrations(environment, integrations),
-        RuntimeProfile::Worker => validate_worker_integrations(environment, integrations),
+        RuntimeProfile::Worker => {
+            let _ = environment;
+            let _ = integrations;
+            Ok(())
+        }
     }
 }
 
@@ -682,62 +634,7 @@ fn validate_api_integrations(
         &integrations.iam.base_url,
         "COMMIT_IAM_BASE_URL",
     )?;
-    validate_http_url(
-        environment,
-        &integrations.briefcase.base_url,
-        "COMMIT_BRIEFCASE_BASE_URL",
-    )?;
-    if integrations.briefcase.allowed_origins.is_empty() {
-        return Err(invalid(
-            "COMMIT_BRIEFCASE_ALLOWED_ORIGINS",
-            "must contain at least one origin",
-        ));
-    }
-    for origin in &integrations.briefcase.allowed_origins {
-        validate_http_url(environment, origin, "COMMIT_BRIEFCASE_ALLOWED_ORIGINS")?;
-        if origin.path() != "/" || origin.query().is_some() || origin.fragment().is_some() {
-            return Err(invalid(
-                "COMMIT_BRIEFCASE_ALLOWED_ORIGINS",
-                "each value must be an origin without a path, query, or fragment",
-            ));
-        }
-    }
-
     Ok(())
-}
-
-fn validate_worker_integrations(
-    environment: RuntimeEnvironment,
-    integrations: &IntegrationSettings,
-) -> Result<(), SettingsError> {
-    match (
-        &integrations.hook.publish_url,
-        &integrations.hook.service_token,
-    ) {
-        (Some(url), Some(_)) => {
-            validate_http_url(environment, url, "COMMIT_HOOK_PUBLISH_URL")?;
-        }
-        (None, None) if environment != RuntimeEnvironment::Production => {}
-        (None, None) => {
-            return Err(SettingsError::Missing("COMMIT_HOOK_PUBLISH_URL"));
-        }
-        _ => {
-            return Err(invalid(
-                "COMMIT_HOOK_PUBLISH_URL",
-                "publish URL and service token must be configured together",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn parse_origins(name: &'static str) -> Result<Vec<Url>, SettingsError> {
-    let raw = value_or(name, "https://briefcase.teamofsilicons.com");
-    raw.split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| Url::parse(value).map_err(|error| invalid(name, error.to_string())))
-        .collect()
 }
 
 fn parse_optional_origins(name: &'static str) -> Result<Vec<Url>, SettingsError> {
@@ -944,11 +841,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        AuthenticationMode, BriefcaseSettings, HookSettings, IamSettings, IntegrationSettings,
-        LimitSettings, RuntimeEnvironment, RuntimeProfile, SettingsError, WorkerSettings,
-        environment_from_value, parse_url_value, validate_database_transport,
-        validate_domain_limit_caps, validate_i64_quantity, validate_integrations,
-        validate_public_base_url, validate_worker_settings,
+        AuthenticationMode, IamSettings, IntegrationSettings, LimitSettings, RuntimeEnvironment,
+        RuntimeProfile, SettingsError, WorkerSettings, environment_from_value, parse_url_value,
+        validate_database_transport, validate_domain_limit_caps, validate_i64_quantity,
+        validate_integrations, validate_public_base_url, validate_worker_settings,
     };
 
     #[test]
@@ -973,10 +869,8 @@ mod tests {
     }
 
     #[test]
-    fn api_profile_validates_only_iam_and_briefcase_adapters() {
+    fn api_profile_validates_iam_only() {
         let mut integrations = integration_settings();
-        integrations.hook.publish_url = Some(url("http://insecure-hook.invalid/events"));
-        integrations.hook.service_token = None;
 
         assert!(
             validate_integrations(
@@ -999,15 +893,13 @@ mod tests {
     }
 
     #[test]
-    fn worker_profile_validates_only_hook_adapter() {
+    fn worker_profile_requires_no_external_service_credentials() {
         let mut integrations = integration_settings();
         integrations.iam.mode = AuthenticationMode::TrustedHeaders;
         integrations.iam.base_url = url("http://insecure-iam.invalid/");
         integrations.iam.app_id = None;
         integrations.iam.app_secret = None;
         integrations.iam.directory_token = None;
-        integrations.briefcase.base_url = url("http://insecure-briefcase.invalid/");
-        integrations.briefcase.allowed_origins.clear();
 
         assert!(
             validate_integrations(
@@ -1018,16 +910,14 @@ mod tests {
             .is_ok()
         );
 
-        integrations.hook.publish_url = None;
-        integrations.hook.service_token = None;
-        assert!(matches!(
+        assert!(
             validate_integrations(
                 RuntimeProfile::Worker,
                 RuntimeEnvironment::Production,
                 &integrations,
-            ),
-            Err(SettingsError::Missing("COMMIT_HOOK_PUBLISH_URL"))
-        ));
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1335,14 +1225,6 @@ mod tests {
                 webhook_key_version: 1,
                 audience: "silicon-commit".to_owned(),
                 directory_token: Some(SecretString::from("directory-token")),
-            },
-            briefcase: BriefcaseSettings {
-                base_url: url("https://briefcase.example.test/api/v1/"),
-                allowed_origins: vec![url("https://briefcase.example.test/")],
-            },
-            hook: HookSettings {
-                publish_url: Some(url("https://hook.example.test/events")),
-                service_token: Some(SecretString::from("hook-token")),
             },
             connect_timeout: Duration::from_secs(1),
             request_timeout: provider_timeout(),

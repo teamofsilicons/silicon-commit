@@ -32,10 +32,6 @@ OBO support is fail-closed behind IAM extending its currently IAM-only action
 catalog with the `commit.*` actions in this contract. Bearer authentication is
 the deployable path until that cross-service release gate is satisfied.
 
-The temporary attachment URL operation is currently bearer-only. IAM has not
-yet published the child-delegation contract needed to derive a new
-Briefcase-audience proof from an incoming Commit-audience OBO proof.
-
 Notification settings are self-scoped: only an authenticated Silicon may read
 or replace its own destination and subscriptions. Organization management
 authority does not grant access to another Silicon's notification settings.
@@ -55,8 +51,8 @@ endpoints. A key is scoped to the organization, actor, operation, and resource
 path. An exact retry within 24 hours replays the stored status and JSON and
 returns `Idempotency-Replayed: true`; a fresh response carries `false`.
 Reusing a key for different input returns `409`. Todo, project, and project-task
-creates also return an absolute canonical `Location`; append-only entries and
-temporary URL generation do not.
+creates also return an absolute canonical `Location`; append-only entries do
+not.
 
 Deployments may retain replays longer, but configuration cannot reduce the
 public 24-hour guarantee. Browser clients on an allowed CORS origin can read
@@ -366,24 +362,9 @@ second statement; another completion attempt returns a conflict.
 
 Todo attachment storage is provider-neutral. Creating or updating a todo only
 validates and canonicalizes each HTTPS URL; it does not contact the provider.
-Todo representations return those canonical permanent references. Clients use
-external-provider URLs directly when rendering; Commit does not fetch or proxy
-them. The Briefcase allowlist is used solely to classify URLs whose rendering
-requires temporary access.
-
-### `POST /attachments/temporary-url`
-
-Accepts a stored attachment as `permanent_url` and returns a short-lived `url`
-and `expires_at` only when it is a canonical Briefcase entry. The URL must
-currently belong to a visible, non-deleted todo in the caller's organization
-and match the exact `/entries/{uuid}` resource path beneath a configured
-Briefcase base. This is not a general-purpose URL resolver: a generic
-external-provider URL returns `422` after normal request authentication but
-before an IAM child-proof exchange or Briefcase call. Commit asks IAM for a new
-proof bound to Briefcase, the temporary-URL action, and the entry UUID; it never
-forwards an incoming credential to Briefcase. This operation requires bearer
-authentication until IAM supports child delegation from OBO. Uploading bytes is
-out of scope.
+Todo representations return those canonical URL references. Clients use
+external-provider URLs directly when rendering; Commit does not upload, fetch,
+or proxy attachment content.
 
 ## Durable notification flow
 
@@ -414,4 +395,4 @@ queued event.
 - Notes are append-only and have no edit/delete routes.
 - Activity and restore APIs are not exposed.
 - Project and todo visibility is organization-wide rather than configurable.
-- Uploading attachment bytes remains Briefcase's responsibility.
+- Uploading attachment bytes is outside Commit's scope.

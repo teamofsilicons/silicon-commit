@@ -16,7 +16,7 @@ tags:
   - name: Operations
     description: Public build metadata for deployment verification.
   - name: Notifications
-    description: Silicon-owned Hook destination and delegated-todo subscriptions.
+    description: Silicon-owned webhook destination and delegated-todo subscriptions.
   - name: Todos
     description: Personal and delegated organization-visible work.
   - name: Projects
@@ -26,7 +26,7 @@ tags:
   - name: Project Work
     description: Project tasks, blockers, updates, and completion.
   - name: Attachments
-    description: Provider-neutral attachment references and Briefcase-only temporary access.
+    description: Provider-neutral attachment URL references stored on todos.
   - name: Testing Environments
     description: Organization-owned isolated Commit environments linked to IAM testing environments.
 paths:
@@ -202,7 +202,7 @@ paths:
         - $ref: '#/components/parameters/RequestId'
       responses:
         '200':
-          description: Complete optional Hook destination and list-wide subscription.
+          description: Complete optional webhook destination and list-wide subscription.
           headers:
             X-Request-ID: { $ref: '#/components/headers/XRequestId' }
             Cache-Control: { $ref: '#/components/headers/CacheControl' }
@@ -715,30 +715,6 @@ paths:
               schema: { $ref: '#/components/schemas/ProjectEntry' }
         '429': { $ref: '#/components/responses/RateLimited' }
         default: { $ref: '#/components/responses/Error' }
-  /attachments/temporary-url:
-    post:
-      tags: [Attachments]
-      summary: Create an attachment temporary URL
-      operationId: createAttachmentTemporaryUrl
-      description: Bearer-only until IAM publishes child delegation from an incoming OBO proof. The URL must already be attached to a visible active todo and classify as a canonical entry under a configured Briefcase base. Other provider URLs are rendered directly from todo representations and return 422 here after normal request authentication but before IAM child-proof exchange or a Briefcase call.
-      security:
-        - bearerAuth: []
-      parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [permanent_url], additionalProperties: false, properties: { permanent_url: { $ref: '#/components/schemas/AttachmentUrl' } } } } } }
-      responses:
-        '201':
-          description: Briefcase temporary URL.
-          headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TemporaryUrl' }
-        '422': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
@@ -860,7 +836,7 @@ components:
       format: uri
       maxLength: 2048
       pattern: '^https://'
-      description: Canonical absolute HTTPS URL from any image provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed. Todo representations return the stored canonical value, and clients render non-Briefcase URLs directly.
+      description: Canonical absolute HTTPS URL from any provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed. Commit stores and returns this URL; uploading and fetching remain outside its scope.
     ActorRef:
       type: object
       required: [type, id]
@@ -886,8 +862,8 @@ components:
       type: string
       format: uri
       maxLength: 2048
-      pattern: '^https://[^/?#@]+/silicon/[^/?#]+/[0-9A-F]{6}$'
-      description: Canonical actor-bound Silicon Hook public ingress URL. The Silicon path segment must equal the authenticated Silicon ID; credentials, query, fragment, non-default port, localhost, and non-public literal addresses are forbidden.
+      pattern: '^https://[^/?#@]+(/[^?#]*)?$'
+      description: Canonical HTTPS webhook destination. Credentials, query, fragment, non-default port, localhost, and non-public literal addresses are forbidden.
     NotificationSettingsUpdate:
       type: object
       required: [webhook_url, todo_list_subscription]
@@ -1064,20 +1040,6 @@ components:
       required: [id, project_id, type, title, description, created_by, created_at]
       additionalProperties: false
       properties: { id: { type: string, format: uuid }, project_id: { type: string, format: uuid }, type: { type: string, enum: [blocker, update, completion] }, title: { $ref: '#/components/schemas/TitleText' }, description: { $ref: '#/components/schemas/DescriptionText' }, status: { type: string, enum: [open, resolved] }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
-    TemporaryUrl:
-      type: object
-      required: [url, expires_at]
-      additionalProperties: false
-      properties:
-        url:
-          type: string
-          format: uri
-          maxLength: 8192
-          pattern: '^https://'
-          description: Short-lived HTTPS delivery URL. Credentials, fragments, and non-default ports are rejected; an opaque query string is allowed.
-        expires_at:
-          type: string
-          format: date-time
           description: Future provider expiry no later than twelve hours when Commit receives the response.
     Error:
       type: object

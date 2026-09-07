@@ -7,24 +7,23 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
-use url::Url;
 use uuid::Uuid;
 
 use crate::domain::{
     NotificationScope, NotificationSubscriptionLevel, NotificationVersion, WebhookUrl,
     actor::{Actor, ActorType},
-    attachment::BriefcaseAttachmentUrl,
     ids::{ActorId, OrganizationId, PublicOrganizationId},
 };
+
+// Retained for backwards-compatible IAM child-proof clients. Commit no longer
+// exposes a Briefcase capability or invokes this scope.
+const BRIEFCASE_AUDIENCE: &str = "silicon-briefcase";
+const BRIEFCASE_TEMPORARY_URL_ACTION: &str = "briefcase.file.temporary_url";
 
 /// IAM capability which grants organization-wide todo management.
 pub const TODO_MANAGE_CAPABILITY: &str = "commit.todos.manage";
 /// IAM capability which grants organization-wide project management.
 pub const PROJECT_MANAGE_CAPABILITY: &str = "commit.projects.manage";
-/// IAM audience used by Silicon Briefcase.
-pub const BRIEFCASE_AUDIENCE: &str = "silicon-briefcase";
-/// IAM action required to mint a Briefcase temporary download URL.
-pub const BRIEFCASE_TEMPORARY_URL_ACTION: &str = "briefcase.file.temporary_url";
 
 /// A single credential accepted at Commit's public authentication boundary.
 ///
@@ -324,6 +323,7 @@ impl ChildProofRequest {
 
 /// Newly exchanged proof which can be sent only to its target service.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct DelegatedOboProof {
     app_id: String,
     proof: SecretString,
@@ -363,6 +363,7 @@ impl DelegatedOboProof {
     }
 
     /// Exposes the proof only to infrastructure adapters.
+    #[allow(dead_code)]
     pub(crate) fn expose_proof(&self) -> &str {
         self.proof.expose_secret()
     }
@@ -455,31 +456,9 @@ pub trait IdentityProvider: Send + Sync {
     ) -> Result<DelegatedOboProof, ProviderError>;
 }
 
-/// Successful Briefcase temporary URL response.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TemporaryUrl {
-    /// Short-lived HTTPS CDN URL. This value must never be persisted as an attachment.
-    pub url: Url,
-    /// Provider-declared expiry.
-    pub expires_at: OffsetDateTime,
-}
-
-/// Briefcase temporary-download boundary. It accepts only a newly delegated
-/// proof, making direct bearer or parent-proof forwarding impossible.
-#[async_trait]
-pub trait BriefcaseProvider: Send + Sync {
-    /// Requests a temporary URL for one strictly classified Briefcase entry URL.
-    async fn temporary_url(
-        &self,
-        org_id: &PublicOrganizationId,
-        attachment: &BriefcaseAttachmentUrl,
-        proof: &DelegatedOboProof,
-    ) -> Result<TemporaryUrl, ProviderError>;
-}
-
 /// Immutable endpoint and subscription decision captured with an outbox event.
 #[derive(Clone, Eq, PartialEq)]
-pub struct HookRoutingSnapshot {
+pub struct WebhookRoutingSnapshot {
     webhook_url: WebhookUrl,
     destination_version: NotificationVersion,
     subscription_level: NotificationSubscriptionLevel,
@@ -487,10 +466,10 @@ pub struct HookRoutingSnapshot {
     subscription_version: NotificationVersion,
 }
 
-impl fmt::Debug for HookRoutingSnapshot {
+impl fmt::Debug for WebhookRoutingSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("HookRoutingSnapshot")
+            .debug_struct("WebhookRoutingSnapshot")
             .field("webhook_url", &"[REDACTED]")
             .field("destination_version", &self.destination_version)
             .field("subscription_level", &self.subscription_level)
@@ -500,7 +479,7 @@ impl fmt::Debug for HookRoutingSnapshot {
     }
 }
 
-impl HookRoutingSnapshot {
+impl WebhookRoutingSnapshot {
     /// Creates a complete immutable routing decision for one outbox event.
     ///
     /// # Errors
@@ -513,9 +492,9 @@ impl HookRoutingSnapshot {
         subscription_level: NotificationSubscriptionLevel,
         subscription_scope: NotificationScope,
         subscription_version: NotificationVersion,
-    ) -> Result<Self, HookRoutingSnapshotError> {
+    ) -> Result<Self, WebhookRoutingSnapshotError> {
         if destination_version.get() == 0 || subscription_version.get() == 0 {
-            return Err(HookRoutingSnapshotError::NonPositiveVersion);
+            return Err(WebhookRoutingSnapshotError::NonPositiveVersion);
         }
         Ok(Self {
             webhook_url,
@@ -557,20 +536,20 @@ impl HookRoutingSnapshot {
     }
 }
 
-/// Invalid immutable Hook routing snapshot.
+/// Invalid immutable webhook routing snapshot.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum HookRoutingSnapshotError {
+pub enum WebhookRoutingSnapshotError {
     /// A virtual version-zero settings resource cannot supply a delivery route.
-    #[error("Hook routing snapshot versions must be positive")]
+    #[error("Webhook routing snapshot versions must be positive")]
     NonPositiveVersion,
 }
 
-/// Minimal durable event submitted to Hook's authenticated internal ingress.
+/// Minimal durable event submitted to a configured webhook endpoint.
 #[derive(Clone, Debug, PartialEq)]
-pub struct HookEvent {
+pub struct WebhookEvent {
     /// Stable outbox event and downstream idempotency identifier.
     pub event_id: Uuid,
-    /// Public organization handle used by Hook to scope dispatch.
+    /// Public organization handle associated with the event.
     pub org_id: PublicOrganizationId,
     /// Public Silicon handle which owns the snapshotted endpoint.
     pub silicon_id: ActorId,
@@ -583,32 +562,32 @@ pub struct HookEvent {
     /// Cross-service trace identifier, when present.
     pub trace_id: Option<String>,
     /// Immutable destination and subscription decision; absent only for legacy rows.
-    pub routing_snapshot: Option<HookRoutingSnapshot>,
+    pub routing_snapshot: Option<WebhookRoutingSnapshot>,
     /// Minimal versioned event data; never credentials or a request body copy.
     pub payload: Value,
 }
 
-/// Stable redacted Hook delivery failure categories.
+/// Stable redacted webhook delivery failure categories.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum HookPublishError {
+pub enum WebhookPublishError {
     /// Transport, credential, routing, or server state may recover on retry.
-    #[error("Hook publication is temporarily unavailable")]
+    #[error("Webhook delivery is temporarily unavailable")]
     Unavailable,
-    /// Hook throttled the service credential.
-    #[error("Hook publication was rate limited")]
+    /// Webhook endpoint rate limited the request.
+    #[error("Webhook publication was rate limited")]
     RateLimited {
         /// Provider-supplied bounded retry delay, when valid.
         retry_after: Option<Duration>,
     },
-    /// Hook returned an invalid successful response.
-    #[error("Hook returned an invalid response")]
+    /// Webhook endpoint returned an invalid response.
+    #[error("Webhook endpoint returned an invalid response")]
     InvalidResponse,
-    /// Hook definitively rejected the immutable event payload.
-    #[error("Hook rejected the event payload")]
+    /// Webhook endpoint definitively rejected the event payload.
+    #[error("Webhook endpoint rejected the event payload")]
     Rejected,
 }
 
-impl HookPublishError {
+impl WebhookPublishError {
     /// Whether the durable outbox worker should retry this failure.
     #[must_use]
     pub const fn is_retryable(self) -> bool {
@@ -619,19 +598,19 @@ impl HookPublishError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
-            Self::Unavailable => "hook_unavailable",
-            Self::RateLimited { .. } => "hook_rate_limited",
-            Self::InvalidResponse => "hook_invalid_response",
-            Self::Rejected => "hook_event_rejected",
+            Self::Unavailable => "webwebhook_unavailable",
+            Self::RateLimited { .. } => "webwebhook_rate_limited",
+            Self::InvalidResponse => "webwebhook_invalid_response",
+            Self::Rejected => "webwebhook_event_rejected",
         }
     }
 }
 
-/// Authenticated Silicon Hook internal-publication boundary.
+/// Authenticated Silicon webhook publication boundary.
 #[async_trait]
-pub trait HookPublisher: Send + Sync {
+pub trait WebhookPublisher: Send + Sync {
     /// Publishes one immutable event, reusing `event_id` as the idempotency key.
-    async fn publish(&self, event: &HookEvent) -> Result<(), HookPublishError>;
+    async fn publish(&self, event: &WebhookEvent) -> Result<(), WebhookPublishError>;
 }
 
 fn validate_secret(secret: &SecretString) -> Result<(), CredentialError> {

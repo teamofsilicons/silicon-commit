@@ -421,14 +421,6 @@ impl Client {
         self.write(Method::POST, &["projects", project_id, "completion"], body)
             .await
     }
-    /// POST /api/v1/attachments/temporary-url.
-    pub async fn temporary_attachment_url<T: Serialize + ?Sized>(
-        &self,
-        body: &T,
-    ) -> Result<Value, Error> {
-        self.write(Method::POST, &["attachments", "temporary-url"], body)
-            .await
-    }
     /// GET /api/v1/test-environments.
     pub async fn list_test_environments(&self) -> Result<Value, Error> {
         self.get(&["test-environments"], &[]).await

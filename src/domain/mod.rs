@@ -10,10 +10,7 @@ pub mod todo;
 pub mod validation;
 
 pub use actor::{Actor, ActorRef, ActorType, ParseActorTypeError};
-pub use attachment::{
-    AttachmentUrl, AttachmentUrlError, BriefcaseAttachmentUrl, BriefcasePolicyError,
-    BriefcaseUrlError, BriefcaseUrlPolicy, MAX_ATTACHMENT_URL_BYTES,
-};
+pub use attachment::{AttachmentUrl, AttachmentUrlError, MAX_ATTACHMENT_URL_BYTES};
 pub use ids::{
     ActorId, MAX_PUBLIC_ID_CHARS, OrganizationId, PrincipalId, ProjectEntryId, ProjectId,
     ProjectTaskId, PublicIdError, PublicOrganizationId, TodoId, TodoNoteId,

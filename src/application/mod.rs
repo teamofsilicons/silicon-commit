@@ -1,6 +1,5 @@
 //! Application use cases and external-service ports.
 
-pub mod attachments;
 pub mod authorization;
 pub mod idempotency;
 pub mod notifications;

@@ -4,10 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     num::{NonZeroU32, NonZeroUsize},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -16,32 +13,30 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 use sqlx::PgPool;
 use time::OffsetDateTime;
-use url::Url;
 use uuid::Uuid;
 
 use silicon_commit::{
     application::{
-        attachments::{AttachmentService, TemporaryUrlRequest},
         idempotency::{IdempotencyKey, MutationResponse},
         notifications::NotificationSettingsService,
         ports::{
-            ActiveMember, AuthenticationRequest, BriefcaseProvider, CapabilitySet,
-            ChildProofRequest, DelegatedOboProof, IdentityProvider, InboundCredential,
-            OrganizationRole, ProviderError, TemporaryUrl, TrustedIdentity, VerifiedActor,
+            ActiveMember, AuthenticationRequest, CapabilitySet, ChildProofRequest,
+            DelegatedOboProof, IdentityProvider, InboundCredential, OrganizationRole,
+            ProviderError, TrustedIdentity, VerifiedActor,
         },
         projects::ProjectService,
         todos::TodoService,
     },
     config::DatabaseSettings,
     domain::{
-        Actor, ActorId, ActorType, AttachmentUrl, BlockerCreate, BlockerStatus,
-        BriefcaseAttachmentUrl, BriefcaseUrlPolicy, CollectionQuery, DiaryUpdate, DomainLimits,
-        ExpectedDiaryVersion, ExpectedNotificationVersion, NotificationRuleInput,
-        NotificationScope, NotificationSettingsUpdate, NullablePatch, OrganizationId, PageLimit,
-        PrincipalId, ProjectCompletionCreate, ProjectCreate, ProjectId, ProjectLocator,
-        ProjectPatch, ProjectQuery, ProjectStatus, ProjectTaskCreate, ProjectTaskId,
-        ProjectTaskPatch, ProjectUpdateCreate, PublicOrganizationId, TodoCreate, TodoId,
-        TodoNoteCreate, TodoNotificationSubscriptionUpdate, TodoPatch, TodoQuery, TodoStatus,
+        Actor, ActorId, ActorType, AttachmentUrl, BlockerCreate, BlockerStatus, CollectionQuery,
+        DiaryUpdate, DomainLimits, ExpectedDiaryVersion, ExpectedNotificationVersion,
+        NotificationRuleInput, NotificationScope, NotificationSettingsUpdate, NullablePatch,
+        OrganizationId, PageLimit, PrincipalId, ProjectCompletionCreate, ProjectCreate, ProjectId,
+        ProjectLocator, ProjectPatch, ProjectQuery, ProjectStatus, ProjectTaskCreate,
+        ProjectTaskId, ProjectTaskPatch, ProjectUpdateCreate, PublicOrganizationId, TodoCreate,
+        TodoId, TodoNoteCreate, TodoNotificationSubscriptionUpdate, TodoPatch, TodoQuery,
+        TodoStatus,
     },
     error::AppError,
     infrastructure::postgres,
@@ -156,88 +151,6 @@ impl IdentityProvider for TestDirectory {
         _request: &ChildProofRequest,
     ) -> Result<DelegatedOboProof, ProviderError> {
         Err(ProviderError::Unavailable)
-    }
-}
-
-#[derive(Default)]
-struct AttachmentDependencyProbe {
-    iam_calls: AtomicUsize,
-    briefcase_calls: AtomicUsize,
-    child_proof_requests: Mutex<Vec<ChildProofRequest>>,
-    briefcase_requests: Mutex<Vec<(PublicOrganizationId, String)>>,
-}
-
-impl AttachmentDependencyProbe {
-    fn child_proof_requests(&self) -> Vec<ChildProofRequest> {
-        self.child_proof_requests.lock().map_or_else(
-            |poisoned| poisoned.into_inner().clone(),
-            |requests| requests.clone(),
-        )
-    }
-
-    fn briefcase_requests(&self) -> Vec<(PublicOrganizationId, String)> {
-        self.briefcase_requests.lock().map_or_else(
-            |poisoned| poisoned.into_inner().clone(),
-            |requests| requests.clone(),
-        )
-    }
-}
-
-#[async_trait]
-impl IdentityProvider for AttachmentDependencyProbe {
-    async fn authenticate(
-        &self,
-        _request: &AuthenticationRequest,
-    ) -> Result<VerifiedActor, ProviderError> {
-        Err(ProviderError::Unavailable)
-    }
-
-    async fn resolve_active_members(
-        &self,
-        _org_id: &PublicOrganizationId,
-        _actor_ids: &[ActorId],
-        _required_type: Option<ActorType>,
-    ) -> Result<Vec<ActiveMember>, ProviderError> {
-        Err(ProviderError::Unavailable)
-    }
-
-    async fn exchange_child_proof(
-        &self,
-        _actor: &VerifiedActor,
-        request: &ChildProofRequest,
-    ) -> Result<DelegatedOboProof, ProviderError> {
-        self.iam_calls.fetch_add(1, Ordering::Relaxed);
-        self.child_proof_requests
-            .lock()
-            .map_err(|_| ProviderError::Unavailable)?
-            .push(request.clone());
-        DelegatedOboProof::new(
-            "commit-test".to_owned(),
-            SecretString::from("delegated-test-proof"),
-            OffsetDateTime::now_utc() + Duration::from_secs(300),
-        )
-        .map_err(|_| ProviderError::InvalidResponse)
-    }
-}
-
-#[async_trait]
-impl BriefcaseProvider for AttachmentDependencyProbe {
-    async fn temporary_url(
-        &self,
-        org_id: &PublicOrganizationId,
-        attachment: &BriefcaseAttachmentUrl,
-        _proof: &DelegatedOboProof,
-    ) -> Result<TemporaryUrl, ProviderError> {
-        self.briefcase_calls.fetch_add(1, Ordering::Relaxed);
-        self.briefcase_requests
-            .lock()
-            .map_err(|_| ProviderError::Unavailable)?
-            .push((org_id.clone(), attachment.as_str().to_owned()));
-        Ok(TemporaryUrl {
-            url: Url::parse("https://cdn.briefcase.example/render/test?signature=opaque")
-                .map_err(|_| ProviderError::InvalidResponse)?,
-            expires_at: OffsetDateTime::now_utc() + Duration::from_secs(3_600),
-        })
     }
 }
 
@@ -688,76 +601,6 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
         vec![attachment.clone(), external_attachment.clone()]
     );
 
-    let dependency_probe = Arc::new(AttachmentDependencyProbe::default());
-    let identity: Arc<dyn IdentityProvider> = dependency_probe.clone();
-    let briefcase: Arc<dyn BriefcaseProvider> = dependency_probe.clone();
-    let attachment_service =
-        AttachmentService::new(pool.clone(), identity, briefcase, briefcase_policy()?);
-    let external_temporary_url = attachment_service
-        .temporary_url(
-            &assigner,
-            TemporaryUrlRequest {
-                permanent_url: AttachmentUrl::new(&external_attachment)?,
-            },
-        )
-        .await;
-    assert!(matches!(
-        external_temporary_url,
-        Err(AppError::Validation { ref details })
-            if details.get("permanent_url").is_some()
-    ));
-    assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 0);
-
-    let temporary_url = attachment_service
-        .temporary_url(
-            &assigner,
-            TemporaryUrlRequest {
-                permanent_url: AttachmentUrl::new(&attachment)?,
-            },
-        )
-        .await?;
-    assert_eq!(
-        temporary_url.url.as_str(),
-        "https://cdn.briefcase.example/render/test?signature=opaque"
-    );
-    assert!(temporary_url.expires_at > OffsetDateTime::now_utc());
-    assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        dependency_probe.child_proof_requests(),
-        vec![ChildProofRequest::briefcase_temporary_url(attachment_id)]
-    );
-    assert_eq!(
-        dependency_probe.briefcase_requests(),
-        vec![(organization.public_id.clone(), attachment.clone())]
-    );
-
-    let unattached_briefcase_url = format!(
-        "https://briefcase.example/api/v1/entries/{}",
-        Uuid::new_v4().hyphenated()
-    );
-    let unattached = attachment_service
-        .temporary_url(
-            &assigner,
-            TemporaryUrlRequest {
-                permanent_url: AttachmentUrl::new(&unattached_briefcase_url)?,
-            },
-        )
-        .await;
-    assert!(matches!(unattached, Err(AppError::NotFound)));
-
-    let cross_organization = attachment_service
-        .temporary_url(
-            &other_tenant_actor,
-            TemporaryUrlRequest {
-                permanent_url: AttachmentUrl::new(&attachment)?,
-            },
-        )
-        .await;
-    assert!(matches!(cross_organization, Err(AppError::NotFound)));
-    assert_eq!(dependency_probe.iam_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(dependency_probe.briefcase_calls.load(Ordering::Relaxed), 1);
     let initial_projection_versions = sqlx::query_as::<_, (i64, i64, i64)>(
         r"
         SELECT organization.xmin::text::bigint,
@@ -2595,11 +2438,6 @@ fn active_member(actor: &VerifiedActor) -> ActiveMember {
         membership_id: actor.membership_id,
         actor: actor.actor.clone(),
     }
-}
-
-fn briefcase_policy() -> anyhow::Result<BriefcaseUrlPolicy> {
-    let base = Url::parse("https://briefcase.example/api/v1")?;
-    BriefcaseUrlPolicy::new([base]).map_err(Into::into)
 }
 
 fn unique_key(prefix: &str) -> anyhow::Result<IdempotencyKey> {

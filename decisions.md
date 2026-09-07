@@ -291,17 +291,15 @@ IAM's original published contract acknowledges that proof exchange was absent.
 The platform's in-progress `/api/v1/obo-access/exchanges` operation is the
 required deployment dependency and must be contract-tested before release.
 
-## D-023 — Hook owns per-Silicon endpoint credentials
+## D-023 — Commit delivers directly to configured webhook URLs
 
 **Status:** Accepted; supersedes the URL-template/shared-secret detail in D-015
 
-Commit does not provision or retain per-Silicon Hook endpoint keys and signing
-secrets. Its worker publishes a minimal event to one authenticated internal Hook
-ingress configured by URL and IAM service credential; Hook resolves the target
-Silicon and owns endpoint routing. If that internal publish contract is absent,
-events remain retryable/dead-lettered in Commit's outbox and production
-readiness reports the integration unavailable. A global HMAC key is not used as
-a substitute for Hook's per-endpoint secrets.
+Commit stores only the HTTPS webhook URL selected by the authenticated Silicon.
+Its worker POSTs the immutable event directly to that URL with the outbox event
+UUID as idempotency key. No Hook service, endpoint credential, or signing secret
+is required; delivery failures remain retryable or dead-lettered in Commit's
+durable outbox.
 
 ## D-024 — IAM internal identities back persistent relationships
 
@@ -794,7 +792,7 @@ driver-specific last-value precedence. Non-production URLs may use another
 supported mode or omit it, but still cannot contain conflicting TLS-mode
 parameters.
 
-## D-047 — Worker shutdown is bounded and Hook preserves request correlation
+## D-047 — Worker shutdown is bounded and webhook delivery preserves correlation
 
 **Status:** Accepted; strengthens D-015, D-017, D-023, and D-033
 
@@ -808,10 +806,10 @@ without acknowledging unfinished delivery or abandoning durable events.
 
 Every delegated-todo outbox payload records the originating validated request
 ID. When a worker claims the immutable row, it promotes an explicit payload
-`trace_id`, or otherwise that `request_id`, to Hook's optional top-level
-`trace_id`. The same value survives retries and lease recovery. The stable
-outbox event UUID is also the Hook `Idempotency-Key`, so downstream logs can
-correlate one user mutation across Commit and Hook while Hook deduplicates
+`trace_id`, or otherwise that `request_id`, to the webhook envelope's optional
+top-level `trace_id`. The same value survives retries and lease recovery. The stable
+outbox event UUID is also the webhook `Idempotency-Key`, so downstream logs can
+correlate one user mutation across retries while the receiver deduplicates
 at-least-once delivery. Credentials and provider response bodies remain absent
 from both the event and retained failure state.
 
@@ -929,10 +927,20 @@ mutations; it neither redirects nor cancels already durable events. The worker
 continues at-least-once delivery with the event UUID as its idempotency key and
 the original request ID as correlation.
 
-Commit's worker sends that snapshotted destination and rule metadata to one
-service-authenticated Hook ingress and never retains or handles the public
-endpoint's signing secret. The sibling Hook service does not yet publish that
-internal route, so production release remains gated on a compatible ingress
-contract accepting payload version 2. Absence or failure of that route leaves
-the already-committed event retryable or dead-lettered; it does not roll back
-the todo mutation.
+Commit's worker sends that snapshotted destination and rule metadata directly to
+the webhook endpoint. Absence or failure of that endpoint leaves the
+already-committed event retryable or dead-lettered; it does not roll back the
+todo mutation.
+
+## D-054 — Commit has no attachment provider or webhook relay dependency
+
+**Status:** Accepted; supersedes attachment and relay portions of earlier decisions
+
+Todo attachments are ordered, unique canonical HTTPS URL references. Commit
+never uploads files, resolves provider entries, exchanges temporary URLs, or
+requires a Briefcase capability. Notification delivery posts payload version 2
+directly to the immutable HTTPS webhook URL captured with the outbox event; no
+Hook relay URL, relay credential, or relay-specific path is configured. IAM is
+the only external platform service used for authentication, directory
+membership, and IAM webhook ingestion. PostgreSQL remains Commit's internal
+persistence boundary.

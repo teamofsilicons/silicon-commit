@@ -191,7 +191,7 @@ impl fmt::Debug for WebhookUrl {
 }
 
 impl WebhookUrl {
-    /// Validates and canonicalizes an actor-bound Silicon Hook endpoint URL.
+    /// Validates and canonicalizes an HTTPS webhook destination URL.
     pub fn new(
         value: impl Into<String>,
         represented_actor_id: &ActorId,
@@ -231,7 +231,7 @@ impl fmt::Display for WebhookUrl {
 
 fn validate_webhook_url(
     value: &str,
-    represented_actor_id: &ActorId,
+    _represented_actor_id: &ActorId,
 ) -> Result<WebhookUrl, &'static str> {
     if value.is_empty() || value.len() > MAX_WEBHOOK_URL_BYTES {
         return Err("must contain between 1 and 2048 bytes");
@@ -275,37 +275,8 @@ fn validate_webhook_url(
         Host::Ipv4(_) | Host::Ipv6(_) => {}
     }
 
-    let segments = url
-        .path_segments()
-        .ok_or("must use the canonical Silicon Hook ingress path")?
-        .collect::<Vec<_>>();
-    if segments.len() != 3 || segments[0] != "silicon" {
-        return Err("must use /silicon/{silicon_id}/{endpoint_key}");
-    }
-    let endpoint_key = segments[2];
-    if endpoint_key.len() != 6
-        || !endpoint_key
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
-    {
-        return Err("endpoint key must contain exactly six uppercase hexadecimal characters");
-    }
-
-    // Rebuild the route exactly as Hook does. Equality both binds the endpoint
-    // to the represented Silicon and rejects aliases, trailing slashes, and
-    // non-canonical path-segment escaping without interpreting opaque actor IDs.
-    let mut canonical = url.clone();
-    canonical
-        .path_segments_mut()
-        .map_err(|()| "must use a hierarchical HTTPS URL")?
-        .clear()
-        .push("silicon")
-        .push(represented_actor_id.as_str())
-        .push(endpoint_key);
-    if canonical.path() != url.path() {
-        return Err("Silicon Hook endpoint must belong to the authenticated Silicon");
-    }
-
+    // Any HTTPS endpoint may receive notifications. Preserve the URL path
+    // after parser canonicalization; no Hook-specific route is required.
     let canonical = url.to_string();
     if canonical.len() > MAX_WEBHOOK_URL_BYTES {
         return Err("canonical URL must be at most 2048 bytes");
@@ -686,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn webhook_urls_are_actor_bound_and_canonicalized() {
+    fn webhook_urls_are_canonicalized() {
         let Some(actor_id) = parse_actor_id("support:acme") else {
             return;
         };
@@ -731,16 +702,14 @@ mod tests {
             "https://[::1]/silicon/support:acme/A1B2C3",
             "https://example.com/silicon/support:acme/A1B2C3?secret=value",
             "https://example.com/silicon/support:acme/A1B2C3#secret",
-            "https://example.com/api/v1/silicon/support:acme/A1B2C3",
-            "https://example.com/silicon/support:acme/A1B2C3/",
-            "https://example.com/silicon/another-silicon/A1B2C3",
-            "https://example.com/silicon/support:acme/a1b2c3",
         ] {
             assert!(
                 WebhookUrl::new(value, &actor_id).is_err(),
                 "accepted {value}"
             );
         }
+        assert!(WebhookUrl::new("https://example.com/events", &actor_id).is_ok());
+        assert!(WebhookUrl::new("https://example.com/api/v1/hooks/commit", &actor_id).is_ok());
     }
 
     #[test]

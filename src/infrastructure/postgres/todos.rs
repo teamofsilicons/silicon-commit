@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     application::{
         idempotency::{MutationIdentity, MutationResponse},
-        ports::{ActiveMember, HookRoutingSnapshot, VerifiedActor},
+        ports::{ActiveMember, VerifiedActor, WebhookRoutingSnapshot},
     },
     domain::{
         Actor, ActorId, ActorType, AttachmentUrl, CollectionQuery, CreatedAtRange, LimitedText,
@@ -90,7 +90,7 @@ pub(crate) struct NewOutboxEvent<'a> {
     pub(crate) recipient_silicon_principal_id: PrincipalId,
     pub(crate) event_type: &'static str,
     pub(crate) payload: &'a Value,
-    pub(crate) routing: &'a HookRoutingSnapshot,
+    pub(crate) routing: &'a WebhookRoutingSnapshot,
 }
 
 /// Durable response read under an idempotency advisory lock.

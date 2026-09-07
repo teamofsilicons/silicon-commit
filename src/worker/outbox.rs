@@ -1,4 +1,4 @@
-//! Hook notification outbox delivery with bounded leases and retry state.
+//! Webhook notification outbox delivery with bounded leases and retry state.
 
 use std::{sync::Arc, time::Duration};
 
@@ -8,7 +8,9 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::{
-    application::ports::{HookEvent, HookPublishError, HookPublisher, HookRoutingSnapshot},
+    application::ports::{
+        WebhookEvent, WebhookPublishError, WebhookPublisher, WebhookRoutingSnapshot,
+    },
     config::WorkerSettings,
     domain::{
         ActorId, NotificationScope, NotificationSubscriptionLevel, NotificationVersion,
@@ -20,7 +22,7 @@ use crate::{
 #[derive(Clone)]
 pub struct OutboxProcessor {
     pool: PgPool,
-    publisher: Arc<dyn HookPublisher>,
+    publisher: Arc<dyn WebhookPublisher>,
     settings: WorkerSettings,
     worker_id: String,
 }
@@ -28,7 +30,11 @@ pub struct OutboxProcessor {
 impl OutboxProcessor {
     /// Creates a processor with a unique lease owner identifier.
     #[must_use]
-    pub fn new(pool: PgPool, publisher: Arc<dyn HookPublisher>, settings: WorkerSettings) -> Self {
+    pub fn new(
+        pool: PgPool,
+        publisher: Arc<dyn WebhookPublisher>,
+        settings: WorkerSettings,
+    ) -> Self {
         Self {
             pool,
             publisher,
@@ -69,7 +75,7 @@ impl OutboxProcessor {
 
     fn spawn_delivery(
         &self,
-        deliveries: &mut JoinSet<(ClaimedEvent, Result<(), HookPublishError>)>,
+        deliveries: &mut JoinSet<(ClaimedEvent, Result<(), WebhookPublishError>)>,
         claim: ClaimedEvent,
     ) {
         let publisher = Arc::clone(&self.publisher);
@@ -242,7 +248,7 @@ impl OutboxProcessor {
     async fn mark_failed(
         &self,
         claim: &ClaimedEvent,
-        error: HookPublishError,
+        error: WebhookPublishError,
     ) -> Result<(), sqlx::Error> {
         let exhausted = usize::try_from(claim.attempt_count).map_or(true, |attempt| {
             attempt >= usize::from(self.settings.max_attempts.get())
@@ -276,7 +282,7 @@ impl OutboxProcessor {
         }
 
         let retry_after = match error {
-            HookPublishError::RateLimited {
+            WebhookPublishError::RateLimited {
                 retry_after: Some(delay),
             } => delay.min(self.settings.max_retry_delay),
             _ => retry_delay(
@@ -333,7 +339,7 @@ struct ClaimedRow {
 }
 
 struct ClaimedEvent {
-    event: HookEvent,
+    event: WebhookEvent,
     attempt_count: i32,
 }
 
@@ -369,7 +375,7 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
                 let subscription_version = NotificationVersion::new(subscription_version)
                     .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
                 Some(
-                    HookRoutingSnapshot::new(
+                    WebhookRoutingSnapshot::new(
                         webhook_url,
                         destination_version,
                         subscription_level,
@@ -393,7 +399,7 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         Ok(Self {
-            event: HookEvent {
+            event: WebhookEvent {
                 event_id: row.id,
                 org_id,
                 silicon_id,
