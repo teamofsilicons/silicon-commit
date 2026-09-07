@@ -456,8 +456,19 @@ async fn maybe_check_update(disabled: bool) {
         && release.version != env!("CARGO_PKG_VERSION")
     {
         eprintln!(
-            "A newer silicon-commit-client release is available: {}",
+            "A newer silicon-commit release is available: {}; updating the CLI",
             release.version
         );
+        // Run after the command has completed so an update cannot interrupt
+        // the user's requested operation. A failed install is non-fatal: the
+        // current binary remains usable and the next hourly check retries it.
+        match std::process::Command::new("cargo")
+            .args(["install", "--locked", "--force", "commit"])
+            .status()
+        {
+            Ok(status) if status.success() => eprintln!("Silicon Commit CLI updated"),
+            Ok(_) => eprintln!("CLI update failed; continuing with the current version"),
+            Err(_) => eprintln!("cargo was unavailable; continuing with the current version"),
+        }
     }
 }
