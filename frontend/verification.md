@@ -1,6 +1,6 @@
 # Verification — 2026-09-08
 
-The frontend was built and verified locally. It has not been hosted, and the accompanying backend changes have not been deployed.
+The frontend is deployed to Vercel at https://commit.teamofsilicons.com, and the accompanying backend activity route is deployed to AWS. Original local checks and subsequent release checks are recorded below.
 
 ## Automated checks
 
@@ -44,12 +44,25 @@ Against live IAM and Commit:
 - Prevent mobile page overflow from offscreen table headings, and hide closed navigation from keyboard/accessibility focus.
 - Sanitize Markdown and render task-list markers without executable HTML controls.
 
-## Hosting follow-up
+## Hosting requirements
 
-Deploy the added backend activity route before publishing this frontend. It requires no schema migration or additional runtime grants. Configure an HTTPS frontend origin, persistent random cookie encryption key, and IAM callback for the selected hostname. The prior IAM directory/sandbox integration limitations are recorded in `deploy/aws/verification-2026-09-08.md`; this frontend work does not establish that those live mutation paths are fixed.
+The release includes the added backend activity route, an HTTPS frontend origin, a persistent random cookie encryption key, and an IAM callback for the production hostname. The activity route requires no schema migration or additional runtime grants. The prior IAM directory/sandbox integration limitations are recorded in `deploy/aws/verification-2026-09-08.md`; this frontend work does not establish that those live mutation paths are fixed.
 
 ## Unscoped login correction
 
 Removed the organization field from both sign-in paths. The hosted IAM redirect omits `org_id`, the callback stores state without an organization, and token sign-in requires only the SLT (plus a test key for sandbox sessions). Organization selection remains a workspace action after authentication; auth requests do not send the stored workspace organization.
 
 Rebuilt the frontend and production server, and passed all 10 frontend tests. Regression checks cover unscoped token exchange, callback state validation, session restoration/refresh without an organization, and organization headers on subsequent workspace requests. Browser inspection confirmed both login forms omit the organization field. The running preview at `http://127.0.0.1:4335/` returns an IAM redirect without `org_id`. A new live IAM login was not performed for this correction.
+
+## Production release
+
+- Vercel project `silicon-commit-frontend`, deployment `dpl_yTD7zypHxzFf4zdNUTNHsVbC5p5m`: Ready, production alias `commit.teamofsilicons.com`. Client assets run on the CDN; the Node.js 24 session gateway runs in `iad1`.
+- Configured production origins and application ID, and generated a persistent sensitive cookie key in Vercel. No credentials are embedded in client assets.
+- Namecheap A record `commit` → `76.76.21.21`, TTL 300. Authoritative DNS, Cloudflare DNS and Google DNS return the new record. The local system resolver initially retained a negative cache entry.
+- Verified the custom hostname with valid HTTPS against the configured Vercel address: HTML and every entry-page asset load, `/auth/session` returns an unauthenticated session, `/api/version` reaches the AWS backend, and `/auth/start` redirects to IAM with the production callback and no `org_id`.
+- Browser inspection of the deployed Vercel URL confirms the login page has no organization input. Full live IAM credential exchange and authenticated product mutations were not repeated in this release.
+- Backend API and worker deployed from revision `ce0bf7cd9438f51e85576d01b5df62a7fd62fb89`, immutable image digest `sha256:1d339e34abc9a3c1d766d36e80fa9317f46ac2deb6fa93abd407f371df97ce22`. Readiness passed and the public version endpoint confirms that revision. Existing database and Caddy configuration were preserved; no migration was needed.
+- Stopped rollback containers retained on the host: `commit-api-before-1788867666` and `commit-worker-before-1788867666`.
+- Fresh validation: frontend production build and 10 tests, Rust formatting and 120 library tests. The earlier PostgreSQL integration checks above remain the most recent full database test run.
+
+Existing IAM directory, sandbox-secret and webhook-approval limitations in the backend deployment report remain separate follow-up work.
