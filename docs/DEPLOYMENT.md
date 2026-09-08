@@ -21,6 +21,6 @@ keys are encrypted with a key derived from that secret; changing the
 application secret requires re-encrypting existing test-environment keys
 before starting the API.
 
-The API must have `COMMIT_IAM_DIRECTORY_TOKEN` configured in IAM mode. Health
+The API uses the authenticated user bearer for IAM directory reads. Health
 and readiness endpoints are `/healthz` and `/readyz`; the product API is
 mounted at `/api/v1/`, and IAM webhooks arrive at `/webhook/`.

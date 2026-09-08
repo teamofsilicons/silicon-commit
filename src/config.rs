@@ -135,8 +135,6 @@ pub struct IamSettings {
     pub app_secret: Option<SecretString>,
     /// OBO proof audience expected by Commit.
     pub audience: String,
-    /// Optional service bearer used for directory membership reads.
-    pub directory_token: Option<SecretString>,
     /// Secret used to authenticate exact-byte incoming IAM webhooks.
     pub webhook_secret: Option<SecretString>,
     /// Positive IAM signing-secret version accepted by this deployment.
@@ -350,7 +348,6 @@ fn load_integrations(
             app_id: optional("COMMIT_IAM_APP_ID"),
             app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
             audience: value_or("COMMIT_IAM_AUDIENCE", "silicon-commit"),
-            directory_token: optional_secret("COMMIT_IAM_DIRECTORY_TOKEN"),
             webhook_secret: optional_secret("COMMIT_WEBHOOK_SIGNING_SECRET"),
             webhook_key_version: parse_or("COMMIT_WEBHOOK_KEY_VERSION", "1")?,
         },
@@ -360,7 +357,6 @@ fn load_integrations(
             app_id: None,
             app_secret: None,
             audience: String::new(),
-            directory_token: None,
             webhook_secret: None,
             webhook_key_version: 1,
         },
@@ -618,10 +614,6 @@ fn validate_api_integrations(
             (
                 "COMMIT_IAM_APP_SECRET",
                 integrations.iam.app_secret.is_some(),
-            ),
-            (
-                "COMMIT_IAM_DIRECTORY_TOKEN",
-                integrations.iam.directory_token.is_some(),
             ),
         ] {
             if !configured {
@@ -899,7 +891,6 @@ mod tests {
         integrations.iam.base_url = url("http://insecure-iam.invalid/");
         integrations.iam.app_id = None;
         integrations.iam.app_secret = None;
-        integrations.iam.directory_token = None;
 
         assert!(
             validate_integrations(
@@ -1224,7 +1215,6 @@ mod tests {
                 webhook_secret: None,
                 webhook_key_version: 1,
                 audience: "silicon-commit".to_owned(),
-                directory_token: Some(SecretString::from("directory-token")),
             },
             connect_timeout: Duration::from_secs(1),
             request_timeout: provider_timeout(),

@@ -97,6 +97,11 @@ pub fn request(
         AuthenticationMode::Iam => iam_credential(headers)?,
         AuthenticationMode::TrustedHeaders => trusted_credential(headers, org_id.clone())?,
     };
+    let bearer = match &credential {
+        InboundCredential::Bearer(token) => Some(token.clone()),
+        _ => None,
+    };
+    crate::request_context::set_iam_bearer_token(bearer);
     Ok(AuthenticationRequest {
         credential,
         org_id,

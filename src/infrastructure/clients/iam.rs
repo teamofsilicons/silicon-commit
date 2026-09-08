@@ -48,7 +48,6 @@ pub struct IamClient {
     app_id: String,
     audience: String,
     application_authorization: HeaderValue,
-    directory_authorization: Option<HeaderValue>,
     max_response_bytes: usize,
 }
 
@@ -78,12 +77,6 @@ impl IamClient {
         }
 
         let application_authorization = basic_authorization(app_id, app_secret)?;
-        let directory_authorization = settings
-            .directory_token
-            .as_ref()
-            .map(bearer_authorization)
-            .transpose()?;
-
         Ok(Self {
             client: http_client(connect_timeout, request_timeout)?,
             introspection_url: endpoint(&settings.base_url, "auth/tokens/introspect")?,
@@ -93,7 +86,6 @@ impl IamClient {
             app_id: app_id.to_owned(),
             audience: settings.audience.clone(),
             application_authorization,
-            directory_authorization,
             max_response_bytes,
         })
     }
@@ -103,6 +95,10 @@ impl IamClient {
         token: &SecretString,
         request: &AuthenticationRequest,
     ) -> Result<VerifiedActor, ProviderError> {
+        // Reuse the authenticated user's bearer for subsequent directory
+        // reads in this request. No long-lived directory credential is kept
+        // by Commit.
+        crate::request_context::set_iam_bearer_token(Some(token.clone()));
         let mut outbound = self
             .client
             .post(self.introspection_url.clone())
@@ -287,7 +283,7 @@ impl IamClient {
         &self,
         org_id: &PublicOrganizationId,
     ) -> Result<OrganizationResponse, ProviderError> {
-        let authorization = self.directory_header()?;
+        let authorization = Self::directory_header()?;
         let url = self.organization_endpoint(org_id, &[])?;
         let mut request = self
             .client
@@ -344,7 +340,7 @@ impl IamClient {
 
         let organization = self.organization_by_id(org_id).await?;
         let organization_id = organization.internal_id(org_id)?;
-        let authorization = self.directory_header()?;
+        let authorization = Self::directory_header()?;
         let url = self.organization_endpoint(org_id, &["members"])?;
         let mut cursor = None::<String>;
         let mut seen_cursors = HashSet::new();
@@ -418,7 +414,7 @@ impl IamClient {
         org_id: &PublicOrganizationId,
         membership_id: Uuid,
     ) -> Result<MembershipResponse, ProviderError> {
-        let authorization = self.directory_header()?;
+        let authorization = Self::directory_header()?;
         let membership = membership_id.hyphenated().to_string();
         let url = self.organization_endpoint(org_id, &["members", &membership])?;
         let mut request = self
@@ -440,7 +436,7 @@ impl IamClient {
         org_id: &PublicOrganizationId,
         membership_id: Uuid,
     ) -> Result<MembershipAuthorization, ProviderError> {
-        let authorization = self.directory_header()?;
+        let authorization = Self::directory_header()?;
         let membership = membership_id.hyphenated().to_string();
         let url = self.organization_endpoint(org_id, &["members", &membership, "authorization"])?;
         let mut request = self
@@ -480,10 +476,12 @@ impl IamClient {
         serde_json::from_slice(&body).map_err(|_| ProviderError::InvalidResponse)
     }
 
-    fn directory_header(&self) -> Result<HeaderValue, ProviderError> {
-        self.directory_authorization
-            .clone()
-            .ok_or(ProviderError::Unavailable)
+    fn directory_header() -> Result<HeaderValue, ProviderError> {
+        crate::request_context::current_iam_bearer_token()
+            .map(|token| bearer_authorization(&token))
+            .transpose()
+            .map_err(|_| ProviderError::Unauthenticated)?
+            .ok_or(ProviderError::Unauthenticated)
     }
 
     fn organization_endpoint(
@@ -1039,7 +1037,6 @@ mod tests {
             app_id: Some("silicon-commit".to_owned()),
             app_secret: Some(SecretString::from("application-secret")),
             audience: "silicon-commit".to_owned(),
-            directory_token: Some(SecretString::from("directory-token")),
         })
     }
 
@@ -1050,6 +1047,16 @@ mod tests {
             Duration::from_secs(2),
             16_384,
         )?)
+    }
+
+    async fn as_user<T>(
+        future: impl std::future::Future<Output = Result<T, ProviderError>>,
+    ) -> Result<T, ProviderError> {
+        crate::request_context::scope("test".to_owned(), async {
+            crate::request_context::set_iam_bearer_token(Some(SecretString::from("user-token")));
+            future.await
+        })
+        .await
     }
 
     fn verified_bearer_actor() -> Result<VerifiedActor, Box<dyn std::error::Error>> {
@@ -1306,13 +1313,12 @@ mod tests {
             .await;
 
         let requested = [ActorId::new("silicon-one")?, ActorId::new("silicon-two")?];
-        let members = client(&server)?
-            .resolve_active_members(
-                &PublicOrganizationId::new("test-org")?,
-                &requested,
-                Some(ActorType::Silicon),
-            )
-            .await?;
+        let members = as_user(client(&server)?.resolve_active_members(
+            &PublicOrganizationId::new("test-org")?,
+            &requested,
+            Some(ActorType::Silicon),
+        ))
+        .await?;
 
         assert_eq!(members.len(), 2);
         assert_eq!(members[0].actor.id, requested[0]);
@@ -1382,13 +1388,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = client(&server)?
-            .resolve_active_members(
-                &PublicOrganizationId::new("test-org")?,
-                &[ActorId::new("shared-public-id")?],
-                None,
-            )
-            .await;
+        let result = as_user(client(&server)?.resolve_active_members(
+            &PublicOrganizationId::new("test-org")?,
+            &[ActorId::new("shared-public-id")?],
+            None,
+        ))
+        .await;
         assert_eq!(result, Err(ProviderError::InvalidResponse));
         Ok(())
     }
@@ -1494,17 +1499,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        let actor = client(&server)?
-            .authenticate(&AuthenticationRequest {
-                credential: InboundCredential::Obo {
-                    app_id: "source-app".to_owned(),
-                    proof: SecretString::from("obo_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"),
-                },
-                org_id: PublicOrganizationId::new("test-org")?,
-                action: "commit.projects.read".to_owned(),
-                resource: Some("project-one".to_owned()),
-            })
-            .await?;
+        let actor = as_user(client(&server)?.authenticate(&AuthenticationRequest {
+            credential: InboundCredential::Obo {
+                app_id: "source-app".to_owned(),
+                proof: SecretString::from("obo_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"),
+            },
+            org_id: PublicOrganizationId::new("test-org")?,
+            action: "commit.projects.read".to_owned(),
+            resource: Some("project-one".to_owned()),
+        }))
+        .await?;
         assert_eq!(
             actor.organization_id.into_uuid(),
             Uuid::parse_str(organization_id)?

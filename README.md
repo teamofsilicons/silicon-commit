@@ -199,8 +199,7 @@ release still requires these contracts from the sibling services:
 - IAM needs an application-authenticated, organization-aware exact or batch
   member lookup suitable for long-running services. Its public member reads
   currently require a 15-minute user bearer and expose only a paginated
-  directory, so `COMMIT_IAM_DIRECTORY_TOKEN` is only a temporary integration
-  bridge, not a renewable production credential. Commit performs one bounded
+  directory using the authenticated user bearer. Commit performs one bounded
   directory scan per requested participant set; organizations whose active
   directory exceeds 10,000 members fail closed until IAM supplies server-side
   lookup.

@@ -944,3 +944,14 @@ Hook relay URL, relay credential, or relay-specific path is configured. IAM is
 the only external platform service used for authentication, directory
 membership, and IAM webhook ingestion. PostgreSQL remains Commit's internal
 persistence boundary.
+
+## D-055 — Authenticated user bearer authorizes IAM directory reads
+
+**Status:** Accepted; supersedes the directory-token requirement in earlier IAM rollout notes
+
+Commit no longer configures or stores `COMMIT_IAM_DIRECTORY_TOKEN`. After a
+bearer-authenticated request is validated, the request-scoped IAM bearer is
+used for the organization, membership, and membership-authorization reads
+needed by that request. The token is held only in task-local memory and is
+never persisted or logged. Requests without a user bearer cannot perform
+these directory reads.

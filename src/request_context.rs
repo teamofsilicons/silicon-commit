@@ -1,5 +1,6 @@
 //! Request-local correlation context.
 
+use secrecy::SecretString;
 use std::{cell::RefCell, future::Future};
 
 #[derive(Default)]
@@ -7,6 +8,7 @@ struct Context {
     request_id: String,
     environment_key: RefCell<Option<String>>,
     iam_environment_key: RefCell<Option<String>>,
+    iam_bearer_token: RefCell<Option<SecretString>>,
     testing_scope: RefCell<Option<TestingScope>>,
 }
 
@@ -22,11 +24,24 @@ pub async fn scope<T>(request_id: String, future: impl Future<Output = T>) -> T 
                 request_id,
                 environment_key: RefCell::new(None),
                 iam_environment_key: RefCell::new(None),
+                iam_bearer_token: RefCell::new(None),
                 testing_scope: RefCell::new(None),
             },
             future,
         )
         .await
+}
+/// Installs the authenticated IAM bearer for request-scoped directory reads.
+pub fn set_iam_bearer_token(token: Option<SecretString>) {
+    let _ = REQUEST.try_with(|c| *c.iam_bearer_token.borrow_mut() = token);
+}
+/// Returns the authenticated IAM bearer for request-scoped directory reads.
+#[must_use]
+pub fn current_iam_bearer_token() -> Option<SecretString> {
+    REQUEST
+        .try_with(|c| c.iam_bearer_token.borrow().clone())
+        .ok()
+        .flatten()
 }
 
 /// Returns the current request identifier, when inside an HTTP request.
