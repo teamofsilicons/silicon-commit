@@ -24,3 +24,7 @@ before starting the API.
 The API uses the authenticated user bearer for IAM directory reads. Health
 and readiness endpoints are `/healthz` and `/readyz`; the product API is
 mounted at `/api/v1/`, and IAM webhooks arrive at `/webhook/`.
+
+The current standalone AWS deployment and release procedure are documented in
+[`deploy/aws/README.md`](../deploy/aws/README.md), including known IAM integration
+gaps and the checks performed against the live endpoint.

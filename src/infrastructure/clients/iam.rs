@@ -79,7 +79,7 @@ impl IamClient {
         let application_authorization = basic_authorization(app_id, app_secret)?;
         Ok(Self {
             client: http_client(connect_timeout, request_timeout)?,
-            introspection_url: endpoint(&settings.base_url, "auth/tokens/introspect")?,
+            introspection_url: endpoint(&settings.base_url, "oauth/introspect")?,
             obo_verify_url: endpoint(&settings.base_url, "obo-access/verify")?,
             obo_exchange_url: endpoint(&settings.base_url, "obo-access/exchanges")?,
             members_url: endpoint(&settings.base_url, "organizations/")?,
@@ -135,6 +135,33 @@ impl IamClient {
             || introspection.audience.as_deref() != Some(self.audience.as_str())
         {
             return Err(ProviderError::Unauthenticated);
+        }
+
+        if let Some(snapshot) = introspection.authorization {
+            if snapshot.principal_id != principal_id
+                || snapshot.membership_id != membership_id
+                || snapshot.org_id != org_id
+                || snapshot.audience != self.audience
+                || parse_actor_type(Some(&snapshot.actor_type))? != actor_type
+                || snapshot.organization_id.is_nil()
+            {
+                return Err(ProviderError::Unauthenticated);
+            }
+            return Ok(VerifiedActor::new(
+                OrganizationId::from_uuid(snapshot.organization_id),
+                request.org_id.clone(),
+                membership_id,
+                Actor {
+                    id: ActorId::new(snapshot.public_id)
+                        .map_err(|_| ProviderError::InvalidResponse)?,
+                    principal_id: PrincipalId::from_uuid(principal_id),
+                    actor_type,
+                },
+                parse_organization_role(&snapshot.org_role.ok_or(ProviderError::Forbidden)?)?,
+                // OAuth scopes describe IAM disclosure, not Commit management grants.
+                CapabilitySet::default(),
+                request.credential.clone(),
+            ));
         }
 
         self.verified_from_membership(
@@ -712,6 +739,19 @@ struct IntrospectionResponse {
     audience: Option<String>,
     #[serde(alias = "exp")]
     expires_at: Option<i64>,
+    authorization: Option<AuthorizationSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizationSnapshot {
+    principal_id: Uuid,
+    membership_id: Uuid,
+    organization_id: Uuid,
+    actor_type: String,
+    public_id: String,
+    org_id: String,
+    audience: String,
+    org_role: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1221,7 +1261,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/auth/tokens/introspect"))
+            .and(path("/api/v1/oauth/introspect"))
             .and(header("x-org-id", "test-org"))
             .and(body_string_contains(
                 "token=iat_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
@@ -1244,6 +1284,47 @@ mod tests {
             })
             .await;
         assert!(matches!(result, Err(ProviderError::Unauthenticated)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_authenticates_without_administrative_directory_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for snapshot_org in ["test-org", "another-org"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/oauth/introspect"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "active": true,
+                    "principal_id": "018f268d-715a-7b72-8f0f-41f16f9af570",
+                    "membership_id": "018f268d-715a-7b72-8f0f-41f16f9af571",
+                    "actor_type": "carbon", "org_id": "test-org", "audience": "silicon-commit",
+                    "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 300,
+                    "authorization": {
+                        "principal_id": "018f268d-715a-7b72-8f0f-41f16f9af570",
+                        "membership_id": "018f268d-715a-7b72-8f0f-41f16f9af571",
+                        "organization_id": "018f268d-715a-7b72-8f0f-41f16f9af572",
+                        "actor_type": "carbon", "public_id": "test-carbon",
+                        "org_id": snapshot_org, "audience": "silicon-commit", "org_role": "owner"
+                    }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = client(&server)?
+                .authenticate(&AuthenticationRequest {
+                    credential: InboundCredential::Bearer(SecretString::from("iat_snapshot")),
+                    org_id: PublicOrganizationId::new("test-org")?,
+                    action: "commit.todos.list".to_owned(),
+                    resource: None,
+                })
+                .await;
+            if snapshot_org == "test-org" {
+                assert_eq!(result?.actor.id.as_str(), "test-carbon");
+            } else {
+                assert!(matches!(result, Err(ProviderError::Unauthenticated)));
+            }
+        }
         Ok(())
     }
 

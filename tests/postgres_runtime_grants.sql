@@ -33,6 +33,11 @@ SELECT has_schema_privilege(:'api_role', 'commit', 'USAGE')
            'commit.notification_subscription_level',
            'USAGE'
        )
+       AND has_table_privilege(:'api_role', 'commit.testing_environments', 'SELECT, INSERT, UPDATE')
+       AND has_table_privilege(:'api_role', 'commit.testing_organizations', 'SELECT, INSERT, UPDATE')
+       AND has_table_privilege(:'api_role', 'commit.iam_webhook_events', 'SELECT, INSERT')
+       AND has_function_privilege(:'api_role', 'commit.clean_testing_environment(uuid,text)', 'EXECUTE')
+       AND NOT has_table_privilege(:'api_role', 'commit.testing_environments', 'DELETE')
        AND NOT has_schema_privilege(:'api_role', 'commit_private', 'USAGE')
        AS api_grants_match
 \gset

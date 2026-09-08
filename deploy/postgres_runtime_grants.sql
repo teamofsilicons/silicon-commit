@@ -178,7 +178,15 @@ GRANT SELECT, INSERT, DELETE
     ON TABLE commit.idempotency_records
     TO :"api_role";
 
--- Worker: Hook queue state plus one owner-defined bounded retention
+-- API testing and authenticated IAM event ingress.
+GRANT SELECT, INSERT, UPDATE
+    ON TABLE commit.testing_environments,
+             commit.testing_organizations
+    TO :"api_role";
+GRANT SELECT, INSERT ON TABLE commit.iam_webhook_events TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.clean_testing_environment(uuid,text) TO :"api_role";
+
+-- Worker: webhook queue state plus one owner-defined bounded retention
 -- capability; no direct content deletion/redaction, project writes, identity
 -- mutation, audit insertion, or new product-row creation.
 GRANT SELECT

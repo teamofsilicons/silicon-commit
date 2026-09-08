@@ -1,0 +1,68 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Commit private PostgreSQL database",
+  "Parameters": {
+    "SecretArn": {
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "DBSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Commit private PostgreSQL",
+        "VpcId": "vpc-04b23a487cfe0bd8e",
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 5432,
+            "ToPort": 5432,
+            "SourceSecurityGroupId": "sg-03de1a4b8651e370f"
+          }
+        ]
+      },
+      "DeletionPolicy": "Retain"
+    },
+    "DBSubnets": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupDescription": "Commit private database subnets",
+        "SubnetIds": [
+          "subnet-00cb233b2b136e259",
+          "subnet-039e3864dbc2f129d"
+        ]
+      },
+      "DeletionPolicy": "Retain"
+    },
+    "Database": {
+      "Type": "AWS::RDS::DBInstance",
+      "DeletionPolicy": "Snapshot",
+      "UpdateReplacePolicy": "Snapshot",
+      "Properties": {
+        "DBInstanceIdentifier": "silicon-commit-production",
+        "DBInstanceClass": "db.t4g.micro",
+        "Engine": "postgres",
+        "AllocatedStorage": "20",
+        "StorageType": "gp3",
+        "StorageEncrypted": true,
+        "MasterUsername": "commit_admin",
+        "MasterUserPassword": {
+          "Fn::Sub": "{{resolve:secretsmanager:${SecretArn}:SecretString:db_admin_password}}"
+        },
+        "DBName": "silicon_commit",
+        "DBSubnetGroupName": {
+          "Ref": "DBSubnets"
+        },
+        "VPCSecurityGroups": [
+          {
+            "Ref": "DBSG"
+          }
+        ],
+        "PubliclyAccessible": false,
+        "BackupRetentionPeriod": 7,
+        "DeletionProtection": true,
+        "AutoMinorVersionUpgrade": true
+      }
+    }
+  }
+}

@@ -343,7 +343,7 @@ fn load_integrations(
             mode: parse_or("COMMIT_AUTH_MODE", "iam")?,
             base_url: parse_url_or(
                 "COMMIT_IAM_BASE_URL",
-                "https://iam.teamofsilicons.com/api/v1/",
+                "https://backend.iam.teamofsilicons.com/api/v1/",
             )?,
             app_id: optional("COMMIT_IAM_APP_ID"),
             app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
