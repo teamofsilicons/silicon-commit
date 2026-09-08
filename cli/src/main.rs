@@ -72,8 +72,8 @@ enum Command {
 #[derive(Subcommand)]
 enum ConfigCommand {
     /// Set the home directory used for Commit's local state.
-    #[command(name = "set_home_dir")]
-    SetHomeDir { location: PathBuf },
+    #[command(name = "home", visible_alias = "set_home_dir")]
+    Home { location: PathBuf },
 }
 #[derive(Args)]
 struct Login {
@@ -306,7 +306,7 @@ fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a = Root::parse();
     if let Command::Config {
-        command: ConfigCommand::SetHomeDir { location },
+        command: ConfigCommand::Home { location },
     } = &a.command
     {
         return set_home_dir(location.clone());
