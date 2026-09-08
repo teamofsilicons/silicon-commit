@@ -110,7 +110,7 @@ pub fn request(
     })
 }
 
-fn iam_credential(headers: &HeaderMap) -> Result<InboundCredential, AppError> {
+pub(super) fn iam_credential(headers: &HeaderMap) -> Result<InboundCredential, AppError> {
     if TRUSTED_HEADERS
         .iter()
         .any(|name| headers.contains_key(*name))

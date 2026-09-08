@@ -310,3 +310,28 @@ test("sandbox login requires a key and logout clears only its own session", asyn
     new RegExp("__Host-commit_" + scope + "=;"),
   );
 });
+
+test("organization discovery uses the session bearer without caller organization scope", async () => {
+  let calls = 0;
+  const g = gateway((u, i) => {
+    calls++;
+    assert.equal(u.pathname, "/api/v1/auth/organizations");
+    assert.equal(i.method, "GET");
+    const h = new Headers(i.headers);
+    assert.equal(h.get("authorization"), "Bearer private-access");
+    assert.equal(h.has("x-org-id"), false);
+    return Response.json(["selected-team", "test-team"]);
+  });
+  assert.equal((await g(req("/auth/organizations"))).status, 401);
+  assert.equal((await g(req("/auth/organizations", "POST"))).status, 404);
+  const r = await g(
+    req("/auth/organizations", "GET", undefined, {
+      cookie: cookie({ ...session(), org: "" }),
+      "x-org-id": "unselected-team",
+      authorization: "Bearer forged",
+    }),
+  );
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), ["selected-team", "test-team"]);
+  assert.equal(calls, 1);
+});

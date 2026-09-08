@@ -26,15 +26,7 @@ import { Todos, TodoDetail } from "./Todos";
 import { Projects, ProjectDetail } from "./Projects";
 import { Notifications } from "./Notifications";
 import { Environments } from "./Environments";
-import {
-  Confirm,
-  ErrorBox,
-  Field,
-  Icon,
-  Submit,
-  useAction,
-  useHash,
-} from "./ui";
+import { Confirm, ErrorBox, Field, Icon, useAction, useHash } from "./ui";
 export default function App() {
   const path = useHash(),
     [mobile, setMobile] = createSignal(false),
@@ -48,7 +40,6 @@ export default function App() {
     const s = auth();
     if (s) {
       setSession(s);
-      if (s.authenticated && s.org_id && !org()) setOrg(s.org_id);
     }
   });
   const expire = () => {
@@ -58,8 +49,22 @@ export default function App() {
   onMount(() => window.addEventListener("commit:expired", expire));
   onCleanup(() => window.removeEventListener("commit:expired", expire));
   const logout = useAction();
-  const [orgDraft, setOrgDraft] = createSignal(org());
-  createEffect(() => setOrgDraft(org()));
+  const [organizations, { refetch: reloadOrganizations }] = createResource(
+    () =>
+      session().authenticated ? environment() + "|" + sessionEpoch() : false,
+    () => request<string[]>("/auth/organizations"),
+  );
+  createEffect(() => {
+    const choices = organizations();
+    if (
+      session().authenticated &&
+      choices &&
+      !organizations.loading &&
+      !organizations.error
+    ) {
+      if (!choices.includes(org())) setOrg(choices[0] || "");
+    }
+  });
   const route = () => path().split("?")[0].split("/").filter(Boolean),
     active = () => route()[0] || "todos";
   return (
@@ -77,7 +82,7 @@ export default function App() {
     >
       <Show
         when={session().authenticated}
-        fallback={<Login error={auth.error} reload={() => void refetch()} />}
+        fallback={<Login error={auth.error} />}
       >
         <div class="app-shell">
           <a
@@ -102,29 +107,34 @@ export default function App() {
             class={"sidebar " + (mobile() ? "open" : "")}
           >
             <Brand />
-            <form
-              class="org-picker"
-              onSubmit={(e) => {
-                e.preventDefault();
-                setOrg(orgDraft().trim());
-                setMobile(false);
-              }}
-            >
+            <div class="org-picker">
               <Field label="ORGANIZATION">
-                <div class="org-input">
-                  <input
-                    aria-label="Organization handle"
-                    required
-                    pattern="[a-z0-9][a-z0-9-]*"
-                    value={orgDraft()}
-                    onInput={(e) => setOrgDraft(e.currentTarget.value)}
-                  />
-                  <button aria-label="Switch organization" type="submit">
-                    <Icon name="arrow" />
-                  </button>
-                </div>
+                <select
+                  aria-label="Organization"
+                  value={org()}
+                  disabled={
+                    organizations.loading ||
+                    !!organizations.error ||
+                    !organizations()?.length
+                  }
+                  onChange={(e) => {
+                    setOrg(e.currentTarget.value);
+                    setMobile(false);
+                  }}
+                >
+                  <Show when={!organizations()?.length}>
+                    <option value="">
+                      {organizations.loading
+                        ? "Loading organizations…"
+                        : "No organizations available"}
+                    </option>
+                  </Show>
+                  <For each={organizations()}>
+                    {(id) => <option value={id}>{id}</option>}
+                  </For>
+                </select>
               </Field>
-            </form>
+            </div>
             <nav aria-label="Main navigation">
               <For
                 each={[
@@ -234,11 +244,38 @@ export default function App() {
             <main id="main" tabindex="-1">
               <ErrorBox error={logout.error()} />
               <Show
-                when={org()}
+                when={
+                  !organizations.loading &&
+                  !organizations.error &&
+                  organizations()?.includes(org())
+                }
                 fallback={
                   <div class="panel">
-                    Choose an organization in the sidebar to open your
-                    workspace.
+                    <Show when={organizations.loading}>
+                      <p>Loading your organizations…</p>
+                    </Show>
+                    <ErrorBox error={organizations.error} />
+                    <Show when={organizations.error}>
+                      <button
+                        class="button"
+                        onClick={() => void reloadOrganizations()}
+                      >
+                        Try again
+                      </button>
+                    </Show>
+                    <Show when={!organizations.loading && !organizations.error}>
+                      <p>
+                        No organizations are available for this session. Choose
+                        your organizations in IAM to continue.
+                      </p>
+                      <a
+                        class="button primary"
+                        href="/auth/start"
+                        onClick={() => setEnvironment("production")}
+                      >
+                        Continue with IAM
+                      </a>
+                    </Show>
                   </div>
                 }
               >
@@ -311,33 +348,7 @@ function Brand() {
     </a>
   );
 }
-function Login(p: { error?: unknown; reload: () => void }) {
-  const [slt, setSlt] = createSignal(""),
-    [manual, setManual] = createSignal(environment() !== "production"),
-    [testId, setTestId] = createSignal(
-      environment() === "production" ? "" : environment(),
-    ),
-    [key, setKey] = createSignal("");
-  const a = useAction();
-  const login = (e: SubmitEvent) => {
-    e.preventDefault();
-    void a.run(async () => {
-      if (testId()) setEnvironment(testId().trim());
-      else if (environment() !== "production") setEnvironment("production");
-      const s = await request<Session>("/auth/login", {
-        method: "POST",
-        body: {
-          slt: slt().trim(),
-          environment_key: key().trim() || undefined,
-        },
-      });
-      setSlt("");
-      setKey("");
-      setSession(s);
-      navigate("/todos");
-      p.reload();
-    });
-  };
+function Login(p: { error?: unknown }) {
   return (
     <div class="login-layout">
       <section class="login-intro">
@@ -381,84 +392,16 @@ function Login(p: { error?: unknown; reload: () => void }) {
           <ErrorBox error={p.error} />
           <Show when={location.hash.includes("error=login_failed")}>
             <div class="error-box">
-              The login could not be completed. Try again with a new IAM token.
+              The login could not be completed. Continue with IAM to try again.
             </div>
           </Show>
-          <Show when={!testId()}>
-            <a class="button primary full" href="/auth/start">
-              Continue with Silicon IAM <Icon name="arrow" />
-            </a>
-          </Show>
-          <button
-            class="text-button login-toggle"
-            aria-expanded={manual()}
-            onClick={() => setManual(!manual())}
+          <a
+            class="button primary full"
+            href="/auth/start"
+            onClick={() => setEnvironment("production")}
           >
-            {manual()
-              ? "Hide token sign-in"
-              : "Use an IAM token or testing environment"}
-          </button>
-          <Show when={manual()}>
-            <form onSubmit={login}>
-              <Field label="IAM short-lived token">
-                <input
-                  type="password"
-                  required
-                  autocomplete="off"
-                  value={slt()}
-                  onInput={(e) => setSlt(e.currentTarget.value)}
-                  placeholder="Paste your SLT"
-                />
-              </Field>
-              <details open={!!testId()}>
-                <summary>Testing environment</summary>
-                <Field
-                  label="Commit environment ID"
-                  hint="Leave blank for production."
-                >
-                  <input
-                    value={testId()}
-                    onInput={(e) => setTestId(e.currentTarget.value)}
-                    placeholder="Environment UUID"
-                    pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-                  />
-                </Field>
-                <Show when={testId()}>
-                  <Field label="Commit test key">
-                    <input
-                      type="password"
-                      required
-                      pattern="[a-zA-Z0-9]{32}"
-                      autocomplete="off"
-                      value={key()}
-                      onInput={(e) => setKey(e.currentTarget.value)}
-                    />
-                  </Field>
-                  <p class="muted">
-                    Use a token issued inside the linked IAM testing
-                    environment. Production tokens cannot sign in here.
-                  </p>
-                </Show>
-              </details>
-              <ErrorBox error={a.error()} />
-              <div class="form-actions">
-                <Submit busy={a.busy()} label="Sign in with token" />
-              </div>
-            </form>
-          </Show>
-          <Show when={environment() !== "production"}>
-            <button
-              class="text-button"
-              onClick={() => {
-                setTestId("");
-                setKey("");
-                setEnvironment("production");
-                p.reload();
-              }}
-            >
-              Return to production
-            </button>
-          </Show>
+            Continue with IAM <Icon name="arrow" />
+          </a>
           <p class="login-footnote">
             Identity and access are managed by Silicon IAM. Commit never asks
             for your IAM password.

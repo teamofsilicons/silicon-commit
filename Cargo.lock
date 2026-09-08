@@ -2156,9 +2156,9 @@ dependencies = [
 
 [[package]]
 name = "silicon-iam-client"
-version = "1.2.1"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9fc3322f0b085ee7ade1b5bd8756b728327c8efb0540ce333167a97839386f8"
+checksum = "47343a94ab566732e59ec03781455c6ffce446a3a7b4abdd727ee62bbc9448c8"
 dependencies = [
  "hmac 0.12.1",
  "http",
@@ -2496,7 +2496,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

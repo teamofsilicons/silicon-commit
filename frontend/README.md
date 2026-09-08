@@ -12,7 +12,7 @@ npm ci
 npm run dev
 ```
 
-Open http://127.0.0.1:4325. By default the frontend connects to the live Commit backend. Continue through IAM for an unscoped login, or use a fresh IAM SLT. Neither sign-in form asks for an organization; select the workspace organization in the sidebar after signing in. Mutations on this origin affect the selected real Commit workspace.
+Open http://127.0.0.1:4325. By default the frontend connects to the live Commit backend. The login page has only **Continue with IAM**. IAM authenticates the user and collects their organization choices; Commit never supplies `org_id` or collects an SLT through the UI. After the callback, the workspace picker contains only the session's selected active organizations returned by IAM. Mutations on this origin affect the selected real Commit workspace.
 
 Copy `.env.example` to `.env` to change server configuration. Development generates a temporary cookie key when none is configured; restarting Vite then signs browser sessions out. For a persistent key, generate 32 random bytes encoded as base64url and set `SESSION_COOKIE_KEY` in the ignored `.env`. Never put secrets in `VITE_` variables.
 
@@ -20,7 +20,7 @@ Copy `.env.example` to `.env` to change server configuration. Development genera
 
 | Area | Interface |
 | --- | --- |
-| Sessions | Hosted IAM redirect, manual SLT, automatic refresh, sign out, Carbon/Silicon identity, organization switch |
+| Sessions | Hosted IAM redirect and organization consent, automatic refresh, sign out, Carbon/Silicon identity, switching between IAM-authorized organizations |
 | Todos | Personal/delegated/all views; status, actor and date filters; pagination; create, edit, delete; all five statuses; arbitrary HTTPS attachment URLs |
 | Notes | Read, append, and paginate notes for each todo |
 | Notifications | Silicon webhook destination; list-wide and per-todo subscription; any update, status changes, selected statuses; unsubscribe/inherit; optimistic version checks |
@@ -36,7 +36,7 @@ Attachments are links only. There is no upload provider, Briefcase dependency, o
 
 The Node service is a same-origin backend-for-frontend. It exchanges SLTs with Commit and keeps access/refresh tokens and sandbox keys in authenticated-encrypted, HttpOnly, SameSite=Lax cookies. HTTPS uses Secure `__Host-` session cookies. Tokens never enter localStorage or JavaScript-visible response bodies. Local storage contains only the organization handle and environment ID.
 
-The service restricts API paths, injects credentials from the appropriate cookie, validates write origins, preserves ETags and idempotency keys, deduplicates refresh exchanges, and removes rejected sessions. It requires no IAM app secret, directory token, database, or additional service. Only the existing Commit backend needs its IAM credentials.
+The service restricts API paths, injects credentials from the appropriate cookie, validates write origins, preserves ETags and idempotency keys, deduplicates refresh exchanges, and removes rejected sessions. `/auth/organizations` forwards the session bearer to Commit's backend without an organization header; the backend uses IAM's live authorization snapshots and returns only organization handles. It requires no IAM app secret, directory token, database, or additional service. Only the existing Commit backend needs its IAM credentials.
 
 ## Production build and hosting preparation
 
@@ -61,9 +61,9 @@ Run these in separate terminals:
 
 ```sh
 npm run fixture
-COMMIT_API_ORIGIN=http://127.0.0.1:4326 FRONTEND_ORIGIN=http://127.0.0.1:4327 npm run dev -- --port 4327
+COMMIT_API_ORIGIN=http://127.0.0.1:4326 IAM_AUTH_ORIGIN=http://127.0.0.1:4326 FRONTEND_ORIGIN=http://127.0.0.1:4337 npm run dev -- --port 4337
 ```
 
-Open http://127.0.0.1:4327. Sign in with SLT `fixture-silicon` or `fixture-carbon`, then choose organization `test-team` in the sidebar. These values work only against the local fixture. The test-only service has a two-item page size to exercise pagination, `/__conflict` to simulate the next diary conflict, `/__reject` for a revoked session, and `/__state` for test assertions. It never contacts IAM, sends webhooks, or persists data. Fixture state is shared; credential isolation is separately tested by gateway tests and backend PostgreSQL integration tests. It is never included in the production container.
+Open http://127.0.0.1:4337 and select **Continue with IAM**. The test-only IAM handoff returns a fixture Carbon session granting `test-team`; the workspace opens automatically. This fixture does not exercise IAM's real consent screen. The test-only service has a two-item page size to exercise pagination, `/__conflict` to simulate the next diary conflict, `/__reject` for a revoked session, and `/__state` for test assertions. It never contacts IAM, sends webhooks, or persists data. Fixture state is shared; credential isolation is separately tested by gateway tests and backend PostgreSQL integration tests. It is never included in the production container.
 
 See [verification.md](verification.md) for the actual checks performed and their limits.

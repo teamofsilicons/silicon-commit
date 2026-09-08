@@ -317,14 +317,19 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           headers: { "set-cookie": clearHeader(c, scope) },
         });
       }
-      if (path.startsWith("/api/")) {
-        const target = path.slice(4);
+      if (
+        path.startsWith("/api/") ||
+        (path === "/auth/organizations" && method === "GET")
+      ) {
+        const organizations = path === "/auth/organizations";
+        const target = organizations ? path : path.slice(4);
         if (
           target.includes("..") ||
           /%2[fFeE]|%5[cC]/.test(target) ||
-          !routes.some(
-            ([re, methods]) => re.test(target) && methods.includes(method),
-          )
+          (!organizations &&
+            !routes.some(
+              ([re, methods]) => re.test(target) && methods.includes(method),
+            ))
         )
           return failure(404, "This action is unavailable.");
         if (!session && target !== "/version")
@@ -349,10 +354,12 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         }
         if (session) {
           h.set("authorization", "Bearer " + session.access);
-          const org = request.headers.get("x-org-id") || session.org;
-          if (!validOrg(org))
-            return failure(400, "Choose an organization first.");
-          h.set("x-org-id", org);
+          if (!organizations) {
+            const org = request.headers.get("x-org-id") || session.org;
+            if (!validOrg(org))
+              return failure(400, "Choose an organization first.");
+            h.set("x-org-id", org);
+          }
           if (session.environmentKey)
             h.set("x-testing-environment-key", session.environmentKey);
         }

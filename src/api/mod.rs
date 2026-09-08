@@ -253,6 +253,7 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .route("/auth/login", post(sessions::login))
         .route("/auth/refresh", post(sessions::refresh))
         .route("/auth/logout", post(sessions::logout))
+        .route("/auth/organizations", get(sessions::organizations))
         .route(
             "/test-environments",
             get(test_environments::list).post(test_environments::create),

@@ -100,6 +100,22 @@ createServer(async (req, res) => {
       { error: { message: code, code, request_id: "fixture-request" } },
       status,
     );
+  // Test-only IAM handoff: the sole granted organization is test-team.
+  if (path === "/login" && method === "GET") {
+    const target = new URL(
+      u.searchParams.get("redirect_uri") || "http://invalid",
+    );
+    if (
+      u.searchParams.has("org_id") ||
+      target.origin !== "http://127.0.0.1:4337" ||
+      target.pathname !== "/auth/callback"
+    )
+      return fail(400, "invalid_fixture_callback");
+    target.searchParams.set("slt", "fixture-carbon");
+    res.writeHead(303, { location: target.href });
+    res.end();
+    return;
+  }
   if (path === "/__state")
     return send({
       todos,
@@ -127,6 +143,10 @@ createServer(async (req, res) => {
     org: req.headers["x-org-id"],
   });
   if (path.startsWith("/auth/")) {
+    if (path === "/auth/organizations")
+      return req.headers.authorization
+        ? send(["test-team"])
+        : fail(401, "unauthenticated");
     if (path === "/auth/logout") return send(null, 204);
     const type =
       b.slt === "fixture-carbon" || b.refresh_token?.includes("carbon")
