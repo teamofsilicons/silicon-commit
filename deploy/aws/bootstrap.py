@@ -71,7 +71,8 @@ finally:
 
 for name, binary in [('api','commit-api'),('worker','commit-worker')]:
     # The first deployment creates containers; subsequent invocations replace only these services.
-    subprocess.run(['docker','rm','-f','commit-'+name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['docker','stop','--time','30','commit-'+name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(['docker','rm','commit-'+name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     run(['docker','run','-d','--name','commit-'+name,'--restart','unless-stopped',
          '--network','host','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges',
          '--log-opt','max-size=10m','--log-opt','max-file=3','--env-file',str(root/(name+'.env')),
