@@ -1086,6 +1086,46 @@ pub(crate) async fn insert_entry(
         })
 }
 
+/// Lists project activity in stable reverse creation order within one tenant.
+pub(crate) async fn list_entries(
+    pool: &PgPool,
+    organization_id: OrganizationId,
+    project_id: ProjectId,
+    query: CollectionQuery,
+) -> Result<Vec<ProjectEntry>, AppError> {
+    let rows = sqlx::query_as::<_, ProjectEntryRow>(
+        r"
+        SELECT entry.id,
+               entry.project_id,
+               entry.entry_type,
+               entry.title,
+               entry.description,
+               entry.blocker_status,
+               author.principal_id AS author_principal_id,
+               author.actor_type AS author_actor_type,
+               author.actor_id AS author_actor_id,
+               entry.created_at
+          FROM commit.project_entries AS entry
+          JOIN commit.actor_projection AS author
+            ON author.organization_id = entry.organization_id
+           AND author.principal_id = entry.created_by_principal_id
+         WHERE entry.organization_id = $1
+           AND entry.project_id = $2
+           AND ($3::timestamptz IS NULL OR (entry.created_at, entry.id) < ($3, $4))
+         ORDER BY entry.created_at DESC, entry.id DESC
+         LIMIT $5
+        ",
+    )
+    .bind(organization_id.into_uuid())
+    .bind(project_id.into_uuid())
+    .bind(query.cursor.map(PageCursor::created_at))
+    .bind(query.cursor.map(PageCursor::id))
+    .bind(i64::from(query.limit.get()) + 1)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(ProjectEntryRow::into_domain).collect()
+}
+
 async fn fetch_entry_by_id(
     connection: &mut PgConnection,
     organization_id: OrganizationId,

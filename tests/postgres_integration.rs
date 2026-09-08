@@ -1622,6 +1622,46 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
         Err(AppError::Conflict { ref code }) if code == "project_already_completed"
     ));
 
+    let first_entries = service
+        .list_entries(
+            &outsider,
+            &locator,
+            CollectionQuery {
+                limit: PageLimit::new(1)?,
+                cursor: None,
+            },
+        )
+        .await?;
+    assert_eq!(first_entries.items.len(), 1);
+    assert_eq!(
+        first_entries.items[0].entry_type,
+        silicon_commit::domain::ProjectEntryType::Completion
+    );
+    let remaining_entries = service
+        .list_entries(
+            &creator,
+            &locator,
+            CollectionQuery {
+                limit: PageLimit::new(10)?,
+                cursor: first_entries.next_cursor,
+            },
+        )
+        .await?;
+    assert_eq!(remaining_entries.items.len(), 2);
+    assert!(remaining_entries.next_cursor.is_none());
+    assert!(
+        remaining_entries
+            .items
+            .iter()
+            .all(|entry| entry.id != first_entries.items[0].id)
+    );
+    assert!(matches!(
+        service
+            .list_entries(&other_tenant_actor, &locator, CollectionQuery::default())
+            .await,
+        Err(AppError::NotFound)
+    ));
+
     let reopen = service
         .update_project(
             &creator,

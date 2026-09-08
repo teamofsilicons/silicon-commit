@@ -385,6 +385,14 @@ impl Client {
     ) -> Result<Value, Error> {
         self.get(&["projects", project_id, "tasks"], query).await
     }
+    /// GET /api/v1/projects/{project_id}/entries.
+    pub async fn project_entries(
+        &self,
+        project_id: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Value, Error> {
+        self.get(&["projects", project_id, "entries"], query).await
+    }
     /// POST /api/v1/projects/{project_id}/tasks.
     pub async fn create_project_task<T: Serialize + ?Sized>(
         &self,

@@ -57,7 +57,9 @@ pub(crate) struct Environment {
     pub description: Option<String>,
     pub status: String,
     pub version: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub deleted_at: Option<time::OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub purge_after: Option<time::OffsetDateTime>,
 }
 

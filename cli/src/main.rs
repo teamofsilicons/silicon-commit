@@ -180,6 +180,11 @@ enum ProjectCommand {
         #[command(flatten)]
         page: PageArgs,
     },
+    Entries {
+        id: String,
+        #[command(flatten)]
+        page: PageArgs,
+    },
     CreateTask {
         id: String,
         #[command(flatten)]
@@ -444,6 +449,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     params.push(("cursor", cursor));
                 }
                 c.project_tasks(&id, &params).await?
+            }
+            ProjectCommand::Entries { id, page } => {
+                let limit = page.limit.to_string();
+                let mut params = vec![("limit", limit.as_str())];
+                if let Some(cursor) = page.cursor.as_deref() {
+                    params.push(("cursor", cursor));
+                }
+                c.project_entries(&id, &params).await?
             }
             ProjectCommand::CreateTask { id, data } => {
                 c.create_project_task(&id, &parse_data(&data.data)?).await?

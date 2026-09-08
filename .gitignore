@@ -6,3 +6,4 @@
 *.pem
 .DS_Store
 *.log
+.vercel/

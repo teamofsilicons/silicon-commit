@@ -1,0 +1,32 @@
+{
+  "name": "silicon-commit-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4325 --strictPort",
+    "check": "tsc --noEmit",
+    "build": "npm run check && vite build && esbuild server/node.ts --bundle --platform=node --format=esm --outfile=dist/server.js",
+    "build:vercel": "npm run build && node scripts/build-vercel.mjs",
+    "start": "node --env-file-if-exists=.env dist/server.js",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "fixture": "node --experimental-strip-types tests/fixture.ts",
+    "format": "prettier --write src server tests vite.config.ts package.json tsconfig.json"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "dompurify": "^3.3.0",
+    "marked": "^17.0.0",
+    "solid-js": "1.9.15"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "esbuild": "0.28.2",
+    "prettier": "^3.6.2",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "vite-plugin-solid": "2.11.14"
+  }
+}

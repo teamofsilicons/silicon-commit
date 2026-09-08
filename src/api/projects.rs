@@ -143,6 +143,24 @@ pub(crate) async fn list_tasks(
         .map(Json)
 }
 
+/// `GET /api/v1/projects/{project_id}/entries`.
+pub(crate) async fn list_entries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    StrictPath(raw_locator): StrictPath<String>,
+    StrictQuery(query): StrictQuery<CollectionQuery>,
+) -> Result<Json<crate::domain::Page<crate::domain::ProjectEntry>>, AppError> {
+    let locator = parse_locator(&raw_locator)?;
+    let actor = state
+        .authenticate(&headers, action::PROJECTS_READ, Some(raw_locator))
+        .await?;
+    state
+        .projects
+        .list_entries(&actor, &locator, query)
+        .await
+        .map(Json)
+}
+
 /// `POST /api/v1/projects/{project_id}/tasks`.
 pub(crate) async fn create_task(
     State(state): State<AppState>,

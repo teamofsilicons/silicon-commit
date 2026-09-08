@@ -1,5 +1,7 @@
 # Silicon Commit backend
 
+A SolidJS web interface is available in [frontend/](frontend/README.md), with local preview and hosting instructions.
+
 Silicon Commit is the organization-scoped work manager for Carbons and
 Silicons. It implements the v1 todo, note, notification-subscription, project,
 diary, project-work, contract in Rust.

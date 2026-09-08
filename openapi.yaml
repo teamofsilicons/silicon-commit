@@ -579,6 +579,28 @@ paths:
         '409': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
         default: { $ref: '#/components/responses/Error' }
+  /projects/{project_id}/entries:
+    get:
+      tags: [Project Work]
+      summary: List project activity
+      operationId: listProjectEntries
+      parameters:
+        - $ref: '#/components/parameters/OrgId'
+        - $ref: '#/components/parameters/RequestId'
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Blockers, updates, and completion entries in reverse creation order.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
+            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectEntryPage' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        default: { $ref: '#/components/responses/Error' }
   /projects/{project_id}/tasks:
     get:
       tags: [Project Work]
@@ -1020,6 +1042,13 @@ components:
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/ProjectTask' } }
         next_cursor: { type: [string, 'null'], maxLength: 1024 }
+    ProjectEntryPage:
+      type: object
+      required: [items, next_cursor]
+      additionalProperties: false
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ProjectEntry' } }
+        next_cursor: { type: [string, 'null'], maxLength: 1024 }
     BlockerCreate:
       type: object
       required: [title, description]
@@ -1040,7 +1069,6 @@ components:
       required: [id, project_id, type, title, description, created_by, created_at]
       additionalProperties: false
       properties: { id: { type: string, format: uuid }, project_id: { type: string, format: uuid }, type: { type: string, enum: [blocker, update, completion] }, title: { $ref: '#/components/schemas/TitleText' }, description: { $ref: '#/components/schemas/DescriptionText' }, status: { type: string, enum: [open, resolved] }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
-          description: Future provider expiry no later than twelve hours when Commit receives the response.
     Error:
       type: object
       required: [error]

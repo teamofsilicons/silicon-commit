@@ -23,8 +23,8 @@ use crate::{
     domain::{
         ActorId, ActorType, BlockerCreate, CollectionQuery, Diary, DiaryUpdate,
         ExpectedDiaryVersion, Page, PageCursor, Project, ProjectCompletionCreate, ProjectCreate,
-        ProjectEntryId, ProjectEntryType, ProjectLocator, ProjectPage, ProjectPatch, ProjectQuery,
-        ProjectTask, ProjectTaskCreate, ProjectTaskId, ProjectTaskPatch, ProjectUid,
+        ProjectEntry, ProjectEntryId, ProjectEntryType, ProjectLocator, ProjectPage, ProjectPatch,
+        ProjectQuery, ProjectTask, ProjectTaskCreate, ProjectTaskId, ProjectTaskPatch, ProjectUid,
         ProjectUpdateCreate, ValidatedProjectEntryCreate, ValidationError,
     },
     error::AppError,
@@ -397,6 +397,31 @@ impl ProjectService {
             postgres::list_tasks(&self.pool, actor.organization_id, project_id, query).await?;
         Ok(Page::from_window(tasks, limit, |task| {
             PageCursor::new(task.created_at, task.id.into_uuid())
+        }))
+    }
+
+    /// Lists blockers, updates, and completion entries for an organization-visible project.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NotFound`] for an unknown project or an internal
+    /// error when persistence cannot serve the activity list.
+    pub async fn list_entries(
+        &self,
+        actor: &VerifiedActor,
+        locator: &ProjectLocator,
+        query: CollectionQuery,
+    ) -> Result<Page<ProjectEntry>, AppError> {
+        let limit = query.limit;
+        let mut connection = self.pool.acquire().await?;
+        let project_id = postgres::find_project_id(&mut connection, actor.organization_id, locator)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        drop(connection);
+        let entries =
+            postgres::list_entries(&self.pool, actor.organization_id, project_id, query).await?;
+        Ok(Page::from_window(entries, limit, |entry| {
+            PageCursor::new(entry.created_at, entry.id.into_uuid())
         }))
     }
 

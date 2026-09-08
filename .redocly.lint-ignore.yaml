@@ -1,0 +1,4 @@
+# IAM's registered event-ingress contract intentionally uses this exact path.
+openapi.yaml:
+  no-path-trailing-slash:
+    - '#/paths/~1webhook~1'

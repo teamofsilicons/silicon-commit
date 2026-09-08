@@ -304,6 +304,10 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             get(projects::get_diary).put(projects::replace_diary),
         )
         .route(
+            "/projects/{project_id}/entries",
+            get(projects::list_entries),
+        )
+        .route(
             "/projects/{project_id}/tasks",
             get(projects::list_tasks).post(projects::create_task),
         )
