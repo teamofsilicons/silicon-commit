@@ -66,3 +66,14 @@ Rebuilt the frontend and production server, and passed all 10 frontend tests. Re
 - Fresh validation: frontend production build and 10 tests, Rust formatting and 120 library tests. The earlier PostgreSQL integration checks above remain the most recent full database test run.
 
 Existing IAM directory, sandbox-secret and webhook-approval limitations in the backend deployment report remain separate follow-up work.
+
+## IAM-only login and selected organizations release
+
+This release supersedes the earlier manual-token login UI and free-text workspace organization selection. The login page now contains only **Continue with IAM**. IAM owns organization selection; Commit loads only the session's selected active organization grants through the new unscoped `GET /auth/organizations` gateway and backend endpoint. The workspace selector contains only those returned handles. Stale stored organizations cannot open workspace content.
+
+- Updated the official IAM SDK to 1.4.0 and used its unscoped `oauth().authorizations()` operation. Inactive tokens, incorrect audiences, and malformed grants fail closed.
+- Passed the frontend production/Vercel build and all 11 frontend tests, 121 Rust library tests, workspace/all-target compilation, Rust formatting, and Clippy with warnings denied. OpenAPI lint passed with the same 11 existing warnings; database integration tests were not repeated for this release.
+- Browser fixture check completed the single-button IAM redirect and callback, then automatically opened the authorized `test-team` workspace. The login screen has no token, testing-key, or organization input.
+- Vercel deployment `dpl_D1n52SXqdquUuFitP672TWV58eRU` is live at `https://commit.teamofsilicons.com`. Live browser inspection confirms only the IAM sign-in button. Public HTTPS returns 200; session and organization discovery reject unauthenticated access appropriately. The production start route redirects to IAM with the application ID, production callback and CSRF state, without `org_id`.
+- API and worker deployed from revision `56a1e34fae5583f8af52aad3bd40836dde0ecc39`, image digest `sha256:bc58bf3ac86a06a32f813ca3d879be5febd8105973f535034131b01b5704ae54`. Public readiness and version checks passed. No migration or runtime secret change was required. Rollback containers are `commit-api-before-1788874344` and `commit-worker-before-1788874344`.
+- A fresh authenticated production IAM consent flow was not completed during this release; the callback and selected-organization UI were exercised against the test fixture, and SDK introspection behavior was covered by backend tests.
