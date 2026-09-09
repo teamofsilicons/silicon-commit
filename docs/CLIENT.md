@@ -19,3 +19,21 @@ Every mutating method carries an idempotency key. Keep and reuse a `Mutation` wh
 Methods cover health/readiness/version, sessions, todos and notes, list and todo subscriptions, notification settings, projects (diary, tasks, blockers, updates, completion), and test-environment lifecycle (create/list/key/rotate/clean/restore/delete). To target a sandbox, use `with_test_key` on the same client; all resource methods then operate against that isolated environment.
 
 `latest_release` provides the crates.io version check used by the CLI. It performs a bounded, redirect-free request and does not mutate the running process. Applications may use it to schedule dependency updates while keeping their own update policy.
+
+## IAM discovery and authentication checks
+
+```rust
+let public = Client::new("https://commit.teamofsilicons.com")?;
+let iam = public.iam().await?; // {"app_id": "…", "iam_url": "…"}
+let session = public.login_with_slt(slt).await?;
+let mut signed_in = public.with_bearer(session.access_token);
+if let Some(org) = session.org_id {
+    signed_in = signed_in.with_org_id(org);
+}
+let status = signed_in.login_status().await?;
+// status["authenticated"], status["actor"]["type"], status["actor"]["id"]
+```
+
+`iam()` omits all caller credentials and organization/test context. `login_status()` uses the configured bearer and optional organization and test key, and checks live IAM authorization. Success includes `authenticated: true`, `app_id`, public `actor` (`type` and `id`), `org_id`, and `organizations`. No token or internal principal ID is included. An absent bearer or HTTP 401 becomes `authenticated: false` with null `actor` and `org_id`; other errors are preserved. No active organization grant also means unauthenticated for Commit. Without an organization, all selected active organizations are checked and `org_id` is null if multiple are available.
+
+The library remains stateless and does not read `SILICON_HOME` or save credentials. The CLI uses that environment variable as its default storage home; applications using the library own their storage policy.

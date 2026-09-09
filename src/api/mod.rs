@@ -250,6 +250,8 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiBuildError> {
     let api = Router::new()
         .route("/version", get(version))
+        .route("/iam", get(sessions::iam))
+        .route("/auth/status", get(sessions::status))
         .route("/auth/login", post(sessions::login))
         .route("/auth/refresh", post(sessions::refresh))
         .route("/auth/logout", post(sessions::logout))
@@ -1156,6 +1158,60 @@ mod tests {
             idempotent: true,
             if_match: false,
         }
+    }
+
+    #[tokio::test]
+    async fn iam_discovery_and_status_routes_expose_only_public_context() -> anyhow::Result<()> {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/oauth/introspect"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"active":false})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut state = test_state(Arc::new(RecordingIdentity::default()))?;
+        state.sessions = Some(Arc::new(sessions::SessionService::new(
+            &crate::config::IamSettings {
+                mode: AuthenticationMode::Iam,
+                base_url: Url::parse(&server.uri())?,
+                app_id: Some("tos>commit".to_owned()),
+                app_secret: Some(secrecy::SecretString::from("never-public")),
+                audience: "tos>commit".to_owned(),
+                webhook_secret: None,
+                webhook_key_version: 1,
+            },
+            Duration::from_secs(1),
+        )?));
+        let app = router(state, &test_server_settings(1024)?)?;
+        let response = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/iam")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await?;
+        assert_eq!(
+            value,
+            serde_json::json!({"app_id":"tos>commit","iam_url":format!("{}/",server.uri())})
+        );
+        for token in [None, Some("Bearer oat_invalid")] {
+            let mut request = HttpRequest::builder().uri("/api/v1/auth/status");
+            if let Some(token) = token {
+                request = request.header(header::AUTHORIZATION, token);
+            }
+            let response = app.clone().oneshot(request.body(Body::empty())?).await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        Ok(())
     }
 
     fn test_state<I>(identity: Arc<I>) -> anyhow::Result<AppState>

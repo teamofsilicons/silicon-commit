@@ -20,6 +20,7 @@ use crate::{
 pub struct SessionService {
     pub(crate) client: Client,
     app_id: String,
+    iam_url: String,
 }
 
 impl SessionService {
@@ -48,8 +49,124 @@ impl SessionService {
             // Backend dependencies are upgraded and tested at build time.
             .auto_update(false)
             .build().map_err(|_| ClientBuildError::HttpClient)?;
-        Ok(Self { client, app_id })
+        Ok(Self {
+            client,
+            app_id,
+            iam_url: settings.base_url.to_string(),
+        })
     }
+}
+
+/// Public application metadata; application secrets stay on the server.
+pub(crate) async fn iam(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let service = state
+        .sessions
+        .as_ref()
+        .ok_or(AppError::ProviderUnavailable)?;
+    Ok(Json(serde_json::json!({
+        "app_id": service.app_id,
+        "iam_url": service.iam_url,
+    })))
+}
+
+/// Verify a session using live IAM authorization, without returning tokens.
+pub(crate) async fn status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let InboundCredential::Bearer(token) = super::auth::iam_credential(&headers)? else {
+        return Err(AppError::Unauthenticated);
+    };
+    let service = state
+        .sessions
+        .as_ref()
+        .ok_or(AppError::ProviderUnavailable)?;
+    let org_id = super::auth::optional_header(&headers, "x-org-id")?
+        .map(|org| {
+            org.parse::<PublicOrganizationId>()
+                .map_err(|_| AppError::BadRequest {
+                    code: "invalid_x_org_id".into(),
+                })
+        })
+        .transpose()?;
+    super::test_environments::resolve_context(&state.pool, &headers).await?;
+    let client = match crate::request_context::current_iam_environment_key() {
+        Some(key) => service.client.with_environment(
+            silicon_iam_client::EnvironmentKey::new(key).map_err(|_| AppError::Unauthenticated)?,
+        ),
+        None => service.client.clone(),
+    };
+    verified_status(
+        &client,
+        &service.app_id,
+        token.expose_secret(),
+        org_id.as_ref(),
+    )
+    .await
+    .map(Json)
+}
+
+async fn verified_status(
+    client: &Client,
+    app_id: &str,
+    token: &str,
+    org_id: Option<&PublicOrganizationId>,
+) -> Result<serde_json::Value, AppError> {
+    let snapshots = if let Some(org) = org_id {
+        client
+            .oauth()
+            .authorization(token, Some(org.as_str()))
+            .await
+            .map_err(map_error)?
+            .map(|snapshot| vec![snapshot])
+    } else {
+        client
+            .oauth()
+            .authorizations(token)
+            .await
+            .map_err(map_error)?
+    }
+    .ok_or(AppError::Unauthenticated)?;
+    let first = snapshots.first().ok_or(AppError::Unauthenticated)?;
+    if snapshots.iter().any(|snapshot| {
+        snapshot.audience != app_id
+            || snapshot.principal_id != first.principal_id
+            || snapshot.public_id != first.public_id
+            || snapshot.actor_type != first.actor_type
+            || org_id.is_some_and(|org| snapshot.org_id != org.as_str())
+    }) {
+        return Err(AppError::Unauthenticated);
+    }
+    let actor = crate::domain::ActorRef::new(
+        match first.actor_type {
+            models::ApplicationAuthorizationActorType::Carbon => crate::domain::ActorType::Carbon,
+            models::ApplicationAuthorizationActorType::Silicon => crate::domain::ActorType::Silicon,
+            models::ApplicationAuthorizationActorType::Other(_) => {
+                return Err(AppError::BadGateway);
+            }
+        },
+        first.public_id.parse().map_err(|_| AppError::BadGateway)?,
+    );
+    let organizations = snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot
+                .org_id
+                .parse::<PublicOrganizationId>()
+                .map_err(|_| AppError::BadGateway)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({
+        "authenticated": true,
+        "app_id": app_id,
+        "actor": actor,
+        "org_id": org_id.map(PublicOrganizationId::as_str).or_else(|| {
+            (organizations.len() == 1).then(|| organizations[0].as_str())
+        }),
+        "organizations": organizations,
+    }))
 }
 
 /// Only IAM's single-use SLT can begin a login.
@@ -274,6 +391,94 @@ mod tests {
             "audience": audience, "testing_environment_id": null,
             "scopes": [], "org_role": null, "tags": null
         })
+    }
+
+    #[tokio::test]
+    async fn login_status_verifies_identity_and_organization()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for kind in ["carbon", "silicon"] {
+            for scoped in [false, true] {
+                let server = MockServer::start().await;
+                let mut grant = snapshot("tos", "tos>commit");
+                grant["actor_type"] = json!(kind);
+                let response = if scoped {
+                    json!({"active":true,"authorization":grant})
+                } else {
+                    json!({"active":true,"authorizations":[grant]})
+                };
+                Mock::given(method("POST"))
+                    .and(path("/api/v1/oauth/introspect"))
+                    .and(move |request: &wiremock::Request| {
+                        request.headers.contains_key("x-org-id") == scoped
+                    })
+                    .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let client = Client::builder(&server.uri())?
+                    .credential(Credential::application("tos>commit", "test-secret"))
+                    .auto_update(false)
+                    .build()?;
+                let org = "tos".parse()?;
+                let output = super::verified_status(
+                    &client,
+                    "tos>commit",
+                    "oat_test",
+                    scoped.then_some(&org),
+                )
+                .await?;
+                assert_eq!(output["authenticated"], true);
+                assert_eq!(output["actor"], json!({"type":kind,"id":"person"}));
+                assert_eq!(output["org_id"], "tos");
+                assert!(!output.to_string().contains("principal_id"));
+                assert!(!output.to_string().contains("oat_test"));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_status_rejects_inactive_wrong_audience_and_inconsistent_grants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut other_actor = snapshot("second", "tos>commit");
+        other_actor["public_id"] = json!("somebody-else");
+        let cases = [
+            (json!({"active":false}), None),
+            (json!({"active":true,"authorizations":[]}), None),
+            (
+                json!({"active":true,"authorizations":[snapshot("tos", "other>app")]}),
+                None,
+            ),
+            (
+                json!({"active":true,"authorizations":[snapshot("tos", "tos>commit"),other_actor]}),
+                None,
+            ),
+            (
+                json!({"active":true,"authorization":snapshot("wrong-org", "tos>commit")}),
+                Some("tos"),
+            ),
+            (json!({"active":true}), None),
+        ];
+        for (response, org) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/oauth/introspect"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = Client::builder(&server.uri())?
+                .credential(Credential::application("tos>commit", "test-secret"))
+                .auto_update(false)
+                .build()?;
+            let org = org.map(str::parse).transpose()?;
+            assert!(
+                super::verified_status(&client, "tos>commit", "oat_test", org.as_ref())
+                    .await
+                    .is_err()
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]

@@ -161,7 +161,7 @@ The primary Interface is the Rust Package. CLI is built using the Rust Package o
 
 if you need a local store for auth or something else, use `{home_dir}/.{appname}/dir`.
 
-The default home dir is `~`.
+The default home dir is `~`. If `SILICON_HOME` is present in the enviorment variables, use that as the home directory by default. 
 
 For both package and the cli write detailed docs on how to use the package and how to use the cli, and also another doc on how to use the package. 
 
@@ -181,6 +181,11 @@ And there should be an command to configure the home directory where the informa
 The default home dir is `~`.
 
 For both cli and client we would also package in an auto updater, the task of this auto updater is to compare the current version to the latest version in crates for them, and if there's a new verion auto update it to the said new version. By default auto update is on, users can specifically come and opt in to stop auto update. Which would stop auto updating the package. Auto updater check runs every single hour. Updates should be checked when the command is run and should happen every hour, so check for the last update check time and if it's past 1 hour old check for update and update after the command finishes running.
+
+It should also expose these specific commands:
+1) `--help` which would give all the help documentation on how to use waveform. So the user should be able to run `commit --help` and get the help docs.
+2) `iam --json` the user should be able to run  `commit iam --json` which returns `app_id` alongside other information.
+3) `login status --json` the user should be able to run `commit login status --json`, reports successful authentication reports `authenticated: true`, alongside which carbon or silicon is it authenticated as.
 
 ### Cli experience
 

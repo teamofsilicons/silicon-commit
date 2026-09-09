@@ -49,6 +49,66 @@ paths:
               schema: { $ref: '#/components/schemas/Version' }
         '400': { $ref: '#/components/responses/Error' }
         default: { $ref: '#/components/responses/Error' }
+  /iam:
+    get:
+      tags: [Operations]
+      summary: Discover public IAM application metadata
+      operationId: getIam
+      security: []
+      responses:
+        '200':
+          description: Public application configuration; never includes secrets.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [app_id, iam_url]
+                properties:
+                  app_id: { type: string }
+                  iam_url: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
+  /auth/status:
+    get:
+      tags: [Operations]
+      summary: Verify the current Carbon or Silicon login
+      description: Checks live IAM authorization. With X-Org-ID, verifies that organization; otherwise checks all selected active organizations. No active organization grant returns 401. Test requests use the linked IAM environment. Tokens and internal principal IDs are never returned.
+      operationId: getLoginStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: X-Org-ID
+          in: header
+          required: false
+          schema: { $ref: '#/components/schemas/OrganizationId' }
+        - name: X-Testing-Environment-Key
+          in: header
+          required: false
+          schema: { type: string, pattern: '^[A-Za-z0-9]{32}$' }
+      responses:
+        '200':
+          description: Verified public identity and active organization context.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authenticated, app_id, actor, org_id, organizations]
+                properties:
+                  authenticated: { type: boolean, const: true }
+                  app_id: { type: string }
+                  actor:
+                    type: object
+                    required: [type, id]
+                    properties:
+                      type: { type: string, enum: [carbon, silicon] }
+                      id: { type: string }
+                  org_id: { type: [string, 'null'] }
+                  organizations:
+                    type: array
+                    items: { $ref: '#/components/schemas/OrganizationId' }
+        '401': { $ref: '#/components/responses/Error' }
+        default: { $ref: '#/components/responses/Error' }
   /auth/organizations:
     get:
       tags: [Operations]

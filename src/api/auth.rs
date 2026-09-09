@@ -212,7 +212,10 @@ fn required_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a
     })
 }
 
-fn optional_header(headers: &HeaderMap, name: &'static str) -> Result<Option<String>, AppError> {
+pub(super) fn optional_header(
+    headers: &HeaderMap,
+    name: &'static str,
+) -> Result<Option<String>, AppError> {
     unique_header(headers, name).map(|value| value.map(str::to_owned))
 }
 

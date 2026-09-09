@@ -9,7 +9,7 @@ use std::{fs, path::PathBuf};
     name = "commit",
     version,
     about = "Silicon Commit work manager",
-    after_help = "Set COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use. Writes accept --data '<json>' and support --if-match."
+    after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test KEY for a sandbox and --no-update to skip automatic updates.\nRun commit <command> --help for arguments and subcommands."
 )]
 struct Root {
     #[arg(
@@ -44,26 +44,37 @@ struct Root {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Exchange an IAM short-lived token, or check the current login.
     Login(Login),
+    /// Show public IAM application details, including the app_id for login.
+    Iam(JsonOutput),
+    /// Configure local session storage.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Check whether the API process is alive.
     Health,
+    /// Check whether the API is ready to serve requests.
     Ready,
+    /// Show backend build metadata.
     Version,
+    /// Manage todos, notes, and notification subscriptions.
     Todos {
         #[command(subcommand)]
         command: TodoCommand,
     },
+    /// Manage projects, diaries, tasks, and milestone entries.
     Projects {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Read notification settings, or replace them with --data JSON.
     Notifications {
         #[arg(long)]
         data: Option<String>,
     },
+    /// Create and manage isolated test environments.
     TestEnvironments {
         #[command(subcommand)]
         command: TestCommand,
@@ -76,10 +87,30 @@ enum ConfigCommand {
     Home { location: PathBuf },
 }
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct Login {
-    slt: String,
+    #[arg(
+        required = true,
+        help = "Single-use short-lived token issued by Silicon IAm"
+    )]
+    slt: Option<String>,
     #[arg(long, help = "Print tokens instead of saving them locally")]
     no_save: bool,
+    #[command(subcommand)]
+    command: Option<LoginCommand>,
+}
+#[derive(Subcommand)]
+enum LoginCommand {
+    /// Verify the current token and show the authenticated Carbon or Silicon.
+    Status(JsonOutput),
+}
+#[derive(Args)]
+struct JsonOutput {
+    #[arg(
+        long,
+        help = "Print machine-readable JSON (also the default output format)"
+    )]
+    json: bool,
 }
 #[derive(Args, Default)]
 struct TodoList {
@@ -111,32 +142,35 @@ struct PageArgs {
 
 #[derive(Subcommand)]
 enum TodoCommand {
+    /// List resources in the current organization.
     List(TodoList),
-    Get {
-        id: String,
-    },
+    /// Fetch a resource by its public ID.
+    Get { id: String },
+    /// Create a resource using --data JSON or @FILE.
     Create(Data),
+    /// Update a resource using --data JSON or @FILE.
     Update {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    Delete {
-        id: String,
-    },
+    /// Delete the specified resource.
+    Delete { id: String },
+    /// List notes attached to a todo.
     Notes {
         id: String,
         #[command(flatten)]
         page: PageArgs,
     },
+    /// Append a note to a todo using --data JSON.
     AddNote {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    Subscription {
-        id: String,
-    },
+    /// Read a todo notification subscription.
+    Subscription { id: String },
+    /// Replace a todo notification subscription using --data JSON.
     SetSubscription {
         id: String,
         #[command(flatten)]
@@ -157,55 +191,64 @@ struct ProjectList {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
+    /// List resources in the current organization.
     List(ProjectList),
-    Get {
-        id: String,
-    },
+    /// Fetch a resource by its public ID.
+    Get { id: String },
+    /// Create a resource using --data JSON or @FILE.
     Create(Data),
+    /// Update a resource using --data JSON or @FILE.
     Update {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    Diary {
-        id: String,
-    },
+    /// Read the project diary.
+    Diary { id: String },
+    /// Replace the diary using --data JSON and --if-match VERSION.
     SetDiary {
         id: String,
         #[command(flatten)]
         data: Data,
     },
+    /// List project tasks and subtasks.
     Tasks {
         id: String,
         #[command(flatten)]
         page: PageArgs,
     },
+    /// List project blockers, updates, and completion entries.
     Entries {
         id: String,
         #[command(flatten)]
         page: PageArgs,
     },
+    /// Create a project task using --data JSON.
     CreateTask {
         id: String,
         #[command(flatten)]
         data: Data,
     },
+    /// Update a project task using --data JSON.
     UpdateTask {
         project: String,
         task: String,
         #[command(flatten)]
         data: Data,
     },
+    /// Add a project blocker using --data JSON.
     Blocker {
         id: String,
         #[command(flatten)]
         data: Data,
     },
+    /// Add a project milestone update using --data JSON.
     CreateUpdate {
         id: String,
         #[command(flatten)]
         data: Data,
     },
+    /// Record project completion using --data JSON.
     Complete {
         id: String,
         #[command(flatten)]
@@ -215,12 +258,28 @@ enum ProjectCommand {
 #[derive(Subcommand)]
 enum TestCommand {
     List,
+    /// Create a resource using --data JSON or @FILE.
     Create(Data),
-    Rotate { id: String },
-    Key { id: String },
-    Restore { id: String },
-    Clean { id: String },
-    Delete { id: String },
+    /// Rotate the test environment access key.
+    Rotate {
+        id: String,
+    },
+    /// Retrieve the test environment access key.
+    Key {
+        id: String,
+    },
+    /// Restore a deleted test environment during its retention period.
+    Restore {
+        id: String,
+    },
+    /// Clear all data from a test environment.
+    Clean {
+        id: String,
+    },
+    /// Delete the specified resource.
+    Delete {
+        id: String,
+    },
 }
 #[derive(Args)]
 struct Data {
@@ -248,7 +307,8 @@ fn session_path() -> PathBuf {
         .join(".commit/session.json")
 }
 fn default_home_dir() -> PathBuf {
-    std::env::var_os("HOME")
+    std::env::var_os("SILICON_HOME")
+        .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -352,8 +412,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let output = match a.command {
         Command::Config { .. } => unreachable!("config commands return before API setup"),
+        Command::Iam(_) => c.iam().await?,
+        Command::Login(Login {
+            command: Some(LoginCommand::Status(_)),
+            ..
+        }) => c.login_status().await?,
         Command::Login(x) => {
-            let s = c.login_with_slt(&x.slt).await?;
+            let slt = x.slt.as_deref().ok_or("a short-lived token is required")?;
+            let s = c.login_with_slt(slt).await?;
             if !x.no_save {
                 save_session(&Session {
                     access_token: s.access_token.clone(),
@@ -531,7 +597,8 @@ async fn maybe_check_update(disabled: bool) {
         // the user's requested operation. A failed install is non-fatal: the
         // current binary remains usable and the next hourly check retries it.
         match std::process::Command::new("cargo")
-            .args(["install", "--locked", "--force", "commit"])
+            .args(["install", "--locked", "--force", "silicon-commit-cli"])
+            .stdout(std::process::Stdio::from(std::io::stderr()))
             .status()
         {
             Ok(status) if status.success() => eprintln!("Silicon Commit CLI updated"),

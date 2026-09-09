@@ -29,7 +29,7 @@ pub async fn latest_release() -> Result<RegistryRelease, Error> {
 /// The CLI package is separate from the client library and therefore has its
 /// own registry check.
 pub async fn latest_cli_release() -> Result<RegistryRelease, Error> {
-    latest_release_for("commit").await
+    latest_release_for("silicon-commit-cli").await
 }
 
 async fn latest_release_for(crate_name: &str) -> Result<RegistryRelease, Error> {
@@ -245,6 +245,32 @@ impl Client {
         public.org_id = None;
         public.test_key = None;
         public.get(&["version"], &[]).await
+    }
+    /// Public IAM application metadata. Caller credentials and test context are omitted.
+    pub async fn iam(&self) -> Result<Value, Error> {
+        let mut public = self.clone();
+        public.bearer = None;
+        public.org_id = None;
+        public.test_key = None;
+        public.get(&["iam"], &[]).await
+    }
+    /// Verify the current login against IAM and return its public actor identity.
+    /// Missing or rejected credentials return `authenticated: false`; transport,
+    /// permission, and server failures remain errors. No tokens are returned.
+    pub async fn login_status(&self) -> Result<Value, Error> {
+        if self
+            .bearer
+            .as_ref()
+            .is_none_or(|token| token.expose_secret().is_empty())
+        {
+            return Ok(serde_json::json!({"authenticated": false, "actor": null, "org_id": null}));
+        }
+        match self.get(&["auth", "status"], &[]).await {
+            Err(error) if error.is_unauthenticated() => {
+                Ok(serde_json::json!({"authenticated": false, "actor": null, "org_id": null}))
+            }
+            result => result,
+        }
     }
     pub async fn login_with_slt(&self, slt: &str) -> Result<SessionTokens, Error> {
         decode(

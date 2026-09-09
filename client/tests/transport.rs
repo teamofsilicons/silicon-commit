@@ -118,3 +118,29 @@ fn mutation_accepts_backend_minimum_idempotency_key_length() {
     assert!(Mutation::with_key("12345678").is_ok());
     assert!(Mutation::with_key("1234567").is_err());
 }
+
+#[tokio::test]
+async fn login_status_distinguishes_rejected_credentials_from_service_failures()
+-> Result<(), Box<dyn std::error::Error>> {
+    for status in [401, 403, 503] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/auth/status"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(json!({"error":{"code":"test_error"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = Client::new(&server.uri())?
+            .with_bearer("invalid")
+            .login_status()
+            .await;
+        if status == 401 {
+            assert_eq!(result?["authenticated"], false);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+    Ok(())
+}

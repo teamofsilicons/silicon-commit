@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Stateless Rust client for Silicon Commit"
 license = "MIT"
+repository = "https://github.com/teamofsilicons/silicon-commit"
+readme = "README.md"
 
 [dependencies]
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls"] }
