@@ -9,6 +9,7 @@ commit iam --json
 commit login <slt>
 commit login status --json
 commit todos list
+commit logout --json
 ```
 
 Local state defaults to `$SILICON_HOME/.commit` when set, otherwise `$HOME/.commit`.
