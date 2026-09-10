@@ -46,6 +46,8 @@ struct Root {
 enum Command {
     /// Exchange an IAM short-lived token, or check the current login.
     Login(Login),
+    /// Revoke the saved session and remove its local credentials.
+    Logout(JsonOutput),
     /// Show public IAM application details, including the app_id for login.
     Iam(JsonOutput),
     /// Configure local session storage.
@@ -367,6 +369,42 @@ fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = match fs::read_to_string(home_dir_config_path()) {
+        Ok(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
+        Ok(_) => return Err("the configured Commit home directory is empty".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_home_dir(),
+        Err(error) => return Err(error.into()),
+    };
+    let path = directory.join(".commit/session.json");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let saved: Session = serde_json::from_slice(&bytes)?;
+    if saved.refresh_token.is_empty() {
+        return Err("the saved session has no refresh token".into());
+    }
+    let mut client = Client::new(&saved.api_url)?;
+    if let Some(api) = &a.api_url
+        && Client::new(api)?.base_url() != client.base_url()
+    {
+        return Err("the selected API does not match the saved session".into());
+    }
+    client = client.with_mutation(match &a.idempotency_key {
+        Some(key) => Mutation::with_key(key)?,
+        None => Mutation::new(),
+    });
+    // ponytail: legacy sessions do not store test context; callers must reuse
+    // their login selector until a future session format persists it.
+    if let Some(key) = &a.test {
+        client = client.with_test_key(key)?;
+    }
+    client.logout(&saved.refresh_token).await?;
+    fs::remove_file(path)?;
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a = Root::parse();
@@ -375,6 +413,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } = &a.command
     {
         return set_home_dir(location.clone());
+    }
+    if matches!(a.command, Command::Logout(_)) {
+        logout(&a).await?;
+        println!("{}", serde_json::json!({"removed": true}));
+        return Ok(());
     }
     let saved = load_session();
     let api = a
@@ -411,7 +454,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         c = c.with_test_key(k)?;
     }
     let output = match a.command {
-        Command::Config { .. } => unreachable!("config commands return before API setup"),
+        Command::Config { .. } | Command::Logout(_) => {
+            unreachable!("local session commands return before API setup")
+        }
         Command::Iam(_) => c.iam().await?,
         Command::Login(Login {
             command: Some(LoginCommand::Status(_)),

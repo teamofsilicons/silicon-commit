@@ -59,6 +59,7 @@ fn help_and_login_grammar_work_without_network_or_state() {
         vec!["-h"],
         vec!["login", "--help"],
         vec!["login", "status", "--help"],
+        vec!["logout", "--help"],
         vec!["iam", "--help"],
     ] {
         let output = home.command().args(args).output().unwrap();
@@ -93,6 +94,98 @@ fn help_and_login_grammar_work_without_network_or_state() {
         false
     );
     assert!(!home.0.join(".commit").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logout_revokes_the_saved_session_before_removing_only_its_credentials() {
+    for (status, test_key) in [
+        (204, None),
+        (503, None),
+        (204, Some("abcdefghijklmnopqrstuvwxyz123456")),
+    ] {
+        let home = Home::new();
+        let silicon = Home::new();
+        let configured = Home::new();
+        let server = MockServer::start().await;
+        let other_server = MockServer::start().await;
+        let mut command = home.command();
+        command
+            .env("SILICON_HOME", &silicon.0)
+            .args(["config", "home"])
+            .arg(&configured.0);
+        assert!(command.output().unwrap().status.success());
+        let pointer = silicon.0.join(".commit/home_dir");
+        let original_pointer = fs::read(&pointer).unwrap();
+        let state = configured.0.join(".commit");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("test-key"), b"unrelated configuration").unwrap();
+        let session = state.join("session.json");
+        let saved = serde_json::to_vec(&json!({
+            "access_token": "oat_saved", "refresh_token": "ort_saved",
+            "api_url": server.uri(), "org_id": "tos"
+        }))
+        .unwrap();
+        fs::write(&session, &saved).unwrap();
+        let run = |api: &str| {
+            let mut command = home.command();
+            command
+                .env("SILICON_HOME", &silicon.0)
+                .env("COMMIT_API_URL", api)
+                .env("COMMIT_ACCESS_TOKEN", "oat_unrelated")
+                .env("COMMIT_ORG_ID", "unrelated")
+                .args(["logout", "--json"]);
+            if let Some(key) = test_key {
+                command.env("COMMIT_TEST_KEY", key);
+            }
+            command.output().unwrap()
+        };
+        assert!(!run(&other_server.uri()).status.success());
+        assert_eq!(fs::read(&session).unwrap(), saved);
+        assert!(other_server.received_requests().await.unwrap().is_empty());
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/logout"))
+            .and(body_json(json!({"token":"ort_saved"})))
+            .and(move |r: &wiremock::Request| {
+                !r.headers.contains_key("authorization")
+                    && !r.headers.contains_key("x-org-id")
+                    && r.headers.contains_key("idempotency-key")
+                    && r.headers
+                        .get("x-testing-environment-key")
+                        .and_then(|v| v.to_str().ok())
+                        == test_key
+            })
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let output = run(&format!("{}/api/v1/", server.uri()));
+        if status == 204 {
+            assert_eq!(json_output(output)["removed"], true);
+            assert!(!session.exists());
+            // An absent session succeeds without validating or contacting any API.
+            assert_eq!(json_output(run("invalid URL"))["removed"], true);
+        } else {
+            assert!(!output.status.success());
+            assert_eq!(fs::read(&session).unwrap(), saved);
+        }
+        assert_eq!(fs::read(&pointer).unwrap(), original_pointer);
+        assert_eq!(
+            fs::read(state.join("test-key")).unwrap(),
+            b"unrelated configuration"
+        );
+        assert!(!home.0.join(".commit").exists());
+        assert!(!silicon.0.join(".commit/session.json").exists());
+        fs::write(&session, b"invalid session").unwrap();
+        assert!(!run(&server.uri()).status.success());
+        assert_eq!(fs::read(&session).unwrap(), b"invalid session");
+        fs::write(silicon.0.join(".commit/session.json"), &saved).unwrap();
+        fs::write(&pointer, b"").unwrap();
+        assert!(!run(&server.uri()).status.success());
+        assert_eq!(
+            fs::read(silicon.0.join(".commit/session.json")).unwrap(),
+            saved
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
