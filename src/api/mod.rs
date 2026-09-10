@@ -269,6 +269,10 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             get(test_environments::retrieve_key),
         )
         .route(
+            "/test-environments/{id}/iam-credentials",
+            axum::routing::put(test_environments::pair_iam_credentials),
+        )
+        .route(
             "/test-environments/{id}/restore",
             post(test_environments::restore),
         )
@@ -1220,6 +1224,16 @@ mod tests {
     {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgresql://postgres:postgres@127.0.0.1:1/commit")?;
+        test_state_with_pool(identity, pool)
+    }
+
+    pub(super) fn test_state_with_pool<I>(
+        identity: Arc<I>,
+        pool: PgPool,
+    ) -> anyhow::Result<AppState>
+    where
+        I: IdentityProvider + 'static,
+    {
         let identity: Arc<dyn IdentityProvider> = identity;
         let limits = DomainLimits::default();
         let ttl = Duration::from_secs(60);

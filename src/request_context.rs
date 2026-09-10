@@ -7,7 +7,7 @@ use std::{cell::RefCell, future::Future};
 struct Context {
     request_id: String,
     environment_key: RefCell<Option<String>>,
-    iam_environment_key: RefCell<Option<String>>,
+    iam_testing_credentials: RefCell<Option<IamTestingCredentials>>,
     iam_bearer_token: RefCell<Option<SecretString>>,
     testing_scope: RefCell<Option<TestingScope>>,
 }
@@ -23,7 +23,7 @@ pub async fn scope<T>(request_id: String, future: impl Future<Output = T>) -> T 
             Context {
                 request_id,
                 environment_key: RefCell::new(None),
-                iam_environment_key: RefCell::new(None),
+                iam_testing_credentials: RefCell::new(None),
                 iam_bearer_token: RefCell::new(None),
                 testing_scope: RefCell::new(None),
             },
@@ -63,19 +63,30 @@ pub fn current_environment_key() -> Option<String> {
         .ok()
         .flatten()
 }
-/// Installs the decrypted `IAm` test key for outbound provider requests.
-pub fn set_iam_environment_key(key: Option<String>) {
-    let _ = REQUEST.try_with(|c| *c.iam_environment_key.borrow_mut() = key);
+/// One environment's explicitly paired IAM application credential.
+#[derive(Clone, Debug)]
+pub struct IamTestingCredentials {
+    /// IAM testing root key, distinct from the incoming Commit test key.
+    pub environment_key: SecretString,
+    /// Canonical application ID imported into the IAM testing environment.
+    pub app_id: String,
+    /// The imported application's secret, never the production credential.
+    pub app_secret: SecretString,
 }
-/// Returns the request's decrypted `IAm` test key, when present.
+
+/// Installs the complete decrypted IAM testing pair for this request.
+pub fn set_iam_testing_credentials(credentials: Option<IamTestingCredentials>) {
+    let _ = REQUEST.try_with(|c| *c.iam_testing_credentials.borrow_mut() = credentials);
+}
+
+/// Returns the complete IAM testing pair resolved from the incoming Commit key.
 #[must_use]
-pub fn current_iam_environment_key() -> Option<String> {
+pub fn current_iam_testing_credentials() -> Option<IamTestingCredentials> {
     REQUEST
-        .try_with(|c| c.iam_environment_key.borrow().clone())
+        .try_with(|c| c.iam_testing_credentials.borrow().clone())
         .ok()
         .flatten()
 }
-
 /// Bound environment identity and lifecycle generation for this request.
 #[derive(Clone, Copy)]
 pub struct TestingScope {

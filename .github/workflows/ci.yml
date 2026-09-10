@@ -31,6 +31,7 @@ jobs:
           --health-retries 10
     env:
       COMMIT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/silicon_commit_test
+      COMMIT_IAM_APP_SECRET: local-test-only-encryption-key-not-an-iam-credential
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
