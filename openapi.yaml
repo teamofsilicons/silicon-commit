@@ -213,14 +213,41 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name, iam_test_key]
+              required: [name, iam_test_key, iam_app_id, iam_app_secret]
               additionalProperties: false
               properties:
                 name: { type: string, minLength: 1, maxLength: 200 }
                 description: { type: [string, 'null'], maxLength: 20000 }
-                iam_test_key: { type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$' }
+                iam_test_key: { type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$', writeOnly: true }
+                iam_app_id: { type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment. }
+                iam_app_secret: { type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret. }
       responses:
         '200': { description: Created environment and one-time key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /test-environments/{id}/iam-credentials:
+    put:
+      tags: [Testing Environments]
+      summary: Pair or rotate the imported IAM testing application credential
+      operationId: pairTestEnvironmentIamCredentials
+      description: Requires production organization owner authority or the explicit commit.test_environments.manage capability. Testing-environment credentials cannot authorize this operation. The IAM root key is retained; the supplied canonical application ID and secret are verified against that IAM testing environment before encrypted storage. No user token is issued, and the environment version advances to reject subsequent writes from an earlier resolved test scope. Existing unpaired environments reject test requests with testing_environment_iam_credentials_required until paired.
+      parameters:
+        - { $ref: '#/components/parameters/OrgId' }
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [iam_app_id, iam_app_secret]
+              additionalProperties: false
+              properties:
+                iam_app_id: { type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment. }
+                iam_app_secret: { type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret. }
+      responses:
+        '200': { description: Updated environment metadata without credentials., content: { application/json: { schema: { $ref: '#/components/schemas/TestEnvironment' } } } }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
         default: { $ref: '#/components/responses/Error' }
   /test-environments/{id}/key:
     get:

@@ -11,8 +11,12 @@ use silicon_iam_client::{Client, Credential, IdempotencyKey, Mutation, models};
 
 use super::{AppState, extract::StrictJson};
 use crate::{
-    application::ports::InboundCredential, config::IamSettings, domain::PublicOrganizationId,
-    error::AppError, infrastructure::clients::ClientBuildError,
+    application::ports::InboundCredential,
+    config::IamSettings,
+    domain::PublicOrganizationId,
+    error::AppError,
+    infrastructure::clients::ClientBuildError,
+    request_context::{self, IamTestingCredentials},
 };
 
 /// A server-side IAM application client. Its credentials never reach CLI users.
@@ -55,6 +59,57 @@ impl SessionService {
             iam_url: settings.base_url.to_string(),
         })
     }
+
+    pub(crate) fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
+    fn testing_client(&self, credentials: &IamTestingCredentials) -> Result<Client, AppError> {
+        if credentials.app_id != self.app_id {
+            return Err(AppError::Unauthenticated);
+        }
+        let environment =
+            silicon_iam_client::EnvironmentKey::new(credentials.environment_key.expose_secret())
+                .map_err(|_| AppError::Unauthenticated)?;
+        Ok(self
+            .client
+            .with_credential(Credential::application(
+                &credentials.app_id,
+                credentials.app_secret.expose_secret(),
+            ))
+            .with_environment(environment))
+    }
+
+    fn request_client(&self) -> Result<Client, AppError> {
+        if let Some(credentials) = request_context::current_iam_testing_credentials() {
+            return self.testing_client(&credentials);
+        }
+        if request_context::current_environment_key().is_some()
+            || request_context::testing_scope().is_some()
+        {
+            return Err(AppError::Unauthenticated);
+        }
+        Ok(self.client.clone())
+    }
+
+    /// Checks the paired application credential without issuing a user token.
+    pub(crate) async fn verify_testing_credentials(
+        &self,
+        credentials: &IamTestingCredentials,
+    ) -> Result<(), AppError> {
+        self.testing_client(credentials)?
+            .oauth()
+            .introspect(
+                &models::TokenIntrospectionRequest {
+                    token: "commit-testing-credential-check".to_owned(),
+                    token_type_hint: None,
+                },
+                None,
+            )
+            .await
+            .map_err(map_error)?;
+        Ok(())
+    }
 }
 
 /// Public application metadata; application secrets stay on the server.
@@ -92,12 +147,7 @@ pub(crate) async fn status(
         })
         .transpose()?;
     super::test_environments::resolve_context(&state.pool, &headers).await?;
-    let client = match crate::request_context::current_iam_environment_key() {
-        Some(key) => service.client.with_environment(
-            silicon_iam_client::EnvironmentKey::new(key).map_err(|_| AppError::Unauthenticated)?,
-        ),
-        None => service.client.clone(),
-    };
+    let client = service.request_client()?;
     verified_status(
         &client,
         &service.app_id,
@@ -203,12 +253,7 @@ pub(crate) async fn organizations(
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
     super::test_environments::resolve_context(&state.pool, &headers).await?;
-    let client = match crate::request_context::current_iam_environment_key() {
-        Some(key) => service.client.with_environment(
-            silicon_iam_client::EnvironmentKey::new(key).map_err(|_| AppError::Unauthenticated)?,
-        ),
-        None => service.client.clone(),
-    };
+    let client = service.request_client()?;
     selected_organizations(&client, &service.app_id, token.expose_secret())
         .await
         .map(Json)
@@ -253,12 +298,7 @@ pub(crate) async fn login(
         .ok_or(AppError::ProviderUnavailable)?;
     let mutation = mutation(&headers)?;
     super::test_environments::resolve_context(&state.pool, &headers).await?;
-    let client = match crate::request_context::current_iam_environment_key() {
-        Some(key) => service.client.with_environment(
-            silicon_iam_client::EnvironmentKey::new(key).map_err(|_| AppError::Unauthenticated)?,
-        ),
-        None => service.client.clone(),
-    };
+    let client = service.request_client()?;
     client
         .oauth()
         .login(&service.app_id, input.slt.expose_secret(), &mutation)
@@ -278,12 +318,7 @@ pub(crate) async fn refresh(
         .ok_or(AppError::ProviderUnavailable)?;
     let mutation = mutation(&headers)?;
     super::test_environments::resolve_context(&state.pool, &headers).await?;
-    let client = match crate::request_context::current_iam_environment_key() {
-        Some(key) => service.client.with_environment(
-            silicon_iam_client::EnvironmentKey::new(key).map_err(|_| AppError::Unauthenticated)?,
-        ),
-        None => service.client.clone(),
-    };
+    let client = service.request_client()?;
     client
         .oauth()
         .refresh(
@@ -307,12 +342,7 @@ pub(crate) async fn logout(
         .ok_or(AppError::ProviderUnavailable)?;
     let mutation = mutation(&headers)?;
     super::test_environments::resolve_context(&state.pool, &headers).await?;
-    let client = match crate::request_context::current_iam_environment_key() {
-        Some(key) => service.client.with_environment(
-            silicon_iam_client::EnvironmentKey::new(key).map_err(|_| AppError::Unauthenticated)?,
-        ),
-        None => service.client.clone(),
-    };
+    let client = service.request_client()?;
     client
         .oauth()
         .revoke(

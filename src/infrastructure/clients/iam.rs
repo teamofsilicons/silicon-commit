@@ -26,6 +26,7 @@ use crate::{
         actor::{Actor, ActorType},
         ids::{ActorId, OrganizationId, PrincipalId, PublicOrganizationId},
     },
+    request_context::{self, IamTestingCredentials},
 };
 
 use super::{
@@ -90,6 +91,37 @@ impl IamClient {
         })
     }
 
+    fn request_credentials(&self) -> Result<Option<IamTestingCredentials>, ProviderError> {
+        if let Some(credentials) = request_context::current_iam_testing_credentials() {
+            if credentials.app_id != self.app_id {
+                return Err(ProviderError::Unauthenticated);
+            }
+            return Ok(Some(credentials));
+        }
+        if request_context::current_environment_key().is_some()
+            || request_context::testing_scope().is_some()
+        {
+            return Err(ProviderError::Unauthenticated);
+        }
+        Ok(None)
+    }
+
+    fn request_application_authorization(&self) -> Result<HeaderValue, ProviderError> {
+        self.request_credentials()?.map_or_else(
+            || Ok(self.application_authorization.clone()),
+            |credentials| {
+                basic_authorization(&credentials.app_id, &credentials.app_secret)
+                    .map_err(|_| ProviderError::Unauthenticated)
+            },
+        )
+    }
+
+    fn request_environment_key(&self) -> Result<Option<String>, ProviderError> {
+        Ok(self
+            .request_credentials()?
+            .map(|credentials| credentials.environment_key.expose_secret().to_owned()))
+    }
+
     async fn authenticate_bearer(
         &self,
         token: &SecretString,
@@ -104,11 +136,11 @@ impl IamClient {
             .post(self.introspection_url.clone())
             .header(
                 header::AUTHORIZATION,
-                self.application_authorization.clone(),
+                self.request_application_authorization()?,
             )
             .header("x-org-id", org_header(&request.org_id)?)
             .form(&[("token", token.expose_secret())]);
-        if let Some(key) = crate::request_context::current_iam_environment_key() {
+        if let Some(key) = self.request_environment_key()? {
             outbound = outbound.header("x-testing-environment-key", key);
         }
         let response = outbound
@@ -196,12 +228,12 @@ impl IamClient {
             .post(self.obo_verify_url.clone())
             .header(
                 header::AUTHORIZATION,
-                self.application_authorization.clone(),
+                self.request_application_authorization()?,
             )
             .header("x-org-id", org_header(&request.org_id)?)
             .header("idempotency-key", idempotency_key)
             .json(&body);
-        if let Some(key) = crate::request_context::current_iam_environment_key() {
+        if let Some(key) = self.request_environment_key()? {
             outbound = outbound.header("x-testing-environment-key", key);
         }
         let response = outbound
@@ -316,7 +348,7 @@ impl IamClient {
             .client
             .get(url)
             .header(header::AUTHORIZATION, authorization);
-        if let Some(key) = crate::request_context::current_iam_environment_key() {
+        if let Some(key) = self.request_environment_key()? {
             request = request.header("x-testing-environment-key", key);
         }
         let response = request
@@ -385,7 +417,7 @@ impl IamClient {
             if let Some(cursor) = cursor.as_deref() {
                 request = request.query(&[("cursor", cursor)]);
             }
-            if let Some(key) = crate::request_context::current_iam_environment_key() {
+            if let Some(key) = self.request_environment_key()? {
                 request = request.header("x-testing-environment-key", key);
             }
             let response = request
@@ -448,7 +480,7 @@ impl IamClient {
             .client
             .get(url)
             .header(header::AUTHORIZATION, authorization);
-        if let Some(key) = crate::request_context::current_iam_environment_key() {
+        if let Some(key) = self.request_environment_key()? {
             request = request.header("x-testing-environment-key", key);
         }
         let response = request
@@ -470,7 +502,7 @@ impl IamClient {
             .client
             .get(url)
             .header(header::AUTHORIZATION, authorization);
-        if let Some(key) = crate::request_context::current_iam_environment_key() {
+        if let Some(key) = self.request_environment_key()? {
             request = request.header("x-testing-environment-key", key);
         }
         let response = request
@@ -603,12 +635,12 @@ impl IdentityProvider for IamClient {
             .post(self.obo_exchange_url.clone())
             .header(
                 header::AUTHORIZATION,
-                self.application_authorization.clone(),
+                self.request_application_authorization()?,
             )
             .header("x-org-id", org_header(&actor.org_id)?)
             .header("idempotency-key", idempotency_key)
             .json(&body);
-        if let Some(key) = crate::request_context::current_iam_environment_key() {
+        if let Some(key) = self.request_environment_key()? {
             outbound = outbound.header("x-testing-environment-key", key);
         }
         let response = outbound
@@ -1041,6 +1073,7 @@ fn valid_obo_access_proof(value: &str) -> bool {
 mod tests {
     use std::time::Duration;
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use secrecy::SecretString;
     use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
     use url::Url;
@@ -1060,6 +1093,7 @@ mod tests {
         },
         config::{AuthenticationMode, IamSettings},
         domain::{Actor, ActorId, ActorType, OrganizationId, PrincipalId, PublicOrganizationId},
+        request_context::{self, IamTestingCredentials, TestingScope},
     };
 
     use super::{
@@ -1097,6 +1131,14 @@ mod tests {
             future.await
         })
         .await
+    }
+
+    fn testing_credentials(environment_key: &str, app_secret: &str) -> IamTestingCredentials {
+        IamTestingCredentials {
+            environment_key: SecretString::from(environment_key.to_owned()),
+            app_id: "silicon-commit".to_owned(),
+            app_secret: SecretString::from(app_secret.to_owned()),
+        }
     }
 
     fn verified_bearer_actor() -> Result<VerifiedActor, Box<dyn std::error::Error>> {
@@ -1221,7 +1263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn child_exchange_sends_only_the_published_body_and_org_context()
+    async fn testing_child_exchange_sends_the_paired_iam_credentials_and_published_body()
     -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
         let expires_at =
@@ -1229,6 +1271,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/obo-access/exchanges"))
             .and(header("x-org-id", "test-org"))
+            .and(header("x-testing-environment-key", "iam-testing-root"))
+            .and(header(
+                "authorization",
+                format!("Basic {}", STANDARD.encode("silicon-commit:testing-secret")),
+            ))
             .and(body_json(serde_json::json!({
                 "subject_token": "iat_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
                 "audience": "silicon-briefcase",
@@ -1249,9 +1296,17 @@ mod tests {
         let request = ChildProofRequest::briefcase_temporary_url(Uuid::parse_str(
             "018f268d-715a-7b72-8f0f-41f16f9af553",
         )?);
-        let proof = client(&server)?
-            .exchange_child_proof(&verified_bearer_actor()?, &request)
-            .await?;
+        let iam = client(&server)?;
+        let actor = verified_bearer_actor()?;
+        let proof = request_context::scope("testing-exchange".to_owned(), async {
+            request_context::set_environment_key(Some("incoming-commit-key".to_owned()));
+            request_context::set_iam_testing_credentials(Some(testing_credentials(
+                "iam-testing-root",
+                "testing-secret",
+            )));
+            iam.exchange_child_proof(&actor, &request).await
+        })
+        .await?;
         assert_eq!(proof.app_id(), "silicon-commit");
         Ok(())
     }
@@ -1284,6 +1339,155 @@ mod tests {
             })
             .await;
         assert!(matches!(result, Err(ProviderError::Unauthenticated)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn testing_credentials_stay_paired_across_concurrent_requests_and_leave_production_intact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        for (environment_key, secret) in [
+            (Some("iam-root-a"), "testing-secret-a"),
+            (Some("iam-root-b"), "testing-secret-b"),
+            (None, "application-secret"),
+        ] {
+            let mock = Mock::given(method("POST"))
+                .and(path("/api/v1/oauth/introspect"))
+                .and(header(
+                    "authorization",
+                    format!(
+                        "Basic {}",
+                        STANDARD.encode(format!("silicon-commit:{secret}"))
+                    ),
+                ));
+            let mock = if let Some(key) = environment_key {
+                mock.and(header("x-testing-environment-key", key))
+            } else {
+                mock.and(|request: &wiremock::Request| {
+                    !request.headers.contains_key("x-testing-environment-key")
+                })
+            };
+            mock.respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "active": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        }
+        let iam = client(&server)?;
+        let request = AuthenticationRequest {
+            credential: InboundCredential::Bearer(SecretString::from("iat_testing")),
+            org_id: PublicOrganizationId::new("test-org")?,
+            action: "commit.todos.list".to_owned(),
+            resource: None,
+        };
+        let barrier = tokio::sync::Barrier::new(2);
+        let authenticate = |key: &'static str, secret: &'static str| {
+            request_context::scope(key.to_owned(), async {
+                request_context::set_environment_key(Some("incoming-commit-key".to_owned()));
+                request_context::set_iam_testing_credentials(Some(testing_credentials(
+                    key, secret,
+                )));
+                barrier.wait().await;
+                iam.authenticate(&request).await
+            })
+        };
+        let (first, second) = tokio::join!(
+            authenticate("iam-root-a", "testing-secret-a"),
+            authenticate("iam-root-b", "testing-secret-b"),
+        );
+        assert!(matches!(first, Err(ProviderError::Unauthenticated)));
+        assert!(matches!(second, Err(ProviderError::Unauthenticated)));
+        assert!(matches!(
+            iam.authenticate(&request).await,
+            Err(ProviderError::Unauthenticated)
+        ));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .is_some_and(|requests| requests.len() == 3)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn testing_requests_without_a_matching_iam_pair_fail_before_network_io()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let iam = client(&server)?;
+        let actor = verified_bearer_actor()?;
+        let child_request = ChildProofRequest::briefcase_temporary_url(Uuid::new_v4());
+        for context in ["commit-key-only", "scope-only", "wrong-app-id"] {
+            request_context::scope(context.to_owned(), async {
+                match context {
+                    "commit-key-only" => {
+                        request_context::set_environment_key(Some(
+                            "incoming-commit-key".to_owned(),
+                        ));
+                    }
+                    "scope-only" => {
+                        request_context::set_testing_scope(Some(TestingScope {
+                            id: Uuid::new_v4(),
+                            version: 1,
+                        }));
+                    }
+                    _ => {
+                        let mut credentials =
+                            testing_credentials("iam-testing-root", "testing-secret");
+                        credentials.app_id = "another-app".to_owned();
+                        request_context::set_iam_testing_credentials(Some(credentials));
+                    }
+                }
+                for credential in [
+                    actor.grant().clone(),
+                    InboundCredential::Obo {
+                        app_id: "source-app".to_owned(),
+                        proof: SecretString::from(
+                            "obo_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+                        ),
+                    },
+                ] {
+                    let result = iam
+                        .authenticate(&AuthenticationRequest {
+                            credential,
+                            org_id: actor.org_id.clone(),
+                            action: "commit.todos.list".to_owned(),
+                            resource: None,
+                        })
+                        .await;
+                    assert!(
+                        matches!(result, Err(ProviderError::Unauthenticated)),
+                        "{context}"
+                    );
+                }
+                assert!(
+                    matches!(
+                        iam.exchange_child_proof(&actor, &child_request).await,
+                        Err(ProviderError::Unauthenticated)
+                    ),
+                    "{context}"
+                );
+                request_context::set_iam_bearer_token(Some(SecretString::from("user-token")));
+                assert_eq!(
+                    iam.resolve_active_members(
+                        &actor.org_id,
+                        std::slice::from_ref(&actor.actor.id),
+                        None
+                    )
+                    .await,
+                    Err(ProviderError::Unauthenticated),
+                    "{context}",
+                );
+            })
+            .await;
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .is_some_and(|requests| requests.is_empty())
+        );
         Ok(())
     }
 
@@ -1480,7 +1684,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn obo_verification_resolves_actor_through_published_directory_contract()
+    async fn testing_obo_verification_pairs_app_credentials_and_keeps_directory_bearer_auth()
     -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
         let organization_id = "018f268d-715a-7b72-8f0f-41f16f9af560";
@@ -1493,6 +1697,11 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/obo-access/verify"))
             .and(header("x-org-id", "test-org"))
+            .and(header("x-testing-environment-key", "iam-testing-root"))
+            .and(header(
+                "authorization",
+                format!("Basic {}", STANDARD.encode("silicon-commit:testing-secret")),
+            ))
             .and(body_json(serde_json::json!({
                 "access_proof": "obo_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
                 "audience": "silicon-commit",
@@ -1580,7 +1789,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let actor = as_user(client(&server)?.authenticate(&AuthenticationRequest {
+        let iam = client(&server)?;
+        let request = AuthenticationRequest {
             credential: InboundCredential::Obo {
                 app_id: "source-app".to_owned(),
                 proof: SecretString::from("obo_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"),
@@ -1588,7 +1798,15 @@ mod tests {
             org_id: PublicOrganizationId::new("test-org")?,
             action: "commit.projects.read".to_owned(),
             resource: Some("project-one".to_owned()),
-        }))
+        };
+        let actor = as_user(async {
+            request_context::set_environment_key(Some("incoming-commit-key".to_owned()));
+            request_context::set_iam_testing_credentials(Some(testing_credentials(
+                "iam-testing-root",
+                "testing-secret",
+            )));
+            iam.authenticate(&request).await
+        })
         .await?;
         assert_eq!(
             actor.organization_id.into_uuid(),
@@ -1599,6 +1817,22 @@ mod tests {
         let Some(received) = server.received_requests().await else {
             return Err("wiremock request recording was unavailable".into());
         };
+        for request in received.iter().filter(|request| request.method == "GET") {
+            assert_eq!(
+                request
+                    .headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer user-token"),
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-testing-environment-key")
+                    .and_then(|value| value.to_str().ok()),
+                Some("iam-testing-root"),
+            );
+        }
         let directory_request = received
             .iter()
             .find(|request| request.url.path() == "/api/v1/organizations/test-org/members");
