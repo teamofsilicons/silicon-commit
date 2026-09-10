@@ -8,6 +8,7 @@ Commands:
 
 - `iam [--json]`
 - `login <slt> [--no-save]`, `login status [--json]`
+- `logout [--json]`
 - `config home LOCATION`
 - `health`, `ready`, `version`
 - `todos list [--view assigned_to_me|delegated_by_me|all] [--status STATUS] [--assigned-to ID] [--assigned-by ID] [--created-from RFC3339] [--created-to RFC3339] [--limit 1..100] [--cursor CURSOR]`; `get`, `create`, `update`, `delete`, `notes [--limit N] [--cursor CURSOR]`, `add-note`, `subscription`, and `set-subscription`.
@@ -46,6 +47,8 @@ commit --test <32-character-key> login status --json
 Command-line options and environment variables override the saved token, API URL, and organization. With an organization configured, status checks that exact organization. Otherwise it checks the session's selected active organizations; `org_id` is null when several are available. With no token, a revoked/expired token, or no active organization authorization, the CLI returns `{"authenticated":false,"actor":null,"org_id":null}`. Inspect the boolean in scripts: both authenticated and unauthenticated results exit successfully. Network, permission, and service failures exit nonzero; they are not treated as logged out. Status does not refresh or overwrite the session. Both discovery and status output JSON with or without `--json`.
 
 ## Local storage precedence
+
+`commit logout` revokes the saved refresh token (and its session family), then removes only the resolved `session.json`. It preserves credentials on failure and succeeds without a network request when no session is saved. It uses the saved API URL; an explicitly configured API must match. Access-token and organization overrides do not change which saved session is revoked. For a testing session, pass the same `--test` key or `COMMIT_TEST_KEY` used at login; the existing session format does not save this selector. Logout does not run the automatic update check.
 
 1. The location saved by `commit config home LOCATION`, if configured.
 2. `SILICON_HOME`, when present in the process environment.
