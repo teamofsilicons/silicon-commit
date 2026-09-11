@@ -306,3 +306,143 @@ async fn discovery_and_status_are_clean_json_and_use_current_credentials() {
     assert_eq!(status["actor"]["type"], "silicon");
     assert!(!status.to_string().contains("oat_current"));
 }
+
+#[test]
+fn todo_help_explains_assignment_without_exposing_environment_credentials() {
+    let home = Home::new();
+    for args in [vec!["--help"], vec!["todos", "create", "--help"]] {
+        let output = home
+            .command()
+            .env("COMMIT_ACCESS_TOKEN", "oat_private_help_token")
+            .env("COMMIT_TEST_KEY", "abcdefghijklmnopqrstuvwxyz123456")
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(!help.contains("oat_private_help_token"));
+        assert!(!help.contains("abcdefghijklmnopqrstuvwxyz123456"));
+        if args.len() > 1 {
+            assert!(help.contains("assigned_to"));
+            assert!(help.contains("assistant:example-org"));
+            assert!(help.contains("alex"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_todo_assignments_explain_the_fix_without_sending_a_request() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    for (payload, expected) in [
+        (
+            json!({"title":"Eat","assignee_id":"head-of-sales:final-test"}),
+            "use assigned_to",
+        ),
+        (
+            json!({"title":"Eat","assignee":{"id":"head-of-sales:final-test","type":"silicon"}}),
+            "use assigned_to",
+        ),
+        (
+            json!({"title":"Eat","assigned_to":"saket","assignee_id":"saket"}),
+            "use assigned_to",
+        ),
+        (
+            json!({"title":"Eat"}),
+            "assigned_to is required and must be a string",
+        ),
+        (
+            json!({"title":"Eat","assigned_to":{"id":"saket"}}),
+            "assigned_to is required and must be a string",
+        ),
+        (
+            json!({"assigned_to":"saket"}),
+            "title is required and must be a string",
+        ),
+        (json!([]), "requires a JSON object"),
+    ] {
+        // Exercise both inline JSON and @FILE, the two supported input paths.
+        let file = home.0.join("todo.json");
+        fs::write(&file, payload.to_string()).unwrap();
+        for data in [payload.to_string(), format!("@{}", file.display())] {
+            let output = home
+                .command()
+                .args([
+                    "--api-url",
+                    &server.uri(),
+                    "todos",
+                    "create",
+                    "--data",
+                    &data,
+                ])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn todo_creation_preserves_payload_and_server_validation_correlation() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    for (actor, status) in [("saket", 201), ("head-of-sales:final-test", 422)] {
+        let payload = json!({"title":"Eat","assigned_to":actor,
+            "description":null,"status":"yet_to_do","attachments":[]});
+        let mut response = ResponseTemplate::new(status);
+        if status == 201 {
+            response = response.set_body_json(json!({"id":"created-todo","assigned_to":actor}));
+        } else {
+            response = response
+                .insert_header("x-request-id", "todo-validation-request")
+                .set_body_json(
+                    json!({"error":{"code":"validation_failed","details":"private-body-value"}}),
+                );
+        }
+        Mock::given(method("POST"))
+            .and(path("/api/v1/todos"))
+            .and(body_json(&payload))
+            .and(header("authorization", "Bearer oat_test"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let output = home
+            .command()
+            .args([
+                "--api-url",
+                &server.uri(),
+                "--token",
+                "oat_test",
+                "--org-id",
+                "final-test",
+                "todos",
+                "create",
+                "--data",
+                &payload.to_string(),
+            ])
+            .output()
+            .unwrap();
+        if status == 201 {
+            assert_eq!(json_output(output)["id"], "created-todo");
+        } else {
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let error = String::from_utf8(output.stderr).unwrap();
+            for part in [
+                "422",
+                "validation_failed",
+                "todo-validation-request",
+                "commit todos create --help",
+            ] {
+                assert!(error.contains(part), "{error}");
+            }
+            assert!(!error.contains("private-body-value"));
+            assert!(!error.contains("oat_test"));
+        }
+    }
+}
