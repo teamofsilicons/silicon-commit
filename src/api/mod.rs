@@ -45,10 +45,13 @@ use crate::{
 };
 
 pub mod auth;
+mod contracts;
+mod email;
 pub mod extract;
 pub mod notifications;
 pub mod projects;
 pub mod sessions;
+mod telemetry;
 pub mod test_environments;
 pub mod todos;
 mod webhooks;
@@ -61,6 +64,7 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) pool: PgPool,
+    contract_store: bool,
     pub(crate) identity: Arc<dyn IdentityProvider>,
     pub(crate) todos: Arc<TodoService>,
     pub(crate) projects: Arc<ProjectService>,
@@ -89,6 +93,7 @@ impl AppState {
     ) -> Self {
         Self {
             pool,
+            contract_store: false,
             identity,
             todos,
             projects,
@@ -169,6 +174,7 @@ impl AppState {
                 integrations.request_timeout,
             )?));
         }
+        state.contract_store = true;
         state.webhook_verifier = webhooks::verifier(&integrations.iam)?.map(Arc::new);
         Ok(state)
     }
@@ -180,7 +186,7 @@ impl AppState {
         resource: Option<String>,
     ) -> Result<VerifiedActor, AppError> {
         let request = auth::request(headers, self.authentication_mode, action, resource)?;
-        test_environments::resolve_context(&self.pool, headers).await?;
+        test_environments::resolve_context(self, headers).await?;
         let actor = self
             .identity
             .authenticate(&request)
@@ -249,7 +255,14 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 /// HTTP header value.
 pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiBuildError> {
     let api = Router::new()
+        .route("/contracts", get(contracts::describe))
+        .route("/email-settings", get(email::get).put(email::put))
+        .route("/reports", post(email::report))
         .route("/version", get(version))
+        .route(
+            "/testing-context",
+            get(test_environments::discovery::selected),
+        )
         .route("/iam", get(sessions::iam))
         .route("/auth/status", get(sessions::status))
         .route("/auth/login", post(sessions::login))
@@ -319,8 +332,17 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             get(projects::list_tasks).post(projects::create_task),
         )
         .route(
+            "/projects/{project_id}/tasks/{task_id}/claim",
+            post(projects::claim_task),
+        )
+        .route("/projects/{project_id}/versions", get(projects::versions))
+        .route(
+            "/projects/{project_id}/versions/{version}",
+            get(projects::version),
+        )
+        .route(
             "/projects/{project_id}/tasks/{task_id}",
-            patch(projects::update_task),
+            patch(projects::update_task).delete(projects::delete_task),
         )
         .route(
             "/projects/{project_id}/blockers",
@@ -333,7 +355,15 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .route(
             "/projects/{project_id}/completion",
             post(projects::complete),
-        );
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            contracts::negotiate,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            telemetry::capture,
+        ));
 
     let sensitive_headers = [
         header::AUTHORIZATION,
@@ -344,6 +374,7 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         HeaderName::from_static("x-test-principal-id"),
         HeaderName::from_static("x-test-actor-id"),
         HeaderName::from_static("x-testing-environment-key"),
+        HeaderName::from_static("x-testing-app-secret"),
         HeaderName::from_static("x-silicon-iam-signature"),
     ];
     let concurrency = Arc::new(Semaphore::new(settings.concurrency_limit));

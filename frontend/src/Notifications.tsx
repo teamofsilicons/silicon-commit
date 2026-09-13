@@ -22,6 +22,27 @@ export function Notifications() {
           </p>
         </div>
       </div>
+      <section class="panel narrow">
+        <h2>Telemetry</h2>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={localStorage.getItem("commit.telemetry") !== "off"}
+            onChange={(e) =>
+              localStorage.setItem(
+                "commit.telemetry",
+                e.currentTarget.checked ? "on" : "off",
+              )
+            }
+          />{" "}
+          Share diagnostic request events with Commit’s Space Station table
+        </label>
+        <p class="muted">
+          Events include operation, timing and outcome. Tokens, content and
+          email addresses are excluded. Test events stay in their sandbox.
+        </p>
+      </section>
+      <EmailSettings />
       <Show
         when={session().actor?.type === "silicon"}
         fallback={
@@ -229,6 +250,94 @@ export function SubscriptionPanel(p: { todoId: string }) {
               Subscription saved
             </p>
           </Show>
+        </form>
+      </Load>
+    </section>
+  );
+}
+
+function EmailSettings() {
+  const [data, { refetch }] = createResource(context, () =>
+    api<any>("/email-settings"),
+  );
+  const [prefs, setPrefs] = createSignal<any>({
+    email: "",
+    enabled: true,
+    project_completed: true,
+    project_updates: false,
+    task_completed: false,
+    task_assigned: false,
+  });
+  const a = useAction();
+  createEffect(() => {
+    if (data()) setPrefs(data());
+  });
+  return (
+    <section class="panel narrow">
+      <h2>Organization email</h2>
+      <p class="muted">
+        Choose the email you use for this organization. Commit never falls back
+        to your personal Carbon email.
+      </p>
+      <Load resource={data} retry={refetch}>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void a.run(async () => {
+              const {
+                email,
+                enabled,
+                project_completed,
+                project_updates,
+                task_completed,
+                task_assigned,
+              } = prefs();
+              await api("/email-settings", {
+                method: "PUT",
+                body: {
+                  email,
+                  enabled,
+                  project_completed,
+                  project_updates,
+                  task_completed,
+                  task_assigned,
+                },
+              });
+              await refetch();
+            });
+          }}
+        >
+          <Field label="Organization email">
+            <input
+              type="email"
+              value={prefs().email}
+              onInput={(e) =>
+                setPrefs({ ...prefs(), email: e.currentTarget.value })
+              }
+            />
+          </Field>
+          {(
+            [
+              ["enabled", "Enable email"],
+              ["project_completed", "Project completed"],
+              ["project_updates", "Project updates"],
+              ["task_completed", "Task completed"],
+              ["task_assigned", "New assignment"],
+            ] as const
+          ).map(([key, label]) => (
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={prefs()[key]}
+                onChange={(e) =>
+                  setPrefs({ ...prefs(), [key]: e.currentTarget.checked })
+                }
+              />
+              {label}
+            </label>
+          ))}
+          <ErrorBox error={a.error()} />
+          <Submit busy={a.busy()} label="Save email preferences" />
         </form>
       </Load>
     </section>

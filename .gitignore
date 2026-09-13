@@ -7,3 +7,9 @@
 .DS_Store
 *.log
 .vercel/
+
+.work/
+docs-site/node_modules/
+docs-site/dist/
+
+__pycache__/

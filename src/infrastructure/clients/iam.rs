@@ -116,10 +116,24 @@ impl IamClient {
         )
     }
 
-    fn request_environment_key(&self) -> Result<Option<String>, ProviderError> {
-        Ok(self
-            .request_credentials()?
-            .map(|credentials| credentials.environment_key.expose_secret().to_owned()))
+    fn apply_testing(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        let Some(credentials) = self.request_credentials()? else {
+            return Ok(request);
+        };
+        if credentials.environment_key.expose_secret().is_empty() {
+            Ok(request.header(
+                "x-testing-application",
+                self.request_application_authorization()?,
+            ))
+        } else {
+            Ok(request.header(
+                "x-testing-environment-key",
+                credentials.environment_key.expose_secret(),
+            ))
+        }
     }
 
     async fn authenticate_bearer(
@@ -140,9 +154,7 @@ impl IamClient {
             )
             .header("x-org-id", org_header(&request.org_id)?)
             .form(&[("token", token.expose_secret())]);
-        if let Some(key) = self.request_environment_key()? {
-            outbound = outbound.header("x-testing-environment-key", key);
-        }
+        outbound = self.apply_testing(outbound)?;
         let response = outbound
             .send()
             .await
@@ -170,6 +182,18 @@ impl IamClient {
         }
 
         if let Some(snapshot) = introspection.authorization {
+            let credentials = request_context::current_iam_testing_credentials();
+            if credentials.is_none() && snapshot.testing_environment_id.is_some() {
+                return Err(ProviderError::Unauthenticated);
+            }
+            if credentials
+                .as_ref()
+                .is_some_and(|c| c.environment_key.expose_secret().is_empty())
+                && snapshot.testing_environment_id != request_context::testing_scope().map(|s| s.id)
+            {
+                return Err(ProviderError::Unauthenticated);
+            }
+
             if snapshot.principal_id != principal_id
                 || snapshot.membership_id != membership_id
                 || snapshot.org_id != org_id
@@ -193,6 +217,14 @@ impl IamClient {
                 // OAuth scopes describe IAM disclosure, not Commit management grants.
                 CapabilitySet::default(),
                 request.credential.clone(),
+            )
+            .with_tags(
+                snapshot
+                    .tags
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(|tag| [tag.name, tag.id.to_string()])
+                    .collect(),
             ));
         }
 
@@ -233,9 +265,7 @@ impl IamClient {
             .header("x-org-id", org_header(&request.org_id)?)
             .header("idempotency-key", idempotency_key)
             .json(&body);
-        if let Some(key) = self.request_environment_key()? {
-            outbound = outbound.header("x-testing-environment-key", key);
-        }
+        outbound = self.apply_testing(outbound)?;
         let response = outbound
             .send()
             .await
@@ -348,9 +378,7 @@ impl IamClient {
             .client
             .get(url)
             .header(header::AUTHORIZATION, authorization);
-        if let Some(key) = self.request_environment_key()? {
-            request = request.header("x-testing-environment-key", key);
-        }
+        request = self.apply_testing(request)?;
         let response = request
             .send()
             .await
@@ -417,9 +445,7 @@ impl IamClient {
             if let Some(cursor) = cursor.as_deref() {
                 request = request.query(&[("cursor", cursor)]);
             }
-            if let Some(key) = self.request_environment_key()? {
-                request = request.header("x-testing-environment-key", key);
-            }
+            request = self.apply_testing(request)?;
             let response = request
                 .send()
                 .await
@@ -480,9 +506,7 @@ impl IamClient {
             .client
             .get(url)
             .header(header::AUTHORIZATION, authorization);
-        if let Some(key) = self.request_environment_key()? {
-            request = request.header("x-testing-environment-key", key);
-        }
+        request = self.apply_testing(request)?;
         let response = request
             .send()
             .await
@@ -502,9 +526,7 @@ impl IamClient {
             .client
             .get(url)
             .header(header::AUTHORIZATION, authorization);
-        if let Some(key) = self.request_environment_key()? {
-            request = request.header("x-testing-environment-key", key);
-        }
+        request = self.apply_testing(request)?;
         let response = request
             .send()
             .await
@@ -640,9 +662,7 @@ impl IdentityProvider for IamClient {
             .header("x-org-id", org_header(&actor.org_id)?)
             .header("idempotency-key", idempotency_key)
             .json(&body);
-        if let Some(key) = self.request_environment_key()? {
-            outbound = outbound.header("x-testing-environment-key", key);
-        }
+        outbound = self.apply_testing(outbound)?;
         let response = outbound
             .send()
             .await
@@ -784,6 +804,10 @@ struct AuthorizationSnapshot {
     org_id: String,
     audience: String,
     org_role: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<silicon_iam_client::models::AuthorizationTag>>,
+    #[serde(default)]
+    testing_environment_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]

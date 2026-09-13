@@ -325,3 +325,85 @@ mod tests {
         ));
     }
 }
+
+/// Atomically claim an unassigned task.
+pub(crate) async fn claim_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    StrictPath(path): StrictPath<TaskPath>,
+    Idempotency(key): Idempotency,
+) -> Result<Response, AppError> {
+    let locator = parse_locator(&path.project_id)?;
+    let actor = state
+        .authenticate(
+            &headers,
+            "commit.project_tasks.claim",
+            Some(format!("{}/tasks/{}", path.project_id, path.task_id)),
+        )
+        .await?;
+    let result = state
+        .projects
+        .claim_task(&actor, &locator, path.task_id, key, &required_request_id()?)
+        .await?;
+    mutation_response(&state, result, None)
+}
+/// Remove a task subtree and its linked todos.
+pub(crate) async fn delete_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    StrictPath(path): StrictPath<TaskPath>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let locator = parse_locator(&path.project_id)?;
+    let actor = state
+        .authenticate(
+            &headers,
+            "commit.project_tasks.delete",
+            Some(format!("{}/tasks/{}", path.project_id, path.task_id)),
+        )
+        .await?;
+    state
+        .projects
+        .delete_task(&actor, &locator, path.task_id, &required_request_id()?)
+        .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct VersionsQuery {
+    before: Option<i64>,
+    #[serde(default)]
+    limit: crate::domain::PageLimit,
+}
+/// List retained revision metadata.
+pub(crate) async fn versions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    StrictPath(raw): StrictPath<String>,
+    StrictQuery(query): StrictQuery<VersionsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let locator = parse_locator(&raw)?;
+    let actor = state
+        .authenticate(&headers, action::PROJECTS_READ, Some(raw))
+        .await?;
+    state
+        .projects
+        .versions(&actor, &locator, query.before, query.limit.get())
+        .await
+        .map(Json)
+}
+/// Read a retained snapshot using current project access.
+pub(crate) async fn version(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    StrictPath((raw, version)): StrictPath<(String, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let locator = parse_locator(&raw)?;
+    let actor = state
+        .authenticate(&headers, action::PROJECTS_READ, Some(raw))
+        .await?;
+    state
+        .projects
+        .version(&actor, &locator, version)
+        .await
+        .map(Json)
+}

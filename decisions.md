@@ -955,3 +955,13 @@ used for the organization, membership, and membership-authorization reads
 needed by that request. The token is held only in task-local memory and is
 never persisted or logged. Requests without a user bearer cannot perform
 these directory reads.
+
+## 2026-09-13 — collaborative projects and application sandboxes
+
+Public projects permit organization members to collaborate. Private projects require the creator, explicit typed participant IDs, or live IAM tag names/IDs; owners have no implicit override. Assigning private work explicitly invites the recipient. Project snapshots retain the last 1000 versions, and current permissions also gate history, linked todos and retries.
+
+IAM 1.8 testing application secrets select a sandbox without root-key pairing. Existing legacy sandbox controls remain compatible and labeled separately. New sandboxes use regular capacity rules, ordinary identity permissions, live lifecycle checks and simulated external delivery.
+
+Organization notification email is explicitly configured per identity and organization rather than falling back to personal Carbon contact data. Postmark sends completion and opt-in events; reports queue to the requested maintainers.
+
+Contract 1 remains additive for 0.1 consumers. Deprecated contracts retire only after seven idle production days; active versions never retire automatically. Space Station telemetry uses tos.committelemetry with deployment and per-client opt-out; sandbox diagnostics are local and isolated.

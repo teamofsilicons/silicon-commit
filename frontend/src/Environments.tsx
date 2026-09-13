@@ -1,3 +1,4 @@
+import { TestingLogin } from "./Testing";
 import { For, Show, createResource, createSignal } from "solid-js";
 import { api, environment, navigate, setEnvironment } from "./api";
 import type { Environment } from "./types";
@@ -71,10 +72,11 @@ export function Environments() {
           New environment
         </button>
       </div>
+      <TestingLogin />
       <div class="callout">
-        <strong>Room to test.</strong> Each environment allows 100 todos and 10
-        projects. After 15 days without activity it is retired; deleted
-        environments can be restored for 30 days.
+        <strong>Legacy manual environments.</strong> These older environments
+        allow 100 todos and 10 projects. After 15 days without activity it is
+        retired; deleted environments can be restored for 30 days.
       </div>
       <ErrorBox error={a.error()} />
       <Load resource={data} retry={refetch}>

@@ -144,3 +144,47 @@ async fn login_status_distinguishes_rejected_credentials_from_service_failures()
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn collaborative_consumer_negotiates_and_preserves_secret_selection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = MockServer::start().await;
+    let secret = format!("ask_{}", "a".repeat(43));
+    Mock::given(method("POST"))
+        .and(path("/api/v1/projects/project/tasks/task/claim"))
+        .and(header("x-commit-supported-versions", "1"))
+        .and(header("x-testing-environment-key", secret.as_str()))
+        .and(header("x-commit-telemetry", "off"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-commit-api-version", "1")
+                .set_body_json(
+                    json!({"todo_id":"linked","assigned_to":{"type":"carbon","id":"alice"}}),
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let c = Client::new(&server.uri())?
+        .with_test_app_secret(secret)?
+        .with_telemetry(false);
+    assert_eq!(
+        c.claim_project_task("project", "task").await?["todo_id"],
+        "linked"
+    );
+    server.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-commit-api-version", "2")
+                .set_body_json(json!({})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        c.get_project("project").await,
+        Err(Error::Invalid(_))
+    ));
+    Ok(())
+}

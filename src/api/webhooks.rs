@@ -71,7 +71,9 @@ pub(crate) async fn receive(
         .get("version")
         .and_then(serde_json::Value::as_i64)
         .ok_or(AppError::BadGateway)?;
-    let payload = serde_json::to_value(event).map_err(|error| AppError::Internal(error.into()))?;
+    let mut payload =
+        serde_json::to_value(event).map_err(|error| AppError::Internal(error.into()))?;
+    redact_secrets(&mut payload);
     let hash = hex::encode(Sha256::digest(&body));
     let mut tx = state
         .pool
@@ -108,4 +110,31 @@ pub(crate) async fn receive(
 
 fn digest(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
+}
+
+fn redact_secrets(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                let key = key.to_ascii_lowercase();
+                if key.contains("secret")
+                    || key.contains("token")
+                    || matches!(
+                        key.as_str(),
+                        "testing_key" | "root_key" | "password" | "authorization"
+                    )
+                {
+                    *value = serde_json::Value::String("[redacted]".into());
+                } else {
+                    redact_secrets(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_secrets(value);
+            }
+        }
+        _ => {}
+    }
 }

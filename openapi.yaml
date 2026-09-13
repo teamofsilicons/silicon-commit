@@ -1,34 +1,34 @@
 openapi: 3.1.0
 info:
   title: Silicon Commit API
-  version: 0.1.0
-  description: Authenticated, organization-visible work management and Silicon-owned delegated-todo notifications for Carbon and Silicon todos and Silicon-managed projects.
+  version: 0.2.0
+  description: Organization-scoped collaborative work for Carbons and Silicons. Contract 1 supports negotiation, private projects, retained history, isolated IAM sandboxes, email and optional telemetry.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
 servers:
-  - url: https://commit.teamofsilicons.com/api/v1
+- url: https://commit.teamofsilicons.com/api/v1
 security:
-  - bearerAuth: []
-  - oboAccess: []
-    oboAppId: []
+- bearerAuth: []
+- oboAccess: []
+  oboAppId: []
 tags:
-  - name: Operations
-    description: Public build metadata for deployment verification.
-  - name: Notifications
-    description: Silicon-owned webhook destination and delegated-todo subscriptions.
-  - name: Todos
-    description: Personal and delegated organization-visible work.
-  - name: Projects
-    description: Silicon-managed project metadata and lifecycle.
-  - name: Project Diary
-    description: Optimistically concurrent project Markdown.
-  - name: Project Work
-    description: Project tasks, blockers, updates, and completion.
-  - name: Attachments
-    description: Provider-neutral attachment URL references stored on todos.
-  - name: Testing Environments
-    description: Organization-owned isolated Commit environments linked to IAM testing environments.
+- name: Operations
+  description: Public build metadata for deployment verification.
+- name: Notifications
+  description: Silicon-owned webhook destination and delegated-todo subscriptions.
+- name: Todos
+  description: Personal and delegated organization-visible work.
+- name: Projects
+  description: Carbon and Silicon collaborative projects with current private-access enforcement.
+- name: Project Diary
+  description: Optimistically concurrent project Markdown.
+- name: Project Work
+  description: Project tasks, blockers, updates, and completion.
+- name: Attachments
+  description: Provider-neutral attachment URL references stored on todos.
+- name: Testing Environments
+  description: Organization-owned isolated Commit environments linked to IAM testing environments.
 paths:
   /version:
     get:
@@ -37,18 +37,22 @@ paths:
       operationId: getVersion
       security: []
       parameters:
-        - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Service build metadata.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Version' }
-        '400': { $ref: '#/components/responses/Error' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Version'}
+        '400': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
   /iam:
     get:
       tags: [Operations]
@@ -64,28 +68,38 @@ paths:
                 type: object
                 required: [app_id, iam_url]
                 properties:
-                  app_id: { type: string }
-                  iam_url: { type: string, format: uri }
-        '400': { $ref: '#/components/responses/Error' }
-        '503': { $ref: '#/components/responses/Error' }
-        default: { $ref: '#/components/responses/Error' }
+                  app_id: {type: string}
+                  iam_url: {type: string, format: uri}
+        '400': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /auth/status:
     get:
       tags: [Operations]
       summary: Verify the current Carbon or Silicon login
-      description: Checks live IAM authorization. With X-Org-ID, verifies that organization; otherwise checks all selected active organizations. No active organization grant returns 401. Test requests use the linked IAM environment. Tokens and internal principal IDs are never returned.
+      description: Checks live IAM authorization. With X-Org-ID, verifies that organization; otherwise checks all selected active organizations. No active organization grant returns 401. Test requests use the linked IAM
+        environment. Tokens and internal principal IDs are never returned.
       operationId: getLoginStatus
       security:
-        - bearerAuth: []
+      - bearerAuth: []
       parameters:
-        - name: X-Org-ID
-          in: header
-          required: false
-          schema: { $ref: '#/components/schemas/OrganizationId' }
-        - name: X-Testing-Environment-Key
-          in: header
-          required: false
-          schema: { type: string, pattern: '^[A-Za-z0-9]{32}$' }
+      - name: X-Org-ID
+        in: header
+        required: false
+        schema: {$ref: '#/components/schemas/OrganizationId'}
+      - name: X-Testing-Environment-Key
+        in: header
+        required: false
+        schema: {type: string, pattern: '^[A-Za-z0-9]{32}$'}
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Verified public identity and active organization context.
@@ -95,20 +109,20 @@ paths:
                 type: object
                 required: [authenticated, app_id, actor, org_id, organizations]
                 properties:
-                  authenticated: { type: boolean, const: true }
-                  app_id: { type: string }
+                  authenticated: {type: boolean, const: true}
+                  app_id: {type: string}
                   actor:
                     type: object
                     required: [type, id]
                     properties:
-                      type: { type: string, enum: [carbon, silicon] }
-                      id: { type: string }
-                  org_id: { type: [string, 'null'] }
+                      type: {type: string, enum: [carbon, silicon]}
+                      id: {type: string}
+                  org_id: {type: [string, 'null']}
                   organizations:
                     type: array
-                    items: { $ref: '#/components/schemas/OrganizationId' }
-        '401': { $ref: '#/components/responses/Error' }
-        default: { $ref: '#/components/responses/Error' }
+                    items: {$ref: '#/components/schemas/OrganizationId'}
+        '401': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
   /auth/organizations:
     get:
       tags: [Operations]
@@ -116,7 +130,7 @@ paths:
       description: Returns only selected active organizations from live IAM authorization snapshots. No X-Org-ID is required or used. Organization consent is collected exclusively by IAM.
       operationId: listSessionOrganizations
       security:
-        - bearerAuth: []
+      - bearerAuth: []
       responses:
         '200':
           description: Selected active organization handles; empty when none remain available.
@@ -124,9 +138,14 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: '#/components/schemas/OrganizationId' }
-        '401': { $ref: '#/components/responses/Error' }
-        default: { $ref: '#/components/responses/Error' }
+                items: {$ref: '#/components/schemas/OrganizationId'}
+        '401': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /auth/login:
     post:
       tags: [Operations]
@@ -141,10 +160,15 @@ paths:
               type: object
               required: [slt]
               additionalProperties: false
-              properties: { slt: { type: string, minLength: 1 } }
+              properties: {slt: {type: string, minLength: 1}}
       responses:
-        '200': { description: Session tokens and verified actor context., content: { application/json: { schema: { type: object } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Session tokens and verified actor context., content: {application/json: {schema: {type: object}}}}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /auth/refresh:
     post:
       tags: [Operations]
@@ -159,10 +183,15 @@ paths:
               type: object
               required: [refresh_token]
               additionalProperties: false
-              properties: { refresh_token: { type: string, minLength: 1 } }
+              properties: {refresh_token: {type: string, minLength: 1}}
       responses:
-        '200': { description: Rotated session tokens., content: { application/json: { schema: { type: object } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Rotated session tokens., content: {application/json: {schema: {type: object}}}}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /auth/logout:
     post:
       tags: [Operations]
@@ -177,10 +206,15 @@ paths:
               type: object
               required: [token]
               additionalProperties: false
-              properties: { token: { type: string, minLength: 1 } }
+              properties: {token: {type: string, minLength: 1}}
       responses:
-        '204': { description: Session family revoked. }
-        default: { $ref: '#/components/responses/Error' }
+        '204': {description: Session family revoked.}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /webhook/:
     post:
       tags: [Operations]
@@ -189,24 +223,29 @@ paths:
       security: []
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object } } }
+        content: {application/json: {schema: {type: object}}}
       responses:
-        '204': { description: Event accepted or already durably recorded. }
-        default: { $ref: '#/components/responses/Error' }
+        '204': {description: Event accepted or already durably recorded.}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /test-environments:
     get:
       tags: [Testing Environments]
       summary: List organization testing environments
       operationId: listTestEnvironments
-      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      parameters: [$ref: '#/components/parameters/OrgId', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       responses:
-        '200': { description: Environment metadata., content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/TestEnvironment' } } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Environment metadata., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/TestEnvironment'}}}}}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Testing Environments]
       summary: Create an isolated testing environment
       operationId: createTestEnvironment
-      parameters: [{ $ref: '#/components/parameters/OrgId' }]
+      parameters: [$ref: '#/components/parameters/OrgId', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       requestBody:
         required: true
         content:
@@ -216,23 +255,29 @@ paths:
               required: [name, iam_test_key, iam_app_id, iam_app_secret]
               additionalProperties: false
               properties:
-                name: { type: string, minLength: 1, maxLength: 200 }
-                description: { type: [string, 'null'], maxLength: 20000 }
-                iam_test_key: { type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$', writeOnly: true }
-                iam_app_id: { type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment. }
-                iam_app_secret: { type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret. }
+                name: {type: string, minLength: 1, maxLength: 200}
+                description: {type: [string, 'null'], maxLength: 20000}
+                iam_test_key: {type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$', writeOnly: true}
+                iam_app_id: {type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment.}
+                iam_app_secret: {type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret.}
       responses:
-        '200': { description: Created environment and one-time key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Created environment and one-time key., content: {application/json: {schema: {$ref: '#/components/schemas/CreatedTestEnvironment'}}}}
+        default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}/iam-credentials:
     put:
       tags: [Testing Environments]
       summary: Pair or rotate the imported IAM testing application credential
       operationId: pairTestEnvironmentIamCredentials
-      description: Requires production organization owner authority or the explicit commit.test_environments.manage capability. Testing-environment credentials cannot authorize this operation. The IAM root key is retained; the supplied canonical application ID and secret are verified against that IAM testing environment before encrypted storage. No user token is issued, and the environment version advances to reject subsequent writes from an earlier resolved test scope. Existing unpaired environments reject test requests with testing_environment_iam_credentials_required until paired.
+      description: Requires production organization owner authority or the explicit commit.test_environments.manage capability. Testing-environment credentials cannot authorize this operation. The IAM root key is
+        retained; the supplied canonical application ID and secret are verified against that IAM testing environment before encrypted storage. No user token is issued, and the environment version advances to reject
+        subsequent writes from an earlier resolved test scope. Existing unpaired environments reject test requests with testing_environment_iam_credentials_required until paired.
       parameters:
-        - { $ref: '#/components/parameters/OrgId' }
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {$ref: '#/components/parameters/OrgId'}
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       requestBody:
         required: true
         content:
@@ -242,60 +287,68 @@ paths:
               required: [iam_app_id, iam_app_secret]
               additionalProperties: false
               properties:
-                iam_app_id: { type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment. }
-                iam_app_secret: { type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret. }
+                iam_app_id: {type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment.}
+                iam_app_secret: {type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret.}
       responses:
-        '200': { description: Updated environment metadata without credentials., content: { application/json: { schema: { $ref: '#/components/schemas/TestEnvironment' } } } }
-        '403': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Updated environment metadata without credentials., content: {application/json: {schema: {$ref: '#/components/schemas/TestEnvironment'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}/key:
     get:
       tags: [Testing Environments]
       summary: Retrieve the current environment key
       operationId: getTestEnvironmentKey
       parameters:
-        - { $ref: '#/components/parameters/OrgId' }
-        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      - {$ref: '#/components/parameters/OrgId'}
+      - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
-        '200': { description: Current key., content: { application/json: { schema: { type: object, required: [environment_id, key], properties: { environment_id: { type: string, format: uuid }, key: { type: string, pattern: '^[A-Za-z0-9]{32}$' } } } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Current key., content: {application/json: {schema: {type: object, required: [environment_id, key], properties: {environment_id: {type: string, format: uuid}, key: {type: string, pattern: '^[A-Za-z0-9]{32}$'}}}}}}
+        default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}/rotate:
     post:
       tags: [Testing Environments]
       summary: Rotate an environment key
       operationId: rotateTestEnvironment
-      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters: [$ref: '#/components/parameters/OrgId', {name: id, in: path, required: true, schema: {type: string, format: uuid}}, $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions',
+        $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       responses:
-        '200': { description: Environment with new key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Environment with new key., content: {application/json: {schema: {$ref: '#/components/schemas/CreatedTestEnvironment'}}}}
+        default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}/restore:
     post:
       tags: [Testing Environments]
       summary: Restore a deleted environment during its recovery window
       operationId: restoreTestEnvironment
-      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters: [$ref: '#/components/parameters/OrgId', {name: id, in: path, required: true, schema: {type: string, format: uuid}}, $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions',
+        $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       responses:
-        '200': { description: Restored environment with new key., content: { application/json: { schema: { $ref: '#/components/schemas/CreatedTestEnvironment' } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Restored environment with new key., content: {application/json: {schema: {$ref: '#/components/schemas/CreatedTestEnvironment'}}}}
+        default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}/clean:
     post:
       tags: [Testing Environments]
       summary: Remove all isolated data while retaining the environment
       operationId: cleanTestEnvironment
-      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters: [$ref: '#/components/parameters/OrgId', {name: id, in: path, required: true, schema: {type: string, format: uuid}}, $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions',
+        $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       responses:
-        '200': { description: Cleaned environment metadata., content: { application/json: { schema: { $ref: '#/components/schemas/TestEnvironment' } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Cleaned environment metadata., content: {application/json: {schema: {$ref: '#/components/schemas/TestEnvironment'}}}}
+        default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}:
     delete:
       tags: [Testing Environments]
       summary: Soft-delete an environment for 30-day recovery
       operationId: deleteTestEnvironment
-      parameters: [{ $ref: '#/components/parameters/OrgId' }, { name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      parameters: [$ref: '#/components/parameters/OrgId', {name: id, in: path, required: true, schema: {type: string, format: uuid}}, $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions',
+        $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       responses:
-        '200': { description: Deleted environment metadata., content: { application/json: { schema: { $ref: '#/components/schemas/TestEnvironment' } } } }
-        default: { $ref: '#/components/responses/Error' }
+        '200': {description: Deleted environment metadata., content: {application/json: {schema: {$ref: '#/components/schemas/TestEnvironment'}}}}
+        default: {$ref: '#/components/responses/Error'}
   /notification-settings:
     get:
       tags: [Notifications]
@@ -303,106 +356,128 @@ paths:
       operationId: getNotificationSettings
       description: Returns virtual version zero when the authenticated Silicon has never persisted settings. Carbons are forbidden.
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Complete optional webhook destination and list-wide subscription.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            ETag: { $ref: '#/components/headers/NotificationETag' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/NotificationSettings' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/NotificationSettings'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     put:
       tags: [Notifications]
       summary: Replace the authenticated Silicon's notification settings
       operationId: replaceNotificationSettings
       description: Complete optimistic-concurrency replacement. Both nullable properties must be sent explicitly.
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/NotificationIfMatch'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/NotificationIfMatch'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/NotificationSettingsUpdate' }
+            schema: {$ref: '#/components/schemas/NotificationSettingsUpdate'}
       responses:
         '200':
           description: Current settings after replacement or an exact stale retry.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            ETag: { $ref: '#/components/headers/NotificationETag' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/NotificationSettings' }
-        '409': { $ref: '#/components/responses/Error' }
-        '428': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/NotificationSettings'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /todos:
     get:
       tags: [Todos]
       summary: List todos
       operationId: listTodos
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - { name: view, in: query, schema: { type: string, enum: [assigned_to_me, delegated_by_me, all], default: assigned_to_me } }
-        - { name: status, in: query, schema: { $ref: '#/components/schemas/TodoStatus' } }
-        - { name: assigned_to, in: query, schema: { $ref: '#/components/schemas/ActorId' } }
-        - { name: assigned_by, in: query, schema: { $ref: '#/components/schemas/ActorId' } }
-        - { name: created_from, in: query, schema: { type: string, format: date-time } }
-        - { name: created_to, in: query, schema: { type: string, format: date-time } }
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - {name: view, in: query, schema: {type: string, enum: [assigned_to_me, delegated_by_me, all], default: assigned_to_me}}
+      - {name: status, in: query, schema: {$ref: '#/components/schemas/TodoStatus'}}
+      - {name: assigned_to, in: query, schema: {$ref: '#/components/schemas/ActorId'}}
+      - {name: assigned_by, in: query, schema: {$ref: '#/components/schemas/ActorId'}}
+      - {name: created_from, in: query, schema: {type: string, format: date-time}}
+      - {name: created_to, in: query, schema: {type: string, format: date-time}}
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - name: project_id
+        in: query
+        schema:
+          type: string
+          format: uuid
+        description: Filter by related project; private access remains enforced.
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Filtered todos.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TodoPage' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/TodoPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Todos]
       summary: Create a todo
       operationId: createTodo
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       requestBody:
         required: true
         content:
-              application/json:
-                schema: { $ref: '#/components/schemas/TodoCreate' }
+          application/json:
+            schema: {$ref: '#/components/schemas/TodoCreate'}
       responses:
         '201':
           description: Todo created.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
-            Location: { $ref: '#/components/headers/Location' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Location: {$ref: '#/components/headers/Location'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Todo' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Todo'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /todos/{todo_id}:
     parameters:
-      - $ref: '#/components/parameters/OrgId'
-      - $ref: '#/components/parameters/RequestId'
-      - $ref: '#/components/parameters/TodoId'
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
     get:
       tags: [Todos]
       summary: Get a todo
@@ -411,18 +486,23 @@ paths:
         '200':
           description: Todo.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Todo' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Todo'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
     patch:
       tags: [Todos]
       summary: Update a todo
       operationId: updateTodo
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      parameters: [$ref: '#/components/parameters/IdempotencyKey', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       requestBody:
         required: true
         content:
@@ -432,23 +512,28 @@ paths:
               minProperties: 1
               additionalProperties: false
               properties:
-                title: { $ref: '#/components/schemas/TitleText' }
-                description: { $ref: '#/components/schemas/NullableDescriptionText' }
-                assigned_to: { $ref: '#/components/schemas/ActorId' }
-                status: { $ref: '#/components/schemas/TodoStatus' }
-                attachments: { type: array, maxItems: 20, uniqueItems: true, items: { $ref: '#/components/schemas/AttachmentUrl' } }
+                title: {$ref: '#/components/schemas/TitleText'}
+                description: {$ref: '#/components/schemas/NullableDescriptionText'}
+                assigned_to: {$ref: '#/components/schemas/ActorId'}
+                status: {$ref: '#/components/schemas/TodoStatus'}
+                attachments: {type: array, maxItems: 20, uniqueItems: true, items: {$ref: '#/components/schemas/AttachmentUrl'}}
+                project_id:
+                  type:
+                  - string
+                  - 'null'
+                  format: uuid
       responses:
         '200':
           description: Updated todo.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Todo' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Todo'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     delete:
       tags: [Todos]
       summary: Delete a todo
@@ -457,59 +542,72 @@ paths:
         '204':
           description: Todo deleted.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
   /todos/{todo_id}/notes:
     get:
       tags: [Todos]
       summary: List todo notes
       operationId: listTodoNotes
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/TodoId'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/TodoId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Notes in reverse creation order.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/NotePage' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/NotePage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Todos]
       summary: Add a todo note
       operationId: addTodoNote
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/TodoId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], additionalProperties: false, properties: { body: { $ref: '#/components/schemas/NoteText' } } } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/TodoId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [body], additionalProperties: false, properties: {body: {$ref: '#/components/schemas/NoteText'}}}}}}
       responses:
         '201':
           description: Note created.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Note' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Note'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /todos/{todo_id}/notification-subscription:
     parameters:
-      - $ref: '#/components/parameters/OrgId'
-      - $ref: '#/components/parameters/RequestId'
-      - $ref: '#/components/parameters/TodoId'
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
     get:
       tags: [Notifications]
       summary: Get the authenticated Silicon's todo-specific subscription
@@ -519,90 +617,107 @@ paths:
         '200':
           description: Todo-specific override; a null subscription falls back to the current list-wide rule.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            ETag: { $ref: '#/components/headers/NotificationETag' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TodoNotificationSubscription' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/TodoNotificationSubscription'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
     put:
       tags: [Notifications]
       summary: Replace the authenticated Silicon's todo-specific subscription
       operationId: replaceTodoNotificationSubscription
       description: Complete optimistic-concurrency replacement. A non-null rule exclusively overrides the list rule; null removes the active override and restores list-rule fallback.
       parameters:
-        - $ref: '#/components/parameters/NotificationIfMatch'
+      - $ref: '#/components/parameters/NotificationIfMatch'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/TodoNotificationSubscriptionUpdate' }
+            schema: {$ref: '#/components/schemas/TodoNotificationSubscriptionUpdate'}
       responses:
         '200':
           description: Current todo-specific resource after replacement or an exact stale retry.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            ETag: { $ref: '#/components/headers/NotificationETag' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TodoNotificationSubscription' }
-        '409': { $ref: '#/components/responses/Error' }
-        '428': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/TodoNotificationSubscription'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects:
     get:
       tags: [Projects]
       summary: List projects
       operationId: listProjects
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - { name: status, in: query, schema: { $ref: '#/components/schemas/ProjectStatus' } }
-        - { name: silicon_id, in: query, schema: { $ref: '#/components/schemas/ActorId' } }
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - {name: status, in: query, schema: {$ref: '#/components/schemas/ProjectStatus'}}
+      - {name: silicon_id, in: query, schema: {$ref: '#/components/schemas/ActorId'}}
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Organization-visible projects.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectPage' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Projects]
       summary: Create a project
       operationId: createProject
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectCreate' } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectCreate'}}}}
       responses:
         '201':
           description: Project created.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
-            Location: { $ref: '#/components/headers/Location' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Location: {$ref: '#/components/headers/Location'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Project' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Project'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}:
     parameters:
-      - $ref: '#/components/parameters/OrgId'
-      - $ref: '#/components/parameters/RequestId'
-      - $ref: '#/components/parameters/ProjectId'
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/ProjectId'
     get:
       tags: [Projects]
       summary: Get a project
@@ -611,280 +726,613 @@ paths:
         '200':
           description: Project.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Project' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Project'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
     patch:
       tags: [Projects]
       summary: Update a project
       operationId: updateProject
-      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      parameters: [$ref: '#/components/parameters/IdempotencyKey', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       requestBody:
         required: true
         content:
           application/json:
-            schema: { type: object, minProperties: 1, additionalProperties: false, properties: { name: { $ref: '#/components/schemas/ProjectNameText' }, status: { $ref: '#/components/schemas/ProjectPatchStatus' }, silicon_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, description: 'Complete replacement set; it must retain the project creator.', items: { $ref: '#/components/schemas/ActorId' } } } }
+            schema: {type: object, minProperties: 1, additionalProperties: false, properties: {name: {$ref: '#/components/schemas/ProjectNameText'}, status: {$ref: '#/components/schemas/ProjectPatchStatus'}, silicon_ids: {
+                  type: array, maxItems: 100, uniqueItems: true, description: 'Complete replacement set; it must retain the project creator.', items: {$ref: '#/components/schemas/ActorId'}}, description: {type: string,
+                    maxLength: 100000, default: ''}, attachments: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/AttachmentUrl'}}, private: {type: boolean, default: false}, carbon_ids: {type: array,
+                    maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/ActorId'}}, tags: {type: array, maxItems: 100, items: {type: string, maxLength: 255}}}}
       responses:
         '200':
           description: Updated project.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Project' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Project'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}/diary:
     get:
       tags: [Project Diary]
       summary: Get the project diary
       operationId: getProjectDiary
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Markdown diary.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            ETag: { $ref: '#/components/headers/ETag' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/ETag'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Diary' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Diary'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     put:
       tags: [Project Diary]
       summary: Replace the project diary
       operationId: updateProjectDiary
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/IfMatch'
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [markdown], additionalProperties: false, properties: { markdown: { $ref: '#/components/schemas/DiaryMarkdown' } } } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IfMatch'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [markdown], additionalProperties: false, properties: {markdown: {$ref: '#/components/schemas/DiaryMarkdown'}}}}}}
       responses:
         '200':
           description: Updated diary.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            ETag: { $ref: '#/components/headers/ETag' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/ETag'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Diary' }
-        '409': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/Diary'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}/entries:
     get:
       tags: [Project Work]
       summary: List project activity
       operationId: listProjectEntries
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Blockers, updates, and completion entries in reverse creation order.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectEntryPage' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectEntryPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}/tasks:
     get:
       tags: [Project Work]
       summary: List project tasks
       operationId: listProjectTasks
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
       responses:
         '200':
           description: Tasks and nested subtasks in reverse creation order.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectTaskPage' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectTaskPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Project Work]
       summary: Create a project task
       operationId: createProjectTask
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectTaskCreate' } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectTaskCreate'}}}}
       responses:
         '201':
           description: Task or subtask created.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
-            Location: { $ref: '#/components/headers/Location' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Location: {$ref: '#/components/headers/Location'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectTask' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectTask'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}/tasks/{task_id}:
     patch:
       tags: [Project Work]
       summary: Update a project task
       operationId: updateProjectTask
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - { name: task_id, in: path, required: true, schema: { type: string, format: uuid } }
-      requestBody: { required: true, content: { application/json: { schema: { type: object, minProperties: 1, additionalProperties: false, properties: { title: { $ref: '#/components/schemas/TitleText' }, description: { $ref: '#/components/schemas/DescriptionText' }, status: { $ref: '#/components/schemas/TodoStatus' } } } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - &id001
+        $ref: '#/components/parameters/ProjectId'
+      - &id002 {name: task_id, in: path, required: true, schema: {type: string, format: uuid}}
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {type: object, minProperties: 1, additionalProperties: false, properties: {title: {$ref: '#/components/schemas/TitleText'}, description: {$ref: '#/components/schemas/DescriptionText'},
+                status: {$ref: '#/components/schemas/TodoStatus'}, assigned_to: {oneOf: [$ref: '#/components/schemas/ActorId', type: 'null']}}}}}}
       responses:
         '200':
           description: Updated task.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectTask' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectTask'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags:
+      - Projects
+      operationId: deleteProjectTask
+      summary: Remove task, descendants and linked todos
+      responses:
+        '204':
+          description: Remove task, descendants and linked todos
+        default:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      - *id001
+      - *id002
   /projects/{project_id}/blockers:
     post:
       tags: [Project Work]
       summary: Add a project blocker
       operationId: createBlocker
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/BlockerCreate' } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BlockerCreate'}}}}
       responses:
         '201':
           description: Blocker created.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectEntry' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectEntry'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}/updates:
     post:
       tags: [Project Work]
       summary: Add a project update
       operationId: createProjectUpdate
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectEntryCreate' } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectEntryCreate'}}}}
       responses:
         '201':
           description: Update created.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectEntry' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectEntry'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
   /projects/{project_id}/completion:
     post:
       tags: [Project Work]
       summary: Complete a project
       operationId: completeProject
       parameters:
-        - $ref: '#/components/parameters/OrgId'
-        - $ref: '#/components/parameters/RequestId'
-        - $ref: '#/components/parameters/ProjectId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectEntryCreate' } } } }
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectEntryCreate'}}}}
       responses:
         '201':
           description: Completion entry created and project completed.
           headers:
-            X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-            Cache-Control: { $ref: '#/components/headers/CacheControl' }
-            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ProjectEntry' }
-        '429': { $ref: '#/components/responses/RateLimited' }
-        default: { $ref: '#/components/responses/Error' }
+              schema: {$ref: '#/components/schemas/ProjectEntry'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /projects/{project_id}/tasks/{task_id}/claim:
+    parameters:
+    - $ref: '#/components/parameters/ProjectId'
+    - name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    post:
+      tags:
+      - Projects
+      operationId: claimProjectTask
+      summary: Claim unassigned work atomically
+      responses:
+        '200':
+          description: Claim unassigned work atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectTask'
+        default:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /projects/{project_id}/versions:
+    parameters:
+    - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags:
+      - Projects
+      operationId: listProjectVersions
+      summary: List the latest 1000 retained revisions
+      responses:
+        '200':
+          description: List the latest 1000 retained revisions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  next_before:
+                    type:
+                    - integer
+                    - 'null'
+        default:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - name: before
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /projects/{project_id}/versions/{version}:
+    parameters:
+    - $ref: '#/components/parameters/ProjectId'
+    - name: version
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    get:
+      tags:
+      - Projects
+      operationId: getProjectVersion
+      summary: Read a retained snapshot under current access rules
+      responses:
+        '200':
+          description: Read a retained snapshot under current access rules
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /testing-context:
+    get:
+      tags:
+      - Projects
+      operationId: getTestingContext
+      summary: Validate imported IAM app secret and discover its sandbox
+      responses:
+        '200':
+          description: Validate imported IAM app secret and discover its sandbox
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - testing
+                - environment_id
+                - name
+                properties:
+                  testing:
+                    const: true
+                  environment_id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+        default:
+          $ref: '#/components/responses/Error'
+      security: []
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /contracts:
+    get:
+      tags:
+      - Projects
+      operationId: getContracts
+      summary: Discover contract status, compatibility matrix and policy
+      responses:
+        '200':
+          description: Discover contract status, compatibility matrix and policy
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          $ref: '#/components/responses/Error'
+      security: []
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /email-settings:
+    get:
+      tags:
+      - Projects
+      operationId: getEmailSettings
+      summary: Read own organization email preferences
+      responses:
+        '200':
+          description: Read own organization email preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailPreferences'
+        default:
+          $ref: '#/components/responses/Error'
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+    put:
+      tags:
+      - Projects
+      operationId: setEmailSettings
+      summary: Replace own organization email preferences
+      responses:
+        '200':
+          description: Replace own organization email preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailPreferences'
+        default:
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailPreferences'
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /reports:
+    post:
+      tags:
+      - Projects
+      operationId: submitReport
+      summary: Queue a maintainer bug report; testing delivery is simulated
+      responses:
+        '200':
+          description: Queue a maintainer bug report; testing delivery is simulated
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          $ref: '#/components/responses/Error'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - message
+              additionalProperties: false
+              properties:
+                message:
+                  type: string
+                  minLength: 1
+                  maxLength: 20000
+                pr:
+                  type:
+                  - string
+                  - 'null'
+                  format: uri
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
 components:
   securitySchemes:
-    bearerAuth: { type: http, scheme: bearer, bearerFormat: IAM access token }
-    oboAccess: { type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: 'Short-lived, single-use IAM OBO Access proof.' }
-    oboAppId: { type: apiKey, in: header, name: X-App-ID, description: Issuer application ID paired with the OBO proof. }
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: IAM access token}
+    oboAccess: {type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: 'Short-lived, single-use IAM OBO Access proof.'}
+    oboAppId: {type: apiKey, in: header, name: X-App-ID, description: Issuer application ID paired with the OBO proof.}
   parameters:
-    OrgId: { name: X-Org-ID, in: header, required: true, description: Public organization context which must match current IAM authority., schema: { $ref: '#/components/schemas/OrganizationId' } }
-    RequestId: { name: X-Request-ID, in: header, required: false, description: Optional visible-ASCII correlation identifier which is returned unchanged when valid., schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$' } }
-    TodoId: { name: todo_id, in: path, required: true, schema: { type: string, format: uuid } }
-    ProjectId: { name: project_id, in: path, required: true, description: 'Project UUID or exact stable UID, bounded to 2,048 UTF-8 bytes. Bare slugs are not accepted; percent-encode a UID as exactly one path segment.', schema: { type: string, maxLength: 2048 } }
-    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, description: Opaque case-sensitive replay key containing visible ASCII only., schema: { type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]+$' } }
-    IfMatch: { name: If-Match, in: header, required: true, description: Strong quoted ETag containing the last observed positive diary version., schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
-    NotificationIfMatch: { name: If-Match, in: header, required: true, description: 'One strong quoted canonical non-negative notification-resource version. Send "0" to create from the virtual absent resource.', schema: { type: string, pattern: '^"(?:0|[1-9][0-9]*)"$' } }
-    Cursor: { name: cursor, in: query, schema: { type: string, minLength: 1, maxLength: 1024 } }
-    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+    OrgId: {name: X-Org-ID, in: header, required: true, description: Public organization context which must match current IAM authority., schema: {$ref: '#/components/schemas/OrganizationId'}}
+    RequestId: {name: X-Request-ID, in: header, required: false, description: Optional visible-ASCII correlation identifier which is returned unchanged when valid., schema: {type: string, minLength: 1, maxLength: 128,
+          pattern: '^[!-~]+$'}}
+    TodoId: {name: todo_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ProjectId: {name: project_id, in: path, required: true, description: 'Project UUID or exact stable UID, bounded to 2,048 UTF-8 bytes. Bare slugs are not accepted; percent-encode a UID as exactly one path segment.',
+        schema: {type: string, maxLength: 2048}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, description: Opaque case-sensitive replay key containing visible ASCII only., schema: {type: string, minLength: 8, maxLength: 255, pattern: '^[!-~]+$'}}
+    IfMatch: {name: If-Match, in: header, required: true, description: Strong quoted ETag containing the last observed positive diary version., schema: {type: string, pattern: '^"[1-9][0-9]*"$'}}
+    NotificationIfMatch: {name: If-Match, in: header, required: true, description: 'One strong quoted canonical non-negative notification-resource version. Send "0" to create from the virtual absent resource.', schema: {
+          type: string, pattern: '^"(?:0|[1-9][0-9]*)"$'}}
+    Cursor: {name: cursor, in: query, schema: {type: string, minLength: 1, maxLength: 1024}}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+    CommitVersion:
+      name: X-Commit-API-Version
+      in: header
+      required: false
+      description: Explicit API contract; currently 1.
+      schema:
+        type: string
+    SupportedVersions:
+      name: X-Commit-Supported-Versions
+      in: header
+      required: false
+      description: Comma-separated supported versions; currently must include 1.
+      schema:
+        type: string
+    TestingAppSecret:
+      name: X-Testing-App-Secret
+      in: header
+      required: false
+      description: Imported IAM application secret, never a URL parameter. Selects an isolated sandbox. Do not combine with X-Testing-Environment-Key.
+      schema:
+        type: string
+    TelemetryPreference:
+      name: X-Commit-Telemetry
+      in: header
+      required: false
+      description: Set off to disable diagnostics for this request.
+      schema:
+        type: string
   responses:
     Error:
       description: Stable redacted error envelope.
       headers:
-        X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-        Cache-Control: { $ref: '#/components/headers/CacheControl' }
-        WWW-Authenticate: { $ref: '#/components/headers/WwwAuthenticate' }
+        X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+        Cache-Control: {$ref: '#/components/headers/CacheControl'}
+        WWW-Authenticate: {$ref: '#/components/headers/WwwAuthenticate'}
       content:
         application/json:
-          schema: { $ref: '#/components/schemas/Error' }
+          schema: {$ref: '#/components/schemas/Error'}
     RateLimited:
       description: A dependency or request policy temporarily rate-limited the operation.
       headers:
-        X-Request-ID: { $ref: '#/components/headers/XRequestId' }
-        Cache-Control: { $ref: '#/components/headers/CacheControl' }
-        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+        Cache-Control: {$ref: '#/components/headers/CacheControl'}
+        Retry-After: {$ref: '#/components/headers/RetryAfter'}
       content:
         application/json:
-          schema: { $ref: '#/components/schemas/Error' }
+          schema: {$ref: '#/components/schemas/Error'}
   headers:
-    XRequestId: { description: Request correlation identifier., schema: { type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$' } }
-    CacheControl: { description: Responses are not cacheable by shared or private caches., schema: { type: string, const: no-store } }
-    IdempotencyReplayed: { description: Whether this exact response was replayed from durable idempotency state., schema: { type: boolean } }
-    Location: { description: Absolute canonical URL of the created resource., schema: { type: string, format: uri } }
-    ETag: { description: Strong quoted diary version., schema: { type: string, pattern: '^"[1-9][0-9]*"$' } }
-    NotificationETag: { description: Strong quoted canonical non-negative notification-resource version., schema: { type: string, pattern: '^"(?:0|[1-9][0-9]*)"$' } }
-    RetryAfter: { description: Minimum whole seconds before retrying a rate-limited request., schema: { type: integer, minimum: 1 } }
-    WwwAuthenticate: { description: Present on 401 responses to advertise bearer authentication., schema: { type: string, const: Bearer } }
+    XRequestId: {description: Request correlation identifier., schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[!-~]+$'}}
+    CacheControl: {description: Responses are not cacheable by shared or private caches., schema: {type: string, const: no-store}}
+    IdempotencyReplayed: {description: Whether this exact response was replayed from durable idempotency state., schema: {type: boolean}}
+    Location: {description: Absolute canonical URL of the created resource., schema: {type: string, format: uri}}
+    ETag: {description: Strong quoted diary version., schema: {type: string, pattern: '^"[1-9][0-9]*"$'}}
+    NotificationETag: {description: Strong quoted canonical non-negative notification-resource version., schema: {type: string, pattern: '^"(?:0|[1-9][0-9]*)"$'}}
+    RetryAfter: {description: Minimum whole seconds before retrying a rate-limited request., schema: {type: integer, minimum: 1}}
+    WwwAuthenticate: {description: Present on 401 responses to advertise bearer authentication., schema: {type: string, const: Bearer}}
   schemas:
     TitleText:
       type: string
@@ -923,29 +1371,29 @@ components:
       required: [service, api_version, version, commit]
       additionalProperties: false
       properties:
-        service: { type: string, const: silicon-commit }
-        api_version: { type: string, const: v1 }
-        version: { type: string, minLength: 1 }
-        commit: { type: string, minLength: 1 }
+        service: {type: string, const: silicon-commit}
+        api_version: {type: string, const: v1}
+        version: {type: string, minLength: 1}
+        commit: {type: string, minLength: 1}
     TestEnvironment:
       type: object
       required: [environment_id, name, status, version]
       additionalProperties: false
       properties:
-        environment_id: { type: string, format: uuid }
-        name: { type: string, minLength: 1, maxLength: 200 }
-        description: { type: [string, 'null'], maxLength: 20000 }
-        status: { type: string, enum: [active, deleted] }
-        version: { type: integer, minimum: 1 }
-        deleted_at: { type: [string, 'null'], format: date-time }
-        purge_after: { type: [string, 'null'], format: date-time }
+        environment_id: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 200}
+        description: {type: [string, 'null'], maxLength: 20000}
+        status: {type: string, enum: [active, deleted]}
+        version: {type: integer, minimum: 1}
+        deleted_at: {type: [string, 'null'], format: date-time}
+        purge_after: {type: [string, 'null'], format: date-time}
     CreatedTestEnvironment:
       allOf:
-        - $ref: '#/components/schemas/TestEnvironment'
-        - type: object
-          required: [key]
-          properties:
-            key: { type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$' }
+      - $ref: '#/components/schemas/TestEnvironment'
+      - type: object
+        required: [key]
+        properties:
+          key: {type: string, minLength: 32, maxLength: 32, pattern: '^[A-Za-z0-9]{32}$'}
     ActorId:
       type: string
       minLength: 1
@@ -963,28 +1411,29 @@ components:
       format: uri
       maxLength: 2048
       pattern: '^https://'
-      description: Canonical absolute HTTPS URL from any provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed. Commit stores and returns this URL; uploading and fetching remain outside its scope.
+      description: Canonical absolute HTTPS URL from any provider; credentials, fragments, surrounding whitespace, control characters, and non-default ports are forbidden. Query strings are allowed. Commit stores and
+        returns this URL; uploading and fetching remain outside its scope.
     ActorRef:
       type: object
       required: [type, id]
       additionalProperties: false
-      properties: { type: { type: string, enum: [carbon, silicon] }, id: { $ref: '#/components/schemas/ActorId' } }
-    TodoStatus: { type: string, enum: [completed, canceled, in_progress, blocked, yet_to_do] }
+      properties: {type: {type: string, enum: [carbon, silicon]}, id: {$ref: '#/components/schemas/ActorId'}}
+    TodoStatus: {type: string, enum: [completed, canceled, in_progress, blocked, yet_to_do]}
     NotificationRule:
       description: A normalized delegated-todo event rule. `specific_statuses` matches transitions into one of the listed existing todo states.
       oneOf:
-        - type: object
-          required: [scope]
-          additionalProperties: false
-          properties:
-            scope: { type: string, enum: [any_update, status_updates] }
-            statuses: { type: array, maxItems: 0, uniqueItems: true, default: [], items: { $ref: '#/components/schemas/TodoStatus' } }
-        - type: object
-          required: [scope, statuses]
-          additionalProperties: false
-          properties:
-            scope: { type: string, const: specific_statuses }
-            statuses: { type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: { $ref: '#/components/schemas/TodoStatus' } }
+      - type: object
+        required: [scope]
+        additionalProperties: false
+        properties:
+          scope: {type: string, enum: [any_update, status_updates]}
+          statuses: {type: array, maxItems: 0, uniqueItems: true, default: [], items: {$ref: '#/components/schemas/TodoStatus'}}
+      - type: object
+        required: [scope, statuses]
+        additionalProperties: false
+        properties:
+          scope: {type: string, const: specific_statuses}
+          statuses: {type: array, minItems: 1, maxItems: 5, uniqueItems: true, items: {$ref: '#/components/schemas/TodoStatus'}}
     WebhookUrl:
       type: string
       format: uri
@@ -998,12 +1447,12 @@ components:
       properties:
         webhook_url:
           oneOf:
-            - $ref: '#/components/schemas/WebhookUrl'
-            - type: 'null'
+          - $ref: '#/components/schemas/WebhookUrl'
+          - type: 'null'
         todo_list_subscription:
           oneOf:
-            - $ref: '#/components/schemas/NotificationRule'
-            - type: 'null'
+          - $ref: '#/components/schemas/NotificationRule'
+          - type: 'null'
     NotificationSettings:
       type: object
       required: [webhook_url, todo_list_subscription, version, updated_at]
@@ -1011,14 +1460,14 @@ components:
       properties:
         webhook_url:
           oneOf:
-            - $ref: '#/components/schemas/WebhookUrl'
-            - type: 'null'
+          - $ref: '#/components/schemas/WebhookUrl'
+          - type: 'null'
         todo_list_subscription:
           oneOf:
-            - $ref: '#/components/schemas/NotificationRule'
-            - type: 'null'
-        version: { type: integer, format: int64, minimum: 0 }
-        updated_at: { type: [string, 'null'], format: date-time, description: Null only for the virtual version-zero resource. }
+          - $ref: '#/components/schemas/NotificationRule'
+          - type: 'null'
+        version: {type: integer, format: int64, minimum: 0}
+        updated_at: {type: [string, 'null'], format: date-time, description: Null only for the virtual version-zero resource.}
     TodoNotificationSubscriptionUpdate:
       type: object
       required: [subscription]
@@ -1026,154 +1475,211 @@ components:
       properties:
         subscription:
           oneOf:
-            - $ref: '#/components/schemas/NotificationRule'
-            - type: 'null'
+          - $ref: '#/components/schemas/NotificationRule'
+          - type: 'null'
     TodoNotificationSubscription:
       type: object
       required: [todo_id, subscription, version, updated_at]
       additionalProperties: false
       properties:
-        todo_id: { type: string, format: uuid }
+        todo_id: {type: string, format: uuid}
         subscription:
           oneOf:
-            - $ref: '#/components/schemas/NotificationRule'
-            - type: 'null'
-        version: { type: integer, format: int64, minimum: 0 }
-        updated_at: { type: [string, 'null'], format: date-time, description: Null only for the virtual version-zero resource. }
+          - $ref: '#/components/schemas/NotificationRule'
+          - type: 'null'
+        version: {type: integer, format: int64, minimum: 0}
+        updated_at: {type: [string, 'null'], format: date-time, description: Null only for the virtual version-zero resource.}
     TodoCreate:
       type: object
       required: [title, assigned_to]
       additionalProperties: false
       properties:
-        title: { $ref: '#/components/schemas/TitleText' }
-        description: { $ref: '#/components/schemas/NullableDescriptionText' }
-        assigned_to: { $ref: '#/components/schemas/ActorId' }
-        status: { allOf: [{ $ref: '#/components/schemas/TodoStatus' }], default: yet_to_do }
-        attachments: { type: array, maxItems: 20, uniqueItems: true, default: [], items: { $ref: '#/components/schemas/AttachmentUrl' } }
+        title: {$ref: '#/components/schemas/TitleText'}
+        description: {$ref: '#/components/schemas/NullableDescriptionText'}
+        assigned_to: {$ref: '#/components/schemas/ActorId'}
+        status: {allOf: [$ref: '#/components/schemas/TodoStatus'], default: yet_to_do}
+        attachments: {type: array, maxItems: 20, uniqueItems: true, default: [], items: {$ref: '#/components/schemas/AttachmentUrl'}}
+        project_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
     Todo:
       type: object
       required: [id, org_id, title, description, assigned_to, assigned_by, status, attachments, created_at, updated_at]
       additionalProperties: false
       properties:
-        id: { type: string, format: uuid }
-        org_id: { $ref: '#/components/schemas/OrganizationId' }
-        title: { $ref: '#/components/schemas/TitleText' }
-        description: { $ref: '#/components/schemas/NullableDescriptionText' }
-        assigned_to: { $ref: '#/components/schemas/ActorId' }
-        assigned_by: { $ref: '#/components/schemas/ActorRef' }
-        status: { $ref: '#/components/schemas/TodoStatus' }
-        attachments: { type: array, maxItems: 20, uniqueItems: true, items: { $ref: '#/components/schemas/AttachmentUrl' } }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        id: {type: string, format: uuid}
+        org_id: {$ref: '#/components/schemas/OrganizationId'}
+        title: {$ref: '#/components/schemas/TitleText'}
+        description: {$ref: '#/components/schemas/NullableDescriptionText'}
+        assigned_to: {$ref: '#/components/schemas/ActorId'}
+        assigned_by: {$ref: '#/components/schemas/ActorRef'}
+        status: {$ref: '#/components/schemas/TodoStatus'}
+        attachments: {type: array, maxItems: 20, uniqueItems: true, items: {$ref: '#/components/schemas/AttachmentUrl'}}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        project_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
     TodoPage:
       type: object
       required: [items, next_cursor]
       additionalProperties: false
       properties:
-        items: { type: array, items: { $ref: '#/components/schemas/Todo' } }
-        next_cursor: { type: [string, 'null'], maxLength: 1024 }
+        items: {type: array, items: {$ref: '#/components/schemas/Todo'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1024}
     Note:
       type: object
       required: [id, body, author, created_at]
       additionalProperties: false
-      properties: { id: { type: string, format: uuid }, body: { $ref: '#/components/schemas/NoteText' }, author: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+      properties: {id: {type: string, format: uuid}, body: {$ref: '#/components/schemas/NoteText'}, author: {$ref: '#/components/schemas/ActorRef'}, created_at: {type: string, format: date-time}}
     NotePage:
       type: object
       required: [items, next_cursor]
       additionalProperties: false
       properties:
-        items: { type: array, items: { $ref: '#/components/schemas/Note' } }
-        next_cursor: { type: [string, 'null'], maxLength: 1024 }
-    ProjectStatus: { type: string, enum: [completed, blocked, canceled, in_progress, yet_to_start] }
-    ProjectPatchStatus: { type: string, enum: [blocked, canceled, in_progress, yet_to_start] }
+        items: {type: array, items: {$ref: '#/components/schemas/Note'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1024}
+    ProjectStatus: {type: string, enum: [completed, blocked, canceled, in_progress, yet_to_start]}
+    ProjectPatchStatus: {type: string, enum: [blocked, canceled, in_progress, yet_to_start]}
     ProjectCreate:
       type: object
-      required: [name, silicon_ids]
+      required:
+      - name
       additionalProperties: false
-      properties: { name: { $ref: '#/components/schemas/ProjectNameText' }, silicon_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/ActorId' } } }
+      properties: {name: {$ref: '#/components/schemas/ProjectNameText'}, silicon_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/ActorId'}}, description: {type: string, maxLength:
+            100000, default: ''}, attachments: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/AttachmentUrl'}}, private: {type: boolean, default: false}, carbon_ids: {type: array, maxItems: 100,
+            uniqueItems: true, items: {$ref: '#/components/schemas/ActorId'}}, tags: {type: array, maxItems: 100, items: {type: string, maxLength: 255}}, tasks: {type: array, maxItems: 1000, items: {$ref: '#/components/schemas/ProjectSeedTask'}}}
     Project:
       type: object
       required: [id, org_id, name, slug, uid, status, silicon_ids, created_by, created_at, updated_at]
       additionalProperties: false
       properties:
-        id: { type: string, format: uuid }
-        org_id: { $ref: '#/components/schemas/OrganizationId' }
-        name: { $ref: '#/components/schemas/ProjectNameText' }
-        slug: { type: string, minLength: 1, maxLength: 200, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
-        uid: { type: string, maxLength: 2048, description: 'Stable opaque creation slug, creator ID, and millisecond timestamp tuple; bounded to 2,048 UTF-8 bytes.' }
-        status: { $ref: '#/components/schemas/ProjectStatus' }
-        silicon_ids: { type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: { $ref: '#/components/schemas/ActorId' } }
-        created_by: { $ref: '#/components/schemas/ActorRef' }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
+        id: {type: string, format: uuid}
+        org_id: {$ref: '#/components/schemas/OrganizationId'}
+        name: {$ref: '#/components/schemas/ProjectNameText'}
+        slug: {type: string, minLength: 1, maxLength: 200, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'}
+        uid: {type: string, maxLength: 2048, description: 'Stable opaque creation slug, creator ID, and millisecond timestamp tuple; bounded to 2,048 UTF-8 bytes.'}
+        status: {$ref: '#/components/schemas/ProjectStatus'}
+        silicon_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/ActorId'}}
+        created_by: {$ref: '#/components/schemas/ActorRef'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        description:
+          type: string
+          maxLength: 100000
+          default: ''
+        attachments:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/AttachmentUrl'
+        private:
+          type: boolean
+          default: false
+        carbon_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ActorId'
+        tags:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            maxLength: 255
+        collaborators:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActorRef'
+        version:
+          type: integer
+          format: int64
     ProjectPage:
       type: object
       required: [items, next_cursor]
       additionalProperties: false
       properties:
-        items: { type: array, items: { $ref: '#/components/schemas/Project' } }
-        next_cursor: { type: [string, 'null'], maxLength: 1024 }
+        items: {type: array, items: {$ref: '#/components/schemas/Project'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1024}
     Diary:
       type: object
       required: [project_id, markdown, version, updated_by, updated_at]
       additionalProperties: false
-      properties: { project_id: { type: string, format: uuid }, markdown: { $ref: '#/components/schemas/DiaryMarkdown' }, version: { type: integer, minimum: 1 }, updated_by: { $ref: '#/components/schemas/ActorRef' }, updated_at: { type: string, format: date-time } }
+      properties: {project_id: {type: string, format: uuid}, markdown: {$ref: '#/components/schemas/DiaryMarkdown'}, version: {type: integer, minimum: 1}, updated_by: {$ref: '#/components/schemas/ActorRef'}, updated_at: {
+          type: string, format: date-time}}
     ProjectTaskCreate:
       type: object
       required: [title]
       additionalProperties: false
       properties:
-        parent_task_id: { type: [string, 'null'], format: uuid }
-        title: { $ref: '#/components/schemas/TitleText' }
-        description: { allOf: [{ $ref: '#/components/schemas/DescriptionText' }], default: '' }
-        status: { allOf: [{ $ref: '#/components/schemas/TodoStatus' }], default: yet_to_do }
+        parent_task_id: {type: [string, 'null'], format: uuid}
+        title: {$ref: '#/components/schemas/TitleText'}
+        description: {allOf: [$ref: '#/components/schemas/DescriptionText'], default: ''}
+        status: {allOf: [$ref: '#/components/schemas/TodoStatus'], default: yet_to_do}
+        assigned_to:
+          $ref: '#/components/schemas/ActorId'
     ProjectTask:
       type: object
       required: [id, project_id, parent_task_id, title, description, status, created_by, created_at]
       additionalProperties: false
       properties:
-        id: { type: string, format: uuid }
-        project_id: { type: string, format: uuid }
-        parent_task_id: { type: [string, 'null'], format: uuid }
-        title: { $ref: '#/components/schemas/TitleText' }
-        description: { $ref: '#/components/schemas/DescriptionText' }
-        status: { $ref: '#/components/schemas/TodoStatus' }
-        created_by: { $ref: '#/components/schemas/ActorRef' }
-        created_at: { type: string, format: date-time }
+        id: {type: string, format: uuid}
+        project_id: {type: string, format: uuid}
+        parent_task_id: {type: [string, 'null'], format: uuid}
+        title: {$ref: '#/components/schemas/TitleText'}
+        description: {$ref: '#/components/schemas/DescriptionText'}
+        status: {$ref: '#/components/schemas/TodoStatus'}
+        created_by: {$ref: '#/components/schemas/ActorRef'}
+        created_at: {type: string, format: date-time}
+        assigned_to:
+          oneOf:
+          - $ref: '#/components/schemas/ActorRef'
+          - type: 'null'
+        todo_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
     ProjectTaskPage:
       type: object
       required: [items, next_cursor]
       additionalProperties: false
       properties:
-        items: { type: array, items: { $ref: '#/components/schemas/ProjectTask' } }
-        next_cursor: { type: [string, 'null'], maxLength: 1024 }
+        items: {type: array, items: {$ref: '#/components/schemas/ProjectTask'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1024}
     ProjectEntryPage:
       type: object
       required: [items, next_cursor]
       additionalProperties: false
       properties:
-        items: { type: array, items: { $ref: '#/components/schemas/ProjectEntry' } }
-        next_cursor: { type: [string, 'null'], maxLength: 1024 }
+        items: {type: array, items: {$ref: '#/components/schemas/ProjectEntry'}}
+        next_cursor: {type: [string, 'null'], maxLength: 1024}
     BlockerCreate:
       type: object
       required: [title, description]
       additionalProperties: false
       properties:
-        title: { $ref: '#/components/schemas/TitleText' }
-        description: { $ref: '#/components/schemas/DescriptionText' }
-        status: { type: string, enum: [open, resolved], default: open }
+        title: {$ref: '#/components/schemas/TitleText'}
+        description: {$ref: '#/components/schemas/DescriptionText'}
+        status: {type: string, enum: [open, resolved], default: open}
     ProjectEntryCreate:
       type: object
       required: [title, description]
       additionalProperties: false
       properties:
-        title: { $ref: '#/components/schemas/TitleText' }
-        description: { $ref: '#/components/schemas/DescriptionText' }
+        title: {$ref: '#/components/schemas/TitleText'}
+        description: {$ref: '#/components/schemas/DescriptionText'}
     ProjectEntry:
       type: object
       required: [id, project_id, type, title, description, created_by, created_at]
       additionalProperties: false
-      properties: { id: { type: string, format: uuid }, project_id: { type: string, format: uuid }, type: { type: string, enum: [blocker, update, completion] }, title: { $ref: '#/components/schemas/TitleText' }, description: { $ref: '#/components/schemas/DescriptionText' }, status: { type: string, enum: [open, resolved] }, created_by: { $ref: '#/components/schemas/ActorRef' }, created_at: { type: string, format: date-time } }
+      properties: {id: {type: string, format: uuid}, project_id: {type: string, format: uuid}, type: {type: string, enum: [blocker, update, completion]}, title: {$ref: '#/components/schemas/TitleText'}, description: {
+            $ref: '#/components/schemas/DescriptionText'}, status: {type: string, enum: [open, resolved]}, created_by: {$ref: '#/components/schemas/ActorRef'}, created_at: {type: string, format: date-time}}
     Error:
       type: object
       required: [error]
@@ -1184,7 +1690,50 @@ components:
           required: [code, message, request_id]
           additionalProperties: false
           properties:
-            code: { type: string }
-            message: { type: string }
-            request_id: { type: string }
+            code: {type: string}
+            message: {type: string}
+            request_id: {type: string}
             details: {}
+    ProjectSeedTask:
+      type: object
+      additionalProperties: false
+      required:
+      - title
+      properties:
+        title:
+          $ref: '#/components/schemas/TitleText'
+        description:
+          $ref: '#/components/schemas/DescriptionText'
+        status:
+          $ref: '#/components/schemas/TodoStatus'
+        assigned_to:
+          $ref: '#/components/schemas/ActorId'
+        subtasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectSeedTask'
+    EmailPreferences:
+      type: object
+      additionalProperties: false
+      required:
+      - email
+      properties:
+        email:
+          type: string
+          maxLength: 254
+          description: Address used for the selected organization; empty disables destination.
+        enabled:
+          type: boolean
+          default: true
+        project_completed:
+          type: boolean
+          default: true
+        project_updates:
+          type: boolean
+          default: false
+        task_completed:
+          type: boolean
+          default: false
+        task_assigned:
+          type: boolean
+          default: false

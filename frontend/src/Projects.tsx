@@ -8,6 +8,7 @@ import {
 import { api, context, enc, navigate, query, session } from "./api";
 import type { Project, Task, Entry, Diary, Page, TodoStatus } from "./types";
 import {
+  Confirm,
   Empty,
   ErrorBox,
   Field,
@@ -30,9 +31,37 @@ export function ProjectForm(p: {
 }) {
   const [name, setName] = createSignal(p.project?.name || ""),
     [members, setMembers] = createSignal(
-      p.project?.silicon_ids.join("\n") || session().actor?.public_id || "",
+      p.project?.silicon_ids.join("\n") ||
+        (session().actor?.type === "silicon"
+          ? session().actor?.public_id
+          : "") ||
+        "",
     ),
     [status, setStatus] = createSignal(p.project?.status || "yet_to_start");
+  const [description, setDescription] = createSignal(
+      p.project?.description || "",
+    ),
+    [carbons, setCarbons] = createSignal(
+      p.project?.carbon_ids?.join("\n") ||
+        (session().actor?.type === "carbon"
+          ? session().actor?.public_id
+          : "") ||
+        "",
+    ),
+    [privateProject, setPrivate] = createSignal(p.project?.private || false),
+    [tags, setTags] = createSignal(p.project?.tags?.join("\n") || ""),
+    [attachments, setAttachments] = createSignal(
+      p.project?.attachments?.join("\n") || "",
+    ),
+    [initialTasks, setInitialTasks] = createSignal("");
+  const lines = (text: string) => [
+    ...new Set(
+      text
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  ];
   const a = useAction();
   return (
     <Modal
@@ -51,9 +80,17 @@ export function ProjectForm(p: {
                   .filter(Boolean),
               ),
             ];
-            if (!silicon_ids.length)
-              throw new Error("Add at least one Silicon.");
-            const body: any = { name: name(), silicon_ids };
+            const body: any = {
+              name: name(),
+              silicon_ids,
+              carbon_ids: lines(carbons()),
+              description: description(),
+              private: privateProject(),
+              tags: lines(tags()),
+              attachments: lines(attachments()),
+            };
+            if (!p.project && initialTasks().trim())
+              body.tasks = lines(initialTasks()).map((title) => ({ title }));
             if (p.project && status() !== "completed") body.status = status();
             const result = await api<Project>(
               p.project ? "/projects/" + p.project.id : "/projects",
@@ -79,12 +116,60 @@ export function ProjectForm(p: {
         >
           <textarea
             rows={4}
-            required
             value={members()}
             onInput={(e) => setMembers(e.currentTarget.value)}
             placeholder="engineer:tos"
           />
         </Field>
+        <Field label="Description">
+          <textarea
+            rows={4}
+            maxLength={20000}
+            value={description()}
+            onInput={(e) => setDescription(e.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Participating Carbons" hint="One Carbon ID per line.">
+          <textarea
+            value={carbons()}
+            onInput={(e) => setCarbons(e.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Visibility">
+          <select
+            value={privateProject() ? "private" : "public"}
+            onChange={(e) => setPrivate(e.currentTarget.value === "private")}
+          >
+            <option value="public">Public within the organization</option>
+            <option value="private">Private to invited people and tags</option>
+          </select>
+        </Field>
+        <Field
+          label="IAM tags"
+          hint="Members with any listed tag can access a private project."
+        >
+          <textarea
+            value={tags()}
+            onInput={(e) => setTags(e.currentTarget.value)}
+          />
+        </Field>
+        <Field label="Attachment links" hint="One HTTPS URL per line.">
+          <textarea
+            value={attachments()}
+            onInput={(e) => setAttachments(e.currentTarget.value)}
+          />
+        </Field>
+        <Show when={!p.project}>
+          <Field
+            label="Initial tasks"
+            hint="One task title per line; assign or add subtasks after creation."
+          >
+            <textarea
+              value={initialTasks()}
+              onInput={(e) => setInitialTasks(e.currentTarget.value)}
+            />
+          </Field>
+        </Show>
         <Show when={p.project && p.project.status !== "completed"}>
           <Field label="Project status">
             <select
@@ -100,8 +185,8 @@ export function ProjectForm(p: {
           </Field>
         </Show>
         <p class="muted">
-          Projects are created by Silicons. Participants and project managers
-          can maintain the work.
+          Carbons and Silicons can collaborate. Private projects are limited to
+          the creator, invited identities, and matching IAM tags.
         </p>
         <ErrorBox error={a.error()} />
         <div class="form-actions">
@@ -328,7 +413,12 @@ export function ProjectDetail(p: { id: string }) {
                 <div>
                   <small>Participants</small>
                   <div class="chips">
-                    <For each={project.silicon_ids}>
+                    <For
+                      each={[
+                        ...project.silicon_ids,
+                        ...(project.carbon_ids || []),
+                      ]}
+                    >
                       {(id) => <span class="chip">{id}</span>}
                     </For>
                   </div>
@@ -338,6 +428,30 @@ export function ProjectDetail(p: { id: string }) {
                   <code>{project.uid}</code>
                 </div>
               </div>
+              <section class="panel">
+                <p>
+                  <strong>
+                    {project.private
+                      ? "Private project"
+                      : "Public within organization"}
+                  </strong>
+                </p>
+                <Markdown text={project.description || ""} />
+                <For each={project.attachments || []}>
+                  {(url) => (
+                    <p>
+                      <a href={url} target="_blank" rel="noopener noreferrer">
+                        {url}
+                      </a>
+                    </p>
+                  )}
+                </For>
+                <p class="muted">
+                  Contributors:{" "}
+                  {(project.collaborators || []).map((a) => a.id).join(" · ") ||
+                    project.created_by.id}
+                </p>
+              </section>
               <div
                 class="tabs section-tabs"
                 role="tablist"
@@ -348,6 +462,7 @@ export function ProjectDetail(p: { id: string }) {
                     ["tasks", "Tasks"],
                     ["diary", "Diary"],
                     ["activity", "Activity"],
+                    ["history", "Version history"],
                   ]}
                 >
                   {([key, name]) => (
@@ -362,6 +477,9 @@ export function ProjectDetail(p: { id: string }) {
                   )}
                 </For>
               </div>
+              <Show when={tab() === "history"}>
+                <ProjectHistory id={project.id} />
+              </Show>
               <Show when={tab() === "tasks"}>
                 <Tasks project={project} />
               </Show>
@@ -419,6 +537,7 @@ function TaskForm(p: {
     [status, setStatus] = createSignal<TodoStatus>(
       p.task?.status || "yet_to_do",
     );
+  const [assignee, setAssignee] = createSignal(p.task?.assigned_to?.id || "");
   const a = useAction();
   return (
     <Modal
@@ -431,6 +550,7 @@ function TaskForm(p: {
           e.preventDefault();
           void a.run(async () => {
             const body: any = {
+              assigned_to: assignee().trim() || null,
               title: title(),
               description: description(),
               status: status(),
@@ -464,6 +584,15 @@ function TaskForm(p: {
             onInput={(e) => setDescription(e.currentTarget.value)}
           />
         </Field>
+        <Field
+          label="Assign to"
+          hint="Carbon or Silicon public ID; leave blank for someone to claim."
+        >
+          <input
+            value={assignee()}
+            onInput={(e) => setAssignee(e.currentTarget.value)}
+          />
+        </Field>
         <Field label="Status">
           <StatusSelect value={status()} change={setStatus} />
         </Field>
@@ -494,6 +623,7 @@ function Tasks(p: { project: Project }) {
   const [extra, setExtra] = createSignal<Task[]>([]),
     [cursor, setCursor] = createSignal<string | null>(null),
     [form, setForm] = createSignal<{ task?: Task; parent?: Task }>();
+  const [remove, setRemove] = createSignal<Task>();
   const a = useAction();
   createEffect(() => {
     if (data()) {
@@ -520,6 +650,27 @@ function Tasks(p: { project: Project }) {
               <small>Subtask · parent not on this page</small>
             </Show>
           </div>
+          <span>{task.assigned_to?.id || "Unassigned"}</span>
+          <Show when={!task.assigned_to}>
+            <button
+              class="button small"
+              disabled={a.busy()}
+              onClick={() =>
+                a.run(async () => {
+                  await api(
+                    `/projects/${p.project.id}/tasks/${task.id}/claim`,
+                    { method: "POST", body: {} },
+                  );
+                  await refetch();
+                })
+              }
+            >
+              Take task
+            </button>
+          </Show>
+          <button class="button small" onClick={() => setRemove(task)}>
+            Remove
+          </button>
           <Status value={task.status} />
           <button class="button small" onClick={() => setForm({ task })}>
             Edit
@@ -542,6 +693,23 @@ function Tasks(p: { project: Project }) {
   }
   return (
     <section class="panel">
+      <Show when={remove()}>
+        {(task) => (
+          <Confirm
+            title="Remove task and subtasks?"
+            message={`Remove ${task().title} and all descendants, including their linked todos.`}
+            close={() => setRemove(undefined)}
+            label="Remove task"
+            action={async () => {
+              await api(`/projects/${p.project.id}/tasks/${task().id}`, {
+                method: "DELETE",
+              });
+              setRemove(undefined);
+              await refetch();
+            }}
+          />
+        )}
+      </Show>
       <div class="section-head">
         <div>
           <h2>Tasks & subtasks</h2>
@@ -939,6 +1107,83 @@ function Entries(p: {
         </Show>
         <ErrorBox error={a.error()} />
       </Load>
+    </section>
+  );
+}
+
+function ProjectHistory(p: { id: string }) {
+  const [before, setBefore] = createSignal<number>(),
+    [snapshot, setSnapshot] = createSignal<any>();
+  const action = useAction();
+  const [versions, { refetch }] = createResource(
+    () => context() + p.id + before(),
+    () =>
+      api<{
+        items: {
+          version: number;
+          actor: { id: string };
+          action: string;
+          created_at: string;
+        }[];
+        next_before: number | null;
+      }>(
+        `/projects/${p.id}/versions` + (before() ? `?before=${before()}` : ""),
+      ),
+  );
+  return (
+    <section class="panel">
+      <h2>Version history</h2>
+      <p class="muted">
+        The last 1000 changes are retained. Current project permissions apply to
+        every snapshot.
+      </p>
+      <Load resource={versions} retry={refetch}>
+        <For each={versions()?.items}>
+          {(v) => (
+            <div class="task-row">
+              <strong>Version {v.version}</strong>
+              <span>
+                {v.action} · {v.actor.id} · {stamp(v.created_at)}
+              </span>
+              <button
+                class="button small"
+                onClick={() =>
+                  action.run(async () =>
+                    setSnapshot(
+                      await api(`/projects/${p.id}/versions/${v.version}`),
+                    ),
+                  )
+                }
+              >
+                View snapshot
+              </button>
+            </div>
+          )}
+        </For>
+        <Show when={versions()?.next_before}>
+          <button
+            class="button"
+            onClick={() => setBefore(versions()!.next_before!)}
+          >
+            Older versions
+          </button>
+        </Show>
+        <Show when={before()}>
+          <button class="text-button" onClick={() => setBefore(undefined)}>
+            Latest versions
+          </button>
+        </Show>
+      </Load>
+      <ErrorBox error={action.error()} />
+      <Show when={snapshot()}>
+        <Modal
+          title="Project snapshot"
+          wide
+          close={() => setSnapshot(undefined)}
+        >
+          <pre>{JSON.stringify(snapshot(), null, 2)}</pre>
+        </Modal>
+      </Show>
     </section>
   );
 }

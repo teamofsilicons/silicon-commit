@@ -26,7 +26,8 @@ pub fn can_patch_todo(actor: &VerifiedActor, todo: &Todo, patch: &ValidatedTodoP
     let changes_assigner_owned_fields = patch.title.is_some()
         || !patch.description.is_absent()
         || patch.assigned_to.is_some()
-        || patch.attachments.is_some();
+        || patch.attachments.is_some()
+        || !patch.project_id.is_absent();
 
     if changes_assigner_owned_fields && !is_assigner {
         return false;
@@ -54,7 +55,14 @@ pub fn can_add_todo_note(actor: &VerifiedActor, todo: &Todo) -> bool {
 /// Whether a caller may mutate one Silicon-managed project.
 #[must_use]
 pub fn can_mutate_project(actor: &VerifiedActor, project: &Project) -> bool {
-    actor.manages_projects() || project.has_participant(&actor.actor)
+    !project.details.private
+        || project.created_by.principal_id == actor.actor.principal_id
+        || project.has_participant(&actor.actor)
+        || project
+            .details
+            .tags
+            .iter()
+            .any(|tag| actor.tags.contains(tag))
 }
 
 #[cfg(test)]
@@ -107,6 +115,7 @@ mod tests {
 
     fn todo(assigner: Actor, assignee: Actor) -> Option<Todo> {
         Some(Todo {
+            project_id: None,
             id: TodoId::new(),
             organization_id: OrganizationId::from_uuid(Uuid::from_u128(100)),
             org_id: PublicOrganizationId::new("example").ok()?,

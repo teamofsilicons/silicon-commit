@@ -39,6 +39,13 @@ SELECT has_schema_privilege(:'api_role', 'commit', 'USAGE')
        AND has_function_privilege(:'api_role', 'commit.clean_testing_environment(uuid,text)', 'EXECUTE')
        AND NOT has_table_privilege(:'api_role', 'commit.testing_environments', 'DELETE')
        AND NOT has_schema_privilege(:'api_role', 'commit_private', 'USAGE')
+       AND has_table_privilege(:'api_role', 'commit.project_versions', 'SELECT, INSERT, DELETE')
+       AND has_table_privilege(:'api_role', 'commit.email_preferences', 'SELECT, INSERT, UPDATE')
+       AND has_table_privilege(:'api_role', 'commit.telemetry_events', 'INSERT')
+       AND NOT has_table_privilege(:'api_role', 'commit.telemetry_events', 'SELECT')
+       AND has_function_privilege(:'api_role', 'commit.reset_discovered_testing_environment(uuid,bigint)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.admit_contract(integer,boolean)', 'EXECUTE')
+       AND NOT has_function_privilege(:'api_role', 'commit.claim_email()', 'EXECUTE')
        AS api_grants_match
 \gset
 
@@ -112,6 +119,12 @@ SELECT has_schema_privilege(:'worker_role', 'commit', 'USAGE')
        )
        AND NOT has_table_privilege(:'worker_role', 'commit.projects', 'SELECT')
        AND NOT has_schema_privilege(:'worker_role', 'commit_private', 'USAGE')
+       AND has_table_privilege(:'worker_role', 'commit.telemetry_events', 'SELECT, UPDATE, DELETE')
+       AND NOT has_table_privilege(:'worker_role', 'commit.telemetry_events', 'INSERT')
+       AND has_function_privilege(:'worker_role', 'commit.claim_email()', 'EXECUTE')
+       AND has_function_privilege(:'worker_role', 'commit.lock_notification_access(uuid)', 'EXECUTE')
+       AND NOT has_table_privilege(:'worker_role', 'commit.email_preferences', 'SELECT')
+       AND NOT has_table_privilege(:'worker_role', 'commit.email_jobs', 'INSERT')
        AS worker_grants_match
 \gset
 

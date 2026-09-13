@@ -1,4 +1,14 @@
-# Silicon Commit backend
+# Silicon Commit
+
+[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md)
+
+```sh
+curl -fsSL https://docs.commit.teamofsilicons.com/install.sh | sh
+commit iam --json
+commit login "<IAM-SLT>"
+```
+
+Version 0.2 adds Carbon/Silicon collaboration, private projects, linked todo assignments, retained history, automatic IAM sandbox selection, email, and configurable Space Station telemetry.
 
 A SolidJS web interface is available in [frontend/](frontend/README.md), with local preview and hosting instructions.
 
@@ -66,7 +76,7 @@ make test
   request admission and timeout middleware, so a saturated API replica can
   still be observed accurately.
 - `GET /api/v1/version` reports the service build version.
-- The 24 product operations are mounted below `/api/v1` exactly as described
+- The product operations are mounted below `/api/v1` exactly as described
   by `openapi.yaml`.
 
 ## Security model
@@ -77,7 +87,7 @@ make test
 - `X-Org-ID` is matched to the verified active IAM membership. Existing
   organization, principal, membership, actor-type, and public-ID projections
   must agree exactly before any read or write.
-- Organization owners have management authority. IAM admins need explicit
+- Private project access requires invitation, matching IAM tags, or creation; ownership alone does not bypass it. Todo management retains its existing owner policy. IAM admins need explicit
   `commit.todos.manage` or `commit.projects.manage` capabilities.
 - All resource lookups are organization-qualified and return scoped absence.
 - Todo attachments are canonical HTTPS URLs from any provider. Commit stores and returns the URL list; uploads and temporary URL exchanges are outside its scope.
@@ -87,7 +97,7 @@ make test
 - Secrets, authorization headers, bodies, and provider payloads are excluded
   from telemetry.
 
-Commit has one external service dependency: Silicon IAM. Webhook delivery is direct from the worker to the stored HTTPS destination, with durable outbox retries and idempotency.
+Commit authenticates with Silicon IAM; Postmark delivers email, and optional diagnostics use a dedicated Space Station table. Webhook delivery is direct from the worker to the stored HTTPS destination, with durable outbox retries and idempotency.
 
 ## Configuration
 
@@ -101,11 +111,10 @@ enforces:
 - exactly one `sslmode=verify-full` or `ssl-mode=verify-full` parameter in each
   runtime or migrator PostgreSQL URL;
 - real IAM authentication rather than trusted headers for the API;
-- IAM credentials for the API (the worker needs no service credential).
+- IAM credentials for the API; Postmark and Space Station credentials belong only to the worker.
 
 Production API and worker deployments should use separate environment and
-secret sets. `commit-api` reads IAM configuration. `commit-worker` needs only database and
-worker settings; it delivers directly to snapshotted webhook URLs. Both processes
+secret sets. `commit-api` reads IAM configuration. `commit-worker` needs database and worker settings plus enabled delivery integrations; it delivers directly to snapshotted webhook URLs. Both processes
 retain the shared database, domain-limit, retention, provider-timeout, and
 worker-policy validation used by the application services.
 

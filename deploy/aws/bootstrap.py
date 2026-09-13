@@ -38,11 +38,11 @@ def dburl(role, password):
 
 base = {'COMMIT_ENVIRONMENT': 'production', 'COMMIT_DATABASE_MAX_CONNECTIONS': '8',
         'COMMIT_LOG': 'silicon_commit=info,tower_http=info'}
-api = {**base, **{k:v for k,v in secret.items() if k.startswith('COMMIT_')},
+api = {**base, **{k:v for k,v in secret.items() if k.startswith('COMMIT_') and k not in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY_TABLE_KEY','COMMIT_TELEMETRY_HOME']},
        'COMMIT_AUTH_MODE':'iam', 'COMMIT_BIND_ADDR':'127.0.0.1:8080',
        'COMMIT_PUBLIC_BASE_URL':'https://backend.commit.teamofsilicons.com/api/v1/',
        'COMMIT_DATABASE_URL':dburl('commit_api', secret['db_api_password'])}
-worker = {**base, 'COMMIT_DATABASE_URL':dburl('commit_worker', secret['db_worker_password'])}
+worker = {**base, **{k:v for k,v in secret.items() if k in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY','COMMIT_TELEMETRY_TABLE_KEY']}, 'COMMIT_TELEMETRY_HOME':'/var/lib/commit/telemetry', 'COMMIT_DATABASE_URL':dburl('commit_worker', secret['db_worker_password'])}
 envfile('api.env', api)
 envfile('worker.env', worker)
 envfile('migrator.env', {**base,'COMMIT_SCHEMA_OWNER':'commit_migrator',
@@ -69,6 +69,10 @@ finally:
     (root/'admin.env').unlink(missing_ok=True)
     (root/'migrator.env').unlink(missing_ok=True)
 
+telemetry_home = root / 'telemetry'
+telemetry_home.mkdir(exist_ok=True)
+os.chown(telemetry_home, 10001, 10001)
+telemetry_home.chmod(0o700)
 for name, binary in [('api','commit-api'),('worker','commit-worker')]:
     # The first deployment creates containers; subsequent invocations replace only these services.
     subprocess.run(['docker','stop','--time','30','commit-'+name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -76,9 +80,9 @@ for name, binary in [('api','commit-api'),('worker','commit-worker')]:
     run(['docker','run','-d','--name','commit-'+name,'--restart','unless-stopped',
          '--network','host','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges',
          '--log-opt','max-size=10m','--log-opt','max-file=3','--env-file',str(root/(name+'.env')),
-         '-v',str(ca)+':/rds-ca.pem:ro', image,binary])
+         *(['-v',str(telemetry_home)+':/var/lib/commit/telemetry'] if name == 'worker' else []), '-v',str(ca)+':/rds-ca.pem:ro', image,binary])
 caddy=root/'Caddyfile'
-caddy.write_text('backend.commit.teamofsilicons.com {\n    reverse_proxy 127.0.0.1:8080\n}\n')
+caddy.write_text('backend.commit.teamofsilicons.com {\n    reverse_proxy 127.0.0.1:8080\n}\n' + ((root/'docs.caddy').read_text() if (root/'docs.caddy').exists() else ''))
 caddy.chmod(0o644)
 subprocess.run(['docker','rm','-f','commit-caddy'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 run(['docker','run','-d','--name','commit-caddy','--restart','unless-stopped','--network','host',

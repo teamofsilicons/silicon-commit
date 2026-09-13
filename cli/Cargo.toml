@@ -1,6 +1,6 @@
 [package]
 name = "silicon-commit-cli"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Command-line client for Silicon Commit"
 license = "MIT"
@@ -12,11 +12,14 @@ name = "commit"
 path = "src/main.rs"
 
 [dependencies]
-silicon-commit-client = { version = "0.1.0", path = "../client" }
+silicon-commit-client = { version = "0.2.0", path = "../client" }
 clap = { version = "4.5.48", features = ["derive", "env"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 serde_json = "1.0.145"
 serde = { version = "1.0.228", features = ["derive"] }
+
+sha2 = "0.10.9"
+semver = "1.0.27"
 
 [dev-dependencies]
 wiremock = "0.6.5"

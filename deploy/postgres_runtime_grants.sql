@@ -178,12 +178,17 @@ GRANT SELECT, INSERT, DELETE
     ON TABLE commit.idempotency_records
     TO :"api_role";
 
+GRANT SELECT, INSERT ON TABLE commit.project_collaborators TO :"api_role";
+GRANT SELECT, INSERT, DELETE ON TABLE commit.project_versions TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.project_access(uuid,uuid,uuid,text[]) TO :"api_role";
+
 -- API testing and authenticated IAM event ingress.
 GRANT SELECT, INSERT, UPDATE
     ON TABLE commit.testing_environments,
              commit.testing_organizations
     TO :"api_role";
 GRANT SELECT, INSERT ON TABLE commit.iam_webhook_events TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.reset_discovered_testing_environment(uuid,bigint) TO :"api_role";
 GRANT EXECUTE ON FUNCTION commit.clean_testing_environment(uuid,text) TO :"api_role";
 
 -- Worker: webhook queue state plus one owner-defined bounded retention
@@ -250,5 +255,20 @@ GRANT USAGE
             commit.notification_scope,
             commit.notification_subscription_level
     TO :"api_role", :"worker_role";
+
+
+GRANT SELECT ON TABLE commit.contract_versions TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.admit_contract(integer,boolean) TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.sunset_idle_contracts() TO :"api_role", :"worker_role";
+
+GRANT SELECT, INSERT, UPDATE ON commit.email_preferences, commit.email_jobs TO :"api_role";
+GRANT UPDATE ON commit.email_jobs TO :"worker_role";
+GRANT SELECT (id,attempts) ON commit.email_jobs TO :"worker_role";
+GRANT EXECUTE ON FUNCTION commit.claim_email() TO :"worker_role";
+
+GRANT INSERT ON commit.telemetry_events TO :"api_role";
+GRANT SELECT, UPDATE, DELETE ON commit.telemetry_events TO :"worker_role";
+
+GRANT EXECUTE ON FUNCTION commit.lock_notification_access(uuid) TO :"worker_role";
 
 COMMIT;

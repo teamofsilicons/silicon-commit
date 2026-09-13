@@ -20,6 +20,8 @@ type Session = {
   actor: { type: string; public_id: string };
   org: string;
   environmentKey?: string;
+  environmentName?: string;
+  selectionOnly?: boolean;
 };
 export const failure = (
   status: number,
@@ -82,7 +84,12 @@ export function open(value: string, c: Config, scope: string): Session | null {
 }
 const summary = (s: Session | null) =>
   s
-    ? { authenticated: true, actor: s.actor, org_id: s.org }
+    ? {
+        authenticated: !s.selectionOnly,
+        actor: s.selectionOnly ? undefined : s.actor,
+        org_id: s.org,
+        environment_name: s.environmentName,
+      }
     : { authenticated: false };
 const sessionHeader = (s: Session, c: Config, scope: string) =>
   `${cookieName(c, scope)}=${seal(s, c, scope)}; Max-Age=${Math.max(0, Math.floor((s.deadline - Date.now()) / 1000))}${options(c)}`;
@@ -109,6 +116,7 @@ function fromTokens(
     actor: t.actor,
     org: validOrg(t.org_id) ? t.org_id : (previous?.org ?? ""),
     environmentKey,
+    environmentName: previous?.environmentName,
   };
 }
 const routes: [RegExp, string[]][] = [
@@ -120,10 +128,14 @@ const routes: [RegExp, string[]][] = [
   [/^\/projects\/[^/]+$/, ["GET", "PATCH"]],
   [/^\/projects\/[^/]+\/diary$/, ["GET", "PUT"]],
   [/^\/projects\/[^/]+\/tasks$/, ["GET", "POST"]],
-  [/^\/projects\/[^/]+\/tasks\/[^/]+$/, ["PATCH"]],
+  [/^\/projects\/[^/]+\/tasks\/[^/]+$/, ["PATCH", "DELETE"]],
+  [/^\/projects\/[^/]+\/tasks\/[^/]+\/claim$/, ["POST"]],
+  [/^\/projects\/[^/]+\/versions(?:\/[0-9]+)?$/, ["GET"]],
+  [/^\/contracts$/, ["GET"]],
   [/^\/projects\/[^/]+\/entries$/, ["GET"]],
   [/^\/projects\/[^/]+\/(blockers|updates|completion)$/, ["POST"]],
   [/^\/notification-settings$/, ["GET", "PUT"]],
+  [/^\/email-settings$/, ["GET", "PUT"]],
   [/^\/test-environments$/, ["GET", "POST"]],
   [/^\/test-environments\/[^/]+$/, ["DELETE"]],
   [/^\/test-environments\/[^/]+\/key$/, ["GET"]],
@@ -249,22 +261,73 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         h.append("set-cookie", `commit_login=; Max-Age=0${options(c)}`);
         return new Response(null, { status: 303, headers: h });
       }
+      if (path === "/auth/testing" && method === "POST") {
+        const input = await request.json();
+        if (
+          typeof input.app_secret !== "string" ||
+          !/^ask_[A-Za-z0-9_-]{43}$/.test(input.app_secret)
+        )
+          return failure(400, "Enter the IAM test application secret.");
+        const response = await upstream("/testing-context", {
+          headers: { "x-testing-app-secret": input.app_secret },
+        });
+        if (!response.ok) return response;
+        const meta = await response.json();
+        if (
+          !validScope(meta.environment_id) ||
+          meta.environment_id === "production" ||
+          typeof meta.name !== "string"
+        )
+          return failure(502, "IAM returned invalid testing metadata.");
+        const selected: Session = {
+          access: "",
+          refresh: "",
+          actor: { type: "carbon", public_id: "" },
+          org: "",
+          expires: Date.now() + 900000,
+          deadline: Date.now() + 900000,
+          environmentKey: input.app_secret,
+          environmentName: meta.name,
+          selectionOnly: true,
+        };
+        return Response.json(meta, {
+          headers: {
+            "set-cookie": sessionHeader(selected, c, meta.environment_id),
+          },
+        });
+      }
       if (path === "/auth/login" && method === "POST") {
         const b = await request.json();
         if (typeof b.slt !== "string" || !b.slt || b.slt.length > 4096)
           return failure(400, "Enter an IAM short-lived token.");
+        const selectedSecret = b.environment_key || session?.environmentKey;
         if (
           scope !== "production" &&
-          !/^[a-zA-Z0-9]{32}$/.test(b.environment_key || "")
+          !(
+            /^[a-zA-Z0-9]{32}$/.test(selectedSecret || "") ||
+            /^ask_[A-Za-z0-9_-]{43}$/.test(selectedSecret || "")
+          )
         )
-          return failure(400, "Enter the 32-character Commit test key.");
+          return failure(400, "Select a test application secret first.");
+        if (scope !== "production") {
+          const validation = await upstream("/testing-context", {
+            headers: { "x-testing-environment-key": selectedSecret },
+          });
+          if (!validation.ok) return validation;
+          const context = await validation.json();
+          if (context.environment_id !== scope)
+            return failure(
+              401,
+              "This secret belongs to another testing environment.",
+            );
+        }
         const h: Record<string, string> = {
           "content-type": "application/json",
           "idempotency-key":
             request.headers.get("idempotency-key") || crypto.randomUUID(),
         };
         if (scope !== "production")
-          h["x-testing-environment-key"] = b.environment_key;
+          h["x-testing-environment-key"] = selectedSecret;
         const r = await upstream("/auth/login", {
           method: "POST",
           headers: h,
@@ -273,14 +336,19 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         if (!r.ok) return r;
         session = fromTokens(
           await r.json(),
-          scope === "production" ? undefined : b.environment_key,
+          scope === "production" ? undefined : selectedSecret,
+          session || undefined,
         );
         return Response.json(summary(session), {
           headers: { "set-cookie": sessionHeader(session, c, scope) },
         });
       }
       if (path === "/auth/session" && method === "GET") {
-        if (session && session.expires < Date.now() + 30000)
+        if (
+          session &&
+          !session.selectionOnly &&
+          session.expires < Date.now() + 30000
+        )
           try {
             session = await refresh(session);
           } catch {
@@ -296,7 +364,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         });
       }
       if (path === "/auth/logout" && method === "POST") {
-        if (session) {
+        if (session && !session.selectionOnly) {
           const h: Record<string, string> = {
             "content-type": "application/json",
             "idempotency-key":
@@ -332,10 +400,14 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             ))
         )
           return failure(404, "This action is unavailable.");
-        if (!session && target !== "/version")
+        if ((!session || session.selectionOnly) && target !== "/version")
           return failure(401, "Sign in to continue.", "unauthenticated");
         let rotated = false;
-        if (session && session.expires < Date.now() + 30000) {
+        if (
+          session &&
+          !session.selectionOnly &&
+          session.expires < Date.now() + 30000
+        ) {
           try {
             session = await refresh(session);
             rotated = true;
@@ -348,7 +420,13 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           }
         }
         const h = new Headers();
-        for (const k of ["content-type", "idempotency-key", "if-match"]) {
+        h.set("x-commit-client", "browser");
+        for (const k of [
+          "content-type",
+          "idempotency-key",
+          "if-match",
+          "x-commit-telemetry",
+        ]) {
           const v = request.headers.get(k);
           if (v) h.set(k, v);
         }

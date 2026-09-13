@@ -10,3 +10,8 @@ target
 .DS_Store
 frontend/node_modules
 frontend/dist
+
+.work
+docs-site/node_modules
+docs-site/dist
+**/__pycache__

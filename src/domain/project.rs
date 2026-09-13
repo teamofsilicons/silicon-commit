@@ -293,14 +293,95 @@ impl FromStr for ProjectLocator {
     }
 }
 
+/// Project visibility and content supplied at creation or returned on reads.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectDetails {
+    /// Optional context, preserving Markdown formatting.
+    #[serde(default)]
+    pub description: String,
+    /// HTTPS links; Commit does not upload these files.
+    #[serde(default)]
+    pub attachments: Vec<super::AttachmentUrl>,
+    /// False means visible and editable within the organization.
+    #[serde(default)]
+    pub private: bool,
+    /// Invited Carbon IDs, in addition to Silicon participants.
+    #[serde(default)]
+    pub carbon_ids: Vec<ActorId>,
+    /// Live IAM membership tags granting access to a private project.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+impl ProjectDetails {
+    /// Bounds collections and content before persistence.
+    pub fn validate(&self, limits: &DomainLimits) -> Result<(), ValidationError> {
+        LimitedText::new(
+            "description",
+            self.description.clone(),
+            limits.description_chars,
+        )?;
+        ensure_item_count(
+            "attachments",
+            self.attachments.len(),
+            0,
+            limits.attachments_per_todo,
+        )?;
+        ensure_unique("attachments", &self.attachments)?;
+        ensure_item_count(
+            "carbon_ids",
+            self.carbon_ids.len(),
+            0,
+            limits.participants_per_project,
+        )?;
+        ensure_unique("carbon_ids", &self.carbon_ids)?;
+        ensure_item_count("tags", self.tags.len(), 0, limits.participants_per_project)?;
+        ensure_unique("tags", &self.tags)?;
+        for tag in &self.tags {
+            let value = RequiredText::new("tags", tag.clone(), 255)?;
+            if value.as_str() != tag {
+                return Err(ValidationError::invalid("tags", "tags must be trimmed"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Nested creation input; generated task IDs establish parent relationships.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSeedTask {
+    /// Task title.
+    pub title: String,
+    /// Optional task context.
+    #[serde(default)]
+    pub description: String,
+    /// Initial lifecycle state.
+    #[serde(default)]
+    pub status: TodoStatus,
+    /// Optional active Carbon or Silicon ID.
+    #[serde(default)]
+    pub assigned_to: Option<ActorId>,
+    /// Children belonging to this task, up to sixteen levels deep.
+    #[serde(default)]
+    pub subtasks: Vec<ProjectSeedTask>,
+}
+
 /// Untrusted `POST /projects` document.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectCreate {
     /// Project display name.
     pub name: String,
     /// Requested participating public Silicon IDs.
+    #[serde(default)]
     pub silicon_ids: Vec<ActorId>,
+    /// Visibility, invites and content.
+    #[serde(flatten)]
+    pub details: ProjectDetails,
+    /// Optional tasks and subtasks created atomically with the project.
+    #[serde(default)]
+    pub tasks: Vec<ProjectSeedTask>,
 }
 
 impl ProjectCreate {
@@ -310,26 +391,25 @@ impl ProjectCreate {
         limits: &DomainLimits,
         creator: &Actor,
     ) -> Result<ValidatedProjectCreate, ValidationError> {
-        if creator.actor_type != ActorType::Silicon {
-            return Err(ValidationError::invalid(
-                "actor",
-                "only a Silicon may create a project",
-            ));
+        self.details.validate(limits)?;
+        let mut details = self.details;
+        if creator.actor_type == ActorType::Carbon && !details.carbon_ids.contains(&creator.id) {
+            details.carbon_ids.push(creator.id.clone());
         }
-
+        details.validate(limits)?;
         let name = RequiredText::new("name", self.name, limits.project_name_chars)?;
         let slug = ProjectSlug::from_name(&name)
             .map_err(|error| ValidationError::invalid("name", error.to_string()))?;
         ensure_item_count(
             "silicon_ids",
             self.silicon_ids.len(),
-            1,
+            0,
             limits.participants_per_project,
         )?;
         ensure_unique("silicon_ids", &self.silicon_ids)?;
 
         let mut silicon_ids = self.silicon_ids;
-        if !silicon_ids.contains(&creator.id) {
+        if creator.actor_type == ActorType::Silicon && !silicon_ids.contains(&creator.id) {
             ensure_item_count(
                 "silicon_ids",
                 silicon_ids.len() + 1,
@@ -343,6 +423,8 @@ impl ProjectCreate {
             name,
             slug,
             silicon_ids,
+            details,
+            tasks: self.tasks,
         })
     }
 }
@@ -356,28 +438,86 @@ pub struct ValidatedProjectCreate {
     pub slug: ProjectSlug,
     /// Unique participant IDs, including the creator.
     pub silicon_ids: Vec<ActorId>,
+    /// Validated project content and access settings.
+    pub details: ProjectDetails,
+    /// Initial nested work, validated by the service before its transaction.
+    pub tasks: Vec<ProjectSeedTask>,
 }
 
 /// Untrusted `PATCH /projects/{project_id}` document.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatch {
     /// Replacement display name. It never changes the immutable slug.
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub name: Option<String>,
     /// Replacement lifecycle state. `completed` is forbidden here.
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub status: Option<ProjectStatus>,
     /// Complete replacement participant set.
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub silicon_ids: Option<Vec<ActorId>>,
+    /// Replacement project description.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    /// Replacement URL list.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attachments: Option<Vec<super::AttachmentUrl>>,
+    /// Switch organization/private visibility.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub private: Option<bool>,
+    /// Replacement invited Carbon set.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub carbon_ids: Option<Vec<ActorId>>,
+    /// Replacement IAM tag set.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tags: Option<Vec<String>>,
 }
 
 impl ProjectPatch {
     /// Reports whether no fields were provided.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.name.is_none() && self.status.is_none() && self.silicon_ids.is_none()
+        self.name.is_none()
+            && self.status.is_none()
+            && self.silicon_ids.is_none()
+            && self.description.is_none()
+            && self.attachments.is_none()
+            && self.private.is_none()
+            && self.carbon_ids.is_none()
+            && self.tags.is_none()
     }
 
     /// Validates metadata changes without mutating the immutable slug.
@@ -405,7 +545,7 @@ impl ProjectPatch {
                 ensure_item_count(
                     "silicon_ids",
                     values.len(),
-                    1,
+                    0,
                     limits.participants_per_project,
                 )?;
                 ensure_unique("silicon_ids", &values)?;
@@ -413,10 +553,23 @@ impl ProjectPatch {
             })
             .transpose()?;
 
+        ProjectDetails {
+            description: self.description.clone().unwrap_or_default(),
+            attachments: self.attachments.clone().unwrap_or_default(),
+            private: self.private.unwrap_or_default(),
+            carbon_ids: self.carbon_ids.clone().unwrap_or_default(),
+            tags: self.tags.clone().unwrap_or_default(),
+        }
+        .validate(limits)?;
         Ok(ValidatedProjectPatch {
             name,
             status: self.status,
             silicon_ids,
+            description: self.description,
+            attachments: self.attachments,
+            private: self.private,
+            carbon_ids: self.carbon_ids,
+            tags: self.tags,
         })
     }
 }
@@ -430,6 +583,16 @@ pub struct ValidatedProjectPatch {
     pub status: Option<ProjectStatus>,
     /// Validated non-empty unique participant replacement.
     pub silicon_ids: Option<Vec<ActorId>>,
+    /// Replacement project description.
+    pub description: Option<String>,
+    /// Replacement URL list.
+    pub attachments: Option<Vec<super::AttachmentUrl>>,
+    /// Switch organization/private visibility.
+    pub private: Option<bool>,
+    /// Replacement invited Carbon set.
+    pub carbon_ids: Option<Vec<ActorId>>,
+    /// Replacement IAM tag set.
+    pub tags: Option<Vec<String>>,
 }
 
 impl ValidatedProjectPatch {
@@ -441,14 +604,17 @@ impl ValidatedProjectPatch {
         if self
             .silicon_ids
             .as_ref()
-            .is_some_and(|silicon_ids| !silicon_ids.contains(creator_id))
+            .is_some_and(|ids| !ids.contains(creator_id))
+            && self
+                .carbon_ids
+                .as_ref()
+                .is_none_or(|ids| !ids.contains(creator_id))
         {
             return Err(ValidationError::invalid(
-                "silicon_ids",
-                "must include the project creator",
+                "participants",
+                "must retain the project creator",
             ));
         }
-
         Ok(())
     }
 }
@@ -478,6 +644,12 @@ pub struct Project {
     pub created_at: OffsetDateTime,
     /// Last meaningful update timestamp.
     pub updated_at: OffsetDateTime,
+    /// Visibility, invites, description and attachments.
+    pub details: ProjectDetails,
+    /// Actors who have contributed to the project.
+    pub collaborators: Vec<ActorRef>,
+    /// Latest aggregate version.
+    pub version: i64,
 }
 
 impl Project {
@@ -504,6 +676,10 @@ impl Serialize for Project {
             uid: &'a ProjectUid,
             status: ProjectStatus,
             silicon_ids: Vec<&'a ActorId>,
+            #[serde(flatten)]
+            details: &'a ProjectDetails,
+            collaborators: &'a [ActorRef],
+            version: i64,
             created_by: ActorRef,
             #[serde(with = "time::serde::rfc3339")]
             created_at: OffsetDateTime,
@@ -518,7 +694,15 @@ impl Serialize for Project {
             slug: &self.slug,
             uid: &self.uid,
             status: self.status,
-            silicon_ids: self.silicons.iter().map(|silicon| &silicon.id).collect(),
+            silicon_ids: self
+                .silicons
+                .iter()
+                .filter(|a| a.is_silicon())
+                .map(|a| &a.id)
+                .collect(),
+            details: &self.details,
+            collaborators: &self.collaborators,
+            version: self.version,
             created_by: self.created_by.public_ref(),
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -688,6 +872,9 @@ pub struct ProjectTaskCreate {
     /// Initial lifecycle status.
     #[serde(default)]
     pub status: TodoStatus,
+    /// Optional assignee public ID; omission leaves the task available to claim.
+    #[serde(default)]
+    pub assigned_to: Option<ActorId>,
 }
 
 impl ProjectTaskCreate {
@@ -697,6 +884,7 @@ impl ProjectTaskCreate {
         limits: &DomainLimits,
     ) -> Result<ValidatedProjectTaskCreate, ValidationError> {
         Ok(ValidatedProjectTaskCreate {
+            assigned_to: self.assigned_to,
             parent_task_id: self.parent_task_id,
             title: RequiredText::new("title", self.title, limits.title_chars)?,
             description: LimitedText::new(
@@ -720,6 +908,8 @@ pub struct ValidatedProjectTaskCreate {
     pub description: LimitedText,
     /// Initial status.
     pub status: TodoStatus,
+    /// Optional assignee public ID; omission leaves the task available to claim.
+    pub assigned_to: Option<ActorId>,
 }
 
 /// Untrusted project-task patch document.
@@ -735,13 +925,19 @@ pub struct ProjectTaskPatch {
     /// Replacement status.
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub status: Option<TodoStatus>,
+    /// Reassign, unassign with null, or preserve by omission.
+    #[serde(default)]
+    pub assigned_to: super::NullablePatch<ActorId>,
 }
 
 impl ProjectTaskPatch {
     /// Reports whether no change was requested.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.title.is_none() && self.description.is_none() && self.status.is_none()
+        self.title.is_none()
+            && self.description.is_none()
+            && self.status.is_none()
+            && self.assigned_to.is_absent()
     }
 
     /// Validates supplied task changes.
@@ -757,6 +953,7 @@ impl ProjectTaskPatch {
         }
 
         Ok(ValidatedProjectTaskPatch {
+            assigned_to: self.assigned_to,
             title: self
                 .title
                 .map(|value| RequiredText::new("title", value, limits.title_chars))
@@ -779,6 +976,8 @@ pub struct ValidatedProjectTaskPatch {
     pub description: Option<LimitedText>,
     /// Requested status replacement.
     pub status: Option<TodoStatus>,
+    /// Reassign, unassign with null, or preserve by omission.
+    pub assigned_to: super::NullablePatch<ActorId>,
 }
 
 /// Project-local task or subtask.
@@ -801,6 +1000,10 @@ pub struct ProjectTask {
     /// Creation timestamp.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Current assignee, when claimed or delegated.
+    pub assigned_to: Option<ActorRef>,
+    /// Todo sharing this task's work and lifecycle.
+    pub todo_id: Option<super::TodoId>,
 }
 
 /// Project entry discriminator.

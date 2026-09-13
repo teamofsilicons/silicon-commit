@@ -5,6 +5,8 @@
 //! IAM, applies authorization against locked project state, and commits each
 //! mutation with its audit and (where contracted) replay record.
 
+mod collaboration;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -71,8 +73,7 @@ impl ProjectService {
         query: ProjectQuery,
     ) -> Result<ProjectPage, AppError> {
         let limit = usize::from(query.limit.get());
-        let mut projects =
-            postgres::list_projects(&self.pool, actor.organization_id, &query).await?;
+        let mut projects = postgres::list_projects(&self.pool, actor, &query).await?;
         let has_next_page = projects.len() > limit;
         if has_next_page {
             projects.truncate(limit);
@@ -99,9 +100,13 @@ impl ProjectService {
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<Project, AppError> {
-        postgres::get_project(&self.pool, actor.organization_id, locator)
+        let project = postgres::get_project(&self.pool, actor.organization_id, locator)
             .await?
-            .ok_or(AppError::NotFound)
+            .ok_or(AppError::NotFound)?;
+        if !super::authorization::can_mutate_project(actor, &project) {
+            return Err(AppError::NotFound);
+        }
+        Ok(project)
     }
 
     /// Creates a Silicon-owned project exactly once for an idempotency scope.
@@ -127,14 +132,18 @@ impl ProjectService {
         if let Some(response) = self.probe_replay(actor, &identity).await? {
             return Ok(response);
         }
-        if !actor.actor.is_silicon() {
-            return Err(AppError::Forbidden);
-        }
 
         let command = request
             .validate(&self.limits, &actor.actor)
             .map_err(validation_error)?;
-        let participants = self.resolve_silicons(actor, &command.silicon_ids).await?;
+        let mut participants = self
+            .resolve_members(actor, &command.silicon_ids, ActorType::Silicon)
+            .await?;
+        participants.extend(
+            self.resolve_members(actor, &command.details.carbon_ids, ActorType::Carbon)
+                .await?,
+        );
+        let seeds = self.prepare_seed_tasks(actor, &command.tasks).await?;
 
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
@@ -159,7 +168,7 @@ impl ProjectService {
         .await?;
         let uid = ProjectUid::new(&command.slug, &actor.actor.id, created_at);
         let project_id = crate::domain::ProjectId::new();
-        let project = postgres::insert_project(
+        let mut project = postgres::insert_project(
             &mut transaction,
             actor,
             project_id,
@@ -169,7 +178,19 @@ impl ProjectService {
             &participants,
         )
         .await?;
-        let response = created_response(&project, 201)?;
+        for (task_id, command, assignee) in seeds {
+            postgres::insert_task(&mut transaction, actor, project_id, task_id, &command).await?;
+            if let Some(assignee) = assignee {
+                self.assign_task(
+                    &mut transaction,
+                    actor,
+                    project_id,
+                    task_id,
+                    Some(&assignee),
+                )
+                .await?;
+            }
+        }
 
         postgres::insert_audit(
             &mut transaction,
@@ -182,6 +203,11 @@ impl ProjectService {
             self.audit_retention,
         )
         .await?;
+        project =
+            postgres::fetch_project_by_id(&mut transaction, actor.organization_id, project.id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+        let response = created_response(&project, 201)?;
         postgres::save_idempotency(
             &mut transaction,
             actor,
@@ -223,13 +249,50 @@ impl ProjectService {
 
         let command = request.validate(&self.limits).map_err(validation_error)?;
         let authorization_snapshot = self.authorize_existing_project(actor, locator).await?;
-        command
-            .ensure_creator_participates(&authorization_snapshot.created_by.id)
-            .map_err(validation_error)?;
         ensure_project_remains_terminal(authorization_snapshot.status, &command)?;
-        let participants = match command.silicon_ids.as_ref() {
-            Some(ids) => Some(self.resolve_silicons(actor, ids).await?),
-            None => None,
+        let participants = if command.silicon_ids.is_some() || command.carbon_ids.is_some() {
+            let silicon_ids = command.silicon_ids.clone().unwrap_or_else(|| {
+                authorization_snapshot
+                    .silicons
+                    .iter()
+                    .filter(|a| a.is_silicon())
+                    .map(|a| a.id.clone())
+                    .collect()
+            });
+            let carbon_ids = command
+                .carbon_ids
+                .clone()
+                .unwrap_or_else(|| authorization_snapshot.details.carbon_ids.clone());
+            let creator_ids = if authorization_snapshot.created_by.is_silicon() {
+                &silicon_ids
+            } else {
+                &carbon_ids
+            };
+            if !creator_ids.contains(&authorization_snapshot.created_by.id) {
+                return Err(field_validation(
+                    "participants",
+                    "must retain the project creator",
+                ));
+            }
+            let mut members = self
+                .resolve_members(actor, &silicon_ids, ActorType::Silicon)
+                .await?;
+            members.extend(
+                self.resolve_members(actor, &carbon_ids, ActorType::Carbon)
+                    .await?,
+            );
+            if !members
+                .iter()
+                .any(|m| m.actor.principal_id == authorization_snapshot.created_by.principal_id)
+            {
+                return Err(field_validation(
+                    "participants",
+                    "must retain the project creator",
+                ));
+            }
+            Some(members)
+        } else {
+            None
         };
 
         let mut transaction = self.pool.begin().await?;
@@ -251,7 +314,7 @@ impl ProjectService {
             }
         }
 
-        let project = postgres::update_project(
+        let _project = postgres::update_project(
             &mut transaction,
             actor,
             locked_project,
@@ -260,7 +323,6 @@ impl ProjectService {
         )
         .await?;
         let project_id = locked_project.id;
-        let response = created_response(&project, 200)?;
         postgres::insert_audit(
             &mut transaction,
             actor,
@@ -277,6 +339,11 @@ impl ProjectService {
             self.audit_retention,
         )
         .await?;
+        let project =
+            postgres::fetch_project_by_id(&mut transaction, actor.organization_id, project_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+        let response = created_response(&project, 200)?;
         postgres::save_idempotency(
             &mut transaction,
             actor,
@@ -301,11 +368,7 @@ impl ProjectService {
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<Diary, AppError> {
-        let mut connection = self.pool.acquire().await?;
-        let project_id = postgres::find_project_id(&mut connection, actor.organization_id, locator)
-            .await?
-            .ok_or(AppError::NotFound)?;
-        drop(connection);
+        let project_id = self.get_project(actor, locator).await?.id;
         postgres::get_diary(&self.pool, actor.organization_id, project_id)
             .await?
             .ok_or_else(|| {
@@ -388,11 +451,7 @@ impl ProjectService {
         query: CollectionQuery,
     ) -> Result<Page<ProjectTask>, AppError> {
         let limit = query.limit;
-        let mut connection = self.pool.acquire().await?;
-        let project_id = postgres::find_project_id(&mut connection, actor.organization_id, locator)
-            .await?
-            .ok_or(AppError::NotFound)?;
-        drop(connection);
+        let project_id = self.get_project(actor, locator).await?.id;
         let tasks =
             postgres::list_tasks(&self.pool, actor.organization_id, project_id, query).await?;
         Ok(Page::from_window(tasks, limit, |task| {
@@ -413,11 +472,7 @@ impl ProjectService {
         query: CollectionQuery,
     ) -> Result<Page<ProjectEntry>, AppError> {
         let limit = query.limit;
-        let mut connection = self.pool.acquire().await?;
-        let project_id = postgres::find_project_id(&mut connection, actor.organization_id, locator)
-            .await?
-            .ok_or(AppError::NotFound)?;
-        drop(connection);
+        let project_id = self.get_project(actor, locator).await?.id;
         let entries =
             postgres::list_entries(&self.pool, actor.organization_id, project_id, query).await?;
         Ok(Page::from_window(entries, limit, |entry| {
@@ -452,6 +507,9 @@ impl ProjectService {
         }
         let command = request.validate(&self.limits).map_err(validation_error)?;
 
+        let assignee = self
+            .resolve_task_assignee(actor, command.assigned_to.as_ref())
+            .await?;
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
@@ -481,8 +539,19 @@ impl ProjectService {
         }
 
         let task_id = ProjectTaskId::new();
-        let task =
-            postgres::insert_task(&mut transaction, actor, project_id, task_id, &command).await?;
+        postgres::insert_task(&mut transaction, actor, project_id, task_id, &command).await?;
+        if let Some(assignee) = &assignee {
+            self.assign_task(&mut transaction, actor, project_id, task_id, Some(assignee))
+                .await?;
+        }
+        let task = postgres::fetch_task_by_id(
+            &mut transaction,
+            actor.organization_id,
+            project_id,
+            task_id,
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
         let response = created_response(&task, 201)?;
         postgres::insert_audit(
             &mut transaction,
@@ -527,16 +596,70 @@ impl ProjectService {
     ) -> Result<ProjectTask, AppError> {
         validate_request_id(request_id)?;
         let command = request.validate(&self.limits).map_err(validation_error)?;
+        let assignment = match &command.assigned_to {
+            crate::domain::NullablePatch::Value(id) => {
+                Some(self.resolve_task_assignee(actor, Some(id)).await?)
+            }
+            crate::domain::NullablePatch::Null => Some(None),
+            crate::domain::NullablePatch::Absent => None,
+        };
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let project_id = self
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?
             .id;
+        let previous = postgres::fetch_task_by_id(
+            &mut transaction,
+            actor.organization_id,
+            project_id,
+            task_id,
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
         postgres::upsert_verified_actor(&mut transaction, actor).await?;
+        if let Some(assignee) = &assignment {
+            self.assign_task(
+                &mut transaction,
+                actor,
+                project_id,
+                task_id,
+                assignee.as_ref(),
+            )
+            .await?;
+        }
         let task = postgres::update_task(&mut transaction, actor, project_id, task_id, &command)
             .await?
             .ok_or(AppError::NotFound)?;
+        if let Some(todo_id) = task.todo_id {
+            let todo = crate::infrastructure::postgres::todos::lock_todo(
+                &mut transaction,
+                actor.organization_id,
+                todo_id,
+            )
+            .await?
+            .ok_or(AppError::NotFound)?;
+            if todo.should_notify_assigner() {
+                let status_changed = previous.status != task.status;
+                let event = if previous.assigned_to != task.assigned_to {
+                    "todo.reassigned"
+                } else if status_changed {
+                    "todo.status_changed"
+                } else {
+                    "todo.updated"
+                };
+                crate::application::todos::enqueue_notification(
+                    &mut transaction,
+                    actor,
+                    &todo,
+                    event,
+                    request_id,
+                    json!({"project_id":project_id,"task_id":task_id}),
+                    status_changed.then_some(task.status),
+                )
+                .await?;
+            }
+        }
         postgres::insert_audit(
             &mut transaction,
             actor,
@@ -548,7 +671,8 @@ impl ProjectService {
                 "project_id": project_id,
                 "title_changed": command.title.is_some(),
                 "description_changed": command.description.is_some(),
-                "status_changed": command.status.is_some(),
+                "status_changed": previous.status != task.status,
+                "assignment_changed": previous.assigned_to != task.assigned_to,
             }),
             self.audit_retention,
         )
@@ -767,13 +891,7 @@ impl ProjectService {
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<Project, AppError> {
-        let project = postgres::get_project(&self.pool, actor.organization_id, locator)
-            .await?
-            .ok_or(AppError::NotFound)?;
-        let participates = project.has_participant(&actor.actor);
-        if !has_project_authority(actor, participates) {
-            return Err(AppError::Forbidden);
-        }
+        let project = self.get_project(actor, locator).await?;
         Ok(project)
     }
 
@@ -786,15 +904,8 @@ impl ProjectService {
         let project = postgres::lock_project(connection, actor.organization_id, locator)
             .await?
             .ok_or(AppError::NotFound)?;
-        let participates = postgres::is_active_participant(
-            connection,
-            actor.organization_id,
-            project.id,
-            &actor.actor,
-        )
-        .await?;
-        if !has_project_authority(actor, participates) {
-            return Err(AppError::Forbidden);
+        if !postgres::can_access(connection, actor, project.id).await? {
+            return Err(AppError::NotFound);
         }
         Ok(project)
     }
@@ -811,23 +922,22 @@ impl ProjectService {
         Ok(response)
     }
 
-    async fn resolve_silicons(
+    async fn resolve_members(
         &self,
         actor: &VerifiedActor,
         silicon_ids: &[ActorId],
+        kind: ActorType,
     ) -> Result<Vec<ActiveMember>, AppError> {
         let lookup_ids = silicon_ids
             .iter()
-            .filter(|silicon_id| {
-                actor.actor.actor_type != ActorType::Silicon || &actor.actor.id != *silicon_id
-            })
+            .filter(|silicon_id| actor.actor.actor_type != kind || &actor.actor.id != *silicon_id)
             .cloned()
             .collect::<Vec<_>>();
         let resolved = if lookup_ids.is_empty() {
             Vec::new()
         } else {
             self.identity_provider
-                .resolve_active_members(&actor.org_id, &lookup_ids, Some(ActorType::Silicon))
+                .resolve_active_members(&actor.org_id, &lookup_ids, Some(kind))
                 .await
                 .map_err(directory_error)?
         };
@@ -839,7 +949,7 @@ impl ProjectService {
         let mut resolved_by_id = HashMap::with_capacity(resolved.len());
         for member in resolved {
             if !expected_ids.contains(&member.actor.id)
-                || !valid_resolved_silicon(actor, &member.actor.id, &member)
+                || !valid_resolved_member(actor, &member.actor.id, &member, kind)
                 || resolved_by_id
                     .insert(member.actor.id.clone(), member)
                     .is_some()
@@ -856,21 +966,20 @@ impl ProjectService {
         let mut membership_ids = HashSet::with_capacity(silicon_ids.len());
 
         for silicon_id in silicon_ids {
-            let member =
-                if actor.actor.actor_type == ActorType::Silicon && actor.actor.id == *silicon_id {
-                    ActiveMember {
-                        organization_id: actor.organization_id,
-                        org_id: actor.org_id.clone(),
-                        membership_id: actor.membership_id,
-                        actor: actor.actor.clone(),
-                    }
-                } else {
-                    resolved_by_id
-                        .remove(silicon_id)
-                        .ok_or(AppError::BadGateway)?
-                };
+            let member = if actor.actor.actor_type == kind && actor.actor.id == *silicon_id {
+                ActiveMember {
+                    organization_id: actor.organization_id,
+                    org_id: actor.org_id.clone(),
+                    membership_id: actor.membership_id,
+                    actor: actor.actor.clone(),
+                }
+            } else {
+                resolved_by_id
+                    .remove(silicon_id)
+                    .ok_or(AppError::BadGateway)?
+            };
 
-            if !valid_resolved_silicon(actor, silicon_id, &member) {
+            if !valid_resolved_member(actor, silicon_id, &member, kind) {
                 return Err(AppError::BadGateway);
             }
             if !principal_ids.insert(member.actor.principal_id)
@@ -885,22 +994,24 @@ impl ProjectService {
     }
 }
 
-fn valid_resolved_silicon(
+fn valid_resolved_member(
     caller: &VerifiedActor,
     expected_actor_id: &ActorId,
     member: &ActiveMember,
+    kind: ActorType,
 ) -> bool {
     member.organization_id == caller.organization_id
         && member.org_id == caller.org_id
-        && member.actor.actor_type == ActorType::Silicon
+        && member.actor.actor_type == kind
         && member.actor.id == *expected_actor_id
         && !member.organization_id.as_uuid().is_nil()
         && !member.membership_id.is_nil()
         && !member.actor.principal_id.as_uuid().is_nil()
 }
 
+#[cfg(test)]
 fn has_project_authority(actor: &VerifiedActor, participates: bool) -> bool {
-    actor.manages_projects() || (actor.actor.is_silicon() && participates)
+    actor.manages_projects() || participates
 }
 
 fn ensure_project_remains_terminal(
@@ -1002,28 +1113,16 @@ fn locator_value(locator: &ProjectLocator) -> String {
 }
 
 fn project_create_fingerprint(request: &ProjectCreate) -> Value {
-    json!({
-        "name": request.name,
-        "silicon_ids": request.silicon_ids,
-    })
+    serde_json::to_value(request).unwrap_or(Value::Null)
 }
 
 fn project_patch_fingerprint(request: &ProjectPatch) -> Value {
-    let mut object = Map::new();
-    if let Some(name) = &request.name {
-        object.insert("name".to_owned(), json!(name));
-    }
-    if let Some(status) = request.status {
-        object.insert("status".to_owned(), json!(status));
-    }
-    if let Some(silicon_ids) = &request.silicon_ids {
-        object.insert("silicon_ids".to_owned(), json!(silicon_ids));
-    }
-    Value::Object(object)
+    serde_json::to_value(request).unwrap_or(Value::Null)
 }
 
 fn project_task_create_fingerprint(request: &ProjectTaskCreate) -> Value {
     json!({
+        "assigned_to": request.assigned_to,
         "parent_task_id": request.parent_task_id,
         "title": request.title,
         "description": request.description,
@@ -1059,7 +1158,7 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{project_patch_fingerprint, valid_resolved_silicon, validate_request_id};
+    use super::{project_patch_fingerprint, valid_resolved_member, validate_request_id};
     use crate::{
         application::ports::{
             ActiveMember, CapabilitySet, InboundCredential, OrganizationRole,
@@ -1145,13 +1244,23 @@ mod tests {
                 actor_id.clone(),
             ),
         };
-        assert!(valid_resolved_silicon(&caller, &actor_id, &valid_member));
+        assert!(valid_resolved_member(
+            &caller,
+            &actor_id,
+            &valid_member,
+            ActorType::Silicon
+        ));
 
         let nil_membership = ActiveMember {
             membership_id: Uuid::nil(),
             ..valid_member.clone()
         };
-        assert!(!valid_resolved_silicon(&caller, &actor_id, &nil_membership));
+        assert!(!valid_resolved_member(
+            &caller,
+            &actor_id,
+            &nil_membership,
+            ActorType::Silicon
+        ));
 
         let nil_principal = ActiveMember {
             actor: Actor::new(
@@ -1161,6 +1270,11 @@ mod tests {
             ),
             ..valid_member
         };
-        assert!(!valid_resolved_silicon(&caller, &actor_id, &nil_principal));
+        assert!(!valid_resolved_member(
+            &caller,
+            &actor_id,
+            &nil_principal,
+            ActorType::Silicon
+        ));
     }
 }
