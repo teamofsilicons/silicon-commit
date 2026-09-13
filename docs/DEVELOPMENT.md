@@ -15,7 +15,7 @@ Use a stable `Mutation::with_key` across retries. Expect 404 for inaccessible pr
 
 The backend is Rust/Axum/PostgreSQL. Run the database migrations before the API or worker. Keep runtime roles separate from migration authority. `cargo test --workspace --all-targets` runs unit, HTTP, client and CLI tests; set `COMMIT_TEST_DATABASE_URL` to a disposable Postgres 16 database to include transactional tests. The browser gateway keeps tokens in encrypted HttpOnly cookies with independent production and sandbox sessions.
 
-Telemetry and Space Station integration are intentionally outside this implementation. Bug reports can be submitted directly to the source repository through `commit report` using the GitHub CLI, or saved locally with `--save-only`.
+Diagnostics use the dedicated Space Station table through the worker; clients can opt out per request. `commit report` submits a report through the Rust client and Commit API for Postmark delivery. Attach a source PR with `--pr`, or keep a local draft with `--save-only`.
 
 ## Deployment settings
 

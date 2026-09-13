@@ -68,7 +68,7 @@ Verify `/healthz`, `/readyz`, `/api/v1/version`, IAM login/refresh/revocation,
 worker logs, database grants, and DNS after every rollout. An image rollback does
 not undo database migrations; review schema compatibility first.
 
-## Known integration gaps at deployment
+## Historical integration gaps (September 8)
 
 The API uses `https://backend.iam.teamofsilicons.com/api/v1/` and
 `POST /oauth/introspect`. Current authorization snapshots authenticate requests
@@ -91,5 +91,4 @@ are not treated as Commit management capabilities.
    `https://backend.commit.teamofsilicons.com/webhook/`. An eligible IAM operator
    must perform verified step-up approval. The existing signing secret is deployed.
 
-These gaps mean that live infrastructure is not a claim of complete application
-readiness. See `verification-2026-09-08.md` for the checks actually performed.
+The following release adds current IAM directory usage and automatic sandbox discovery. See [the September 13 release verification](verification-2026-09-13.md) for the deployed behavior, checks, and remaining verification boundaries. The September 8 report remains historical evidence.
