@@ -58,3 +58,14 @@ commit report 'Draft reproduction details' --save-only
 ```
 
 Email preferences belong to the selected organization and identity. Use the email you use in that organization; Commit never falls back to the personal Carbon address. Reports require a signed-in organization context and queue Postmark delivery to the maintainers. They accept an optional fix PR; `--save-only` writes a private local draft. Do not put tokens or secrets in report text. Test reports are simulated. See [notifications](NOTIFICATIONS.md).
+
+## Creating and assigning todos
+
+Todo creation requires `title` and `assigned_to` strings. Use the recipient's public IAM ID from your team, including the organization suffix for a Silicon.
+
+```sh
+commit todos create --data '{"title":"Eat","assigned_to":"alex"}'
+commit todos create --data '{"title":"Eat","assigned_to":"assistant:example-org"}'
+```
+
+`--data @file.json` accepts the same object. Optional fields are `description`, `status`, `attachments`, and `project_id`; run `commit todos create --help` for types and values. `assignee` and `assignee_id` are not supported. The CLI rejects these fields and missing or non-string required fields before making a request. Other validation remains on the server; a 422 error retains its request ID and points to the command's schema help. Errors go to stderr with a nonzero exit status.

@@ -9,6 +9,7 @@ use std::{fs, path::PathBuf};
 #[derive(Parser)]
 #[command(
     name = "commit",
+    bin_name = "commit",
     version,
     about = "Silicon Commit work manager",
     after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test APP_SECRET for a sandbox. Install the hourly updater with commit daemon install.\nRun commit <command> --help for arguments and subcommands."
@@ -20,7 +21,7 @@ struct Root {
         help = "Commit API origin or /api/v1 URL"
     )]
     api_url: Option<String>,
-    #[arg(long, env = "COMMIT_ACCESS_TOKEN")]
+    #[arg(long, env = "COMMIT_ACCESS_TOKEN", hide_env_values = true)]
     token: Option<String>,
     #[arg(long, env = "COMMIT_ORG_ID")]
     org_id: Option<String>,
@@ -28,6 +29,7 @@ struct Root {
         long,
         global = true,
         env = "COMMIT_TEST_KEY",
+        hide_env_values = true,
         help = "IAM test app_secret; selects a sandbox without an IAM root key"
     )]
     test: Option<String>,
@@ -190,7 +192,10 @@ enum TodoCommand {
     List(TodoList),
     /// Fetch a resource by its public ID.
     Get { id: String },
-    /// Create a resource using --data JSON or @FILE.
+    /// Create a todo. Requires title and assigned_to in --data JSON or @FILE.
+    #[command(
+        after_help = "Required fields:\n  title: string\n  assigned_to: public IAM ID string (Carbon or Silicon from your team)\n\nOptional fields:\n  description: string or null\n  status: yet_to_do (default), in_progress, blocked, completed, canceled\n  attachments: array of HTTPS URL strings\n\nExamples:\n  commit todos create --data '{\"title\":\"Eat\",\"assigned_to\":\"alex\"}'\n  commit todos create --data '{\"title\":\"Eat\",\"assigned_to\":\"assistant:example-org\"}'\n\nUse assigned_to, not assignee_id or assignee. Unknown fields are rejected."
+    )]
     Create(Data),
     /// Update a resource using --data JSON or @FILE.
     Update {
@@ -359,6 +364,25 @@ fn parse_data(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
         .unwrap_or_else(|| input.to_owned());
     Ok(serde_json::from_str(&text)?)
 }
+// Check the required creation shape without duplicating server-side business limits.
+fn parse_todo_create(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let value = parse_data(input)?;
+    let object = value.as_object().ok_or(
+        "todos create requires a JSON object with title and assigned_to; run commit todos create --help",
+    )?;
+    if object.contains_key("assignee_id") || object.contains_key("assignee") {
+        return Err("todo not created: use assigned_to as a public IAM ID string, not assignee_id or assignee; example: {\"title\":\"Eat\",\"assigned_to\":\"alex\"}".into());
+    }
+    for field in ["title", "assigned_to"] {
+        if !object.get(field).is_some_and(Value::is_string) {
+            return Err(format!(
+                "todo not created: {field} is required and must be a string; run commit todos create --help"
+            ).into());
+        }
+    }
+    Ok(value)
+}
+
 fn session_path() -> PathBuf {
     configured_home_dir()
         .unwrap_or_else(default_home_dir)
@@ -657,7 +681,17 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
                 c.list_todos(&params).await?
             }
             TodoCommand::Get { id } => c.get_todo(&id).await?,
-            TodoCommand::Create(d) => c.create_todo(&parse_data(&d.data)?).await?,
+            TodoCommand::Create(d) => {
+                let payload = parse_todo_create(&d.data)?;
+                match c.create_todo(&payload).await {
+                    Err(ref error @ silicon_commit_client::Error::Api { ref status, .. })
+                        if status.as_u16() == 422 =>
+                    {
+                        return Err(format!("{error}; todo not created. Check the fields and values against commit todos create --help; required fields are title and assigned_to.").into());
+                    }
+                    result => result?,
+                }
+            }
             TodoCommand::Update { id, data } => {
                 c.update_todo(&id, &parse_data(&data.data)?).await?
             }
