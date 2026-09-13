@@ -83,10 +83,7 @@ test("CSRF and route allowlist reject requests before contacting upstream", asyn
     403,
   );
   assert.equal((await g(req("/api/admin/secrets"))).status, 404);
-  assert.equal(
-    (await g(req("/api/projects/id/tasks/id", "DELETE"))).status,
-    404,
-  );
+  assert.equal((await g(req("/api/projects/id/tasks/id", "PUT"))).status, 404);
   assert.equal(calls, 0);
 });
 test("cookies cannot be tampered with or reused across testing scopes", async () => {
@@ -334,4 +331,43 @@ test("organization discovery uses the session bearer without caller organization
   assert.equal(r.status, 200);
   assert.deepEqual(await r.json(), ["selected-team", "test-team"]);
   assert.equal(calls, 1);
+});
+
+test("automatic sandbox selection encrypts its secret and never replaces production", async () => {
+  const key = "ask_" + "a".repeat(43);
+  let calls = 0;
+  const g = gateway((url, init) => {
+    calls++;
+    assert.equal(url.pathname, "/api/v1/testing-context");
+    assert.equal(new Headers(init.headers).get("x-testing-app-secret"), key);
+    return Response.json({
+      testing: true,
+      environment_id: scope,
+      name: "Release sandbox",
+    });
+  });
+  const r = await g(
+    req("/auth/testing", "POST", { app_secret: key }, { cookie: cookie() }),
+  );
+  assert.equal(r.status, 200);
+  const body = await r.text();
+  assert.ok(!body.includes(key));
+  const selected = r.headers.get("set-cookie")!;
+  assert.ok(selected.startsWith("__Host-commit_" + scope + "="));
+  assert.ok(!selected.includes(key));
+  const selectedCookie = selected.split(";")[0];
+  const status = await g(
+    req("/auth/session", "GET", undefined, {
+      cookie: selectedCookie,
+      "x-commit-environment": scope,
+    }),
+  );
+  assert.equal((await status.json()).authenticated, false);
+  assert.equal(calls, 1);
+  const prod = await g(
+    req("/auth/session", "GET", undefined, {
+      cookie: cookie() + "; " + selectedCookie,
+    }),
+  );
+  assert.equal((await prod.json()).authenticated, true);
 });

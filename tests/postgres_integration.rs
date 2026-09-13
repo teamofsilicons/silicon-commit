@@ -552,6 +552,7 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
         Uuid::new_v4().simple()
     );
     let request = TodoCreate {
+        project_id: None,
         title: "Prepare launch review".to_owned(),
         description: Some("Preserve this formatting.\n\n- first\n- second".to_owned()),
         assigned_to: assignee.actor.id.clone(),
@@ -704,6 +705,7 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
             &assignee,
             todo_id,
             TodoPatch {
+                project_id: NullablePatch::Absent,
                 title: None,
                 description: NullablePatch::Absent,
                 assigned_to: None,
@@ -1033,6 +1035,7 @@ async fn notification_settings_drive_effective_routing_and_immutable_snapshots()
         .create(
             &delegating_silicon,
             TodoCreate {
+                project_id: None,
                 title: "Exercise notification routing".to_owned(),
                 description: None,
                 assigned_to: assignee.actor.id.clone(),
@@ -1351,6 +1354,11 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
         AUDIT_RETENTION,
     );
     let request = ProjectCreate {
+        details: silicon_commit::domain::project::ProjectDetails {
+            private: true,
+            ..Default::default()
+        },
+        tasks: Vec::new(),
         name: "Ship the Commit backend".to_owned(),
         silicon_ids: vec![creator.actor.id.clone()],
     };
@@ -1383,6 +1391,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
         .create_project(
             &creator,
             ProjectCreate {
+                details: silicon_commit::domain::project::ProjectDetails::default(),
+                tasks: Vec::new(),
                 name: "A different project".to_owned(),
                 silicon_ids: request.silicon_ids,
             },
@@ -1401,6 +1411,11 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &outsider,
             &locator,
             ProjectPatch {
+                description: None,
+                attachments: None,
+                private: None,
+                carbon_ids: None,
+                tags: None,
                 name: Some("Unauthorized name".to_owned()),
                 status: None,
                 silicon_ids: None,
@@ -1409,13 +1424,18 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             "req-project-forbidden",
         )
         .await;
-    assert!(matches!(forbidden, Err(AppError::Forbidden)));
+    assert!(matches!(forbidden, Err(AppError::NotFound)));
 
     let creator_removal = service
         .update_project(
             &creator,
             &locator,
             ProjectPatch {
+                description: None,
+                attachments: None,
+                private: None,
+                carbon_ids: None,
+                tags: None,
                 name: None,
                 status: None,
                 silicon_ids: Some(vec![outsider.actor.id.clone()]),
@@ -1426,7 +1446,7 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
         .await;
     assert!(matches!(
         creator_removal,
-        Err(AppError::Validation { ref details }) if details.get("silicon_ids").is_some()
+        Err(AppError::Validation { ref details }) if details.get("participants").is_some()
     ));
 
     let mut creator_removal_transaction = pool.begin().await?;
@@ -1457,6 +1477,11 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &creator,
             &locator,
             ProjectPatch {
+                description: None,
+                attachments: None,
+                private: None,
+                carbon_ids: None,
+                tags: None,
                 name: Some("Ship the production Commit backend".to_owned()),
                 status: Some(ProjectStatus::InProgress),
                 silicon_ids: None,
@@ -1502,6 +1527,7 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
     ));
 
     let task_request = ProjectTaskCreate {
+        assigned_to: None,
         parent_task_id: None,
         title: "Deploy PostgreSQL migrations".to_owned(),
         description: "Apply all forward-only migrations.".to_owned(),
@@ -1534,6 +1560,7 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &locator,
             task_id,
             ProjectTaskPatch {
+                assigned_to: NullablePatch::Absent,
                 title: None,
                 description: None,
                 status: Some(TodoStatus::Completed),
@@ -1547,6 +1574,7 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &creator,
             &locator,
             ProjectTaskCreate {
+                assigned_to: None,
                 parent_task_id: Some(task_id),
                 title: "Verify the migrated schema".to_owned(),
                 description: "Run the PostgreSQL integration gate.".to_owned(),
@@ -1624,7 +1652,7 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
 
     let first_entries = service
         .list_entries(
-            &outsider,
+            &creator,
             &locator,
             CollectionQuery {
                 limit: PageLimit::new(1)?,
@@ -1667,6 +1695,11 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &creator,
             &locator,
             ProjectPatch {
+                description: None,
+                attachments: None,
+                private: None,
+                carbon_ids: None,
+                tags: None,
                 name: None,
                 status: Some(ProjectStatus::InProgress),
                 silicon_ids: None,
@@ -1799,6 +1832,8 @@ async fn project_retries_replay_after_participation_is_revoked() -> anyhow::Resu
         .create_project(
             &creator,
             ProjectCreate {
+                details: silicon_commit::domain::project::ProjectDetails::default(),
+                tasks: Vec::new(),
                 name: "Replay authorization boundary".to_owned(),
                 silicon_ids: vec![creator.actor.id.clone(), participant.actor.id.clone()],
             },
@@ -1810,6 +1845,11 @@ async fn project_retries_replay_after_participation_is_revoked() -> anyhow::Resu
     let locator = ProjectLocator::Id(project_id);
 
     let patch_request = ProjectPatch {
+        description: None,
+        attachments: None,
+        private: None,
+        carbon_ids: None,
+        tags: None,
         name: Some("Replay authorization boundary updated".to_owned()),
         status: Some(ProjectStatus::InProgress),
         silicon_ids: None,
@@ -1826,6 +1866,7 @@ async fn project_retries_replay_after_participation_is_revoked() -> anyhow::Resu
         .await?;
 
     let task_request = ProjectTaskCreate {
+        assigned_to: None,
         parent_task_id: None,
         title: "Persist retry response".to_owned(),
         description: "The response survives mutable authorization.".to_owned(),
@@ -1893,6 +1934,11 @@ async fn project_retries_replay_after_participation_is_revoked() -> anyhow::Resu
             &creator,
             &locator,
             ProjectPatch {
+                description: None,
+                attachments: None,
+                private: None,
+                carbon_ids: None,
+                tags: None,
                 name: None,
                 status: None,
                 silicon_ids: Some(vec![creator.actor.id.clone()]),
@@ -1914,7 +1960,10 @@ async fn project_retries_replay_after_participation_is_revoked() -> anyhow::Resu
             "req-project-new-task-after-revocation",
         )
         .await;
-    assert!(matches!(unauthorized_new_task, Err(AppError::Forbidden)));
+    assert!(
+        unauthorized_new_task.is_ok(),
+        "public projects are collaborative across the organization"
+    );
 
     let patch_replay = service
         .update_project(
@@ -2591,5 +2640,320 @@ async fn seed_identity(pool: &PgPool, actor: &VerifiedActor) -> anyhow::Result<(
         bail!("test identity attempts to remap an existing actor");
     }
     transaction.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn collaborative_projects_keep_private_work_history_and_claims_scoped() -> anyhow::Result<()>
+{
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let org = TestOrganization::unique("collaboration")?;
+    let creator = org.actor("alice", ActorType::Carbon, OrganizationRole::Member)?;
+    let worker = org.actor("worker", ActorType::Silicon, OrganizationRole::Member)?;
+    let outsider = org.actor("outsider", ActorType::Carbon, OrganizationRole::Owner)?;
+    let tagged = org
+        .actor("tagged", ActorType::Carbon, OrganizationRole::Member)?
+        .with_tags(["engineering".to_owned()].into());
+    let identity = Arc::new(TestDirectory::new([active_member(&worker)]));
+    let projects = ProjectService::new(
+        pool.clone(),
+        identity.clone(),
+        DomainLimits::default(),
+        IDEMPOTENCY_TTL,
+        AUDIT_RETENTION,
+    );
+    let todos = TodoService::new(
+        pool.clone(),
+        identity,
+        DomainLimits::default(),
+        IDEMPOTENCY_TTL,
+        AUDIT_RETENTION,
+        AUDIT_RETENTION,
+    );
+    let request: ProjectCreate = serde_json::from_value(
+        serde_json::json!({"name":"Private release","private":true,"description":"A private release","tags":["engineering"],"tasks":[{"title":"Build","assigned_to":worker.actor.id,"subtasks":[{"title":"Verify"}]}]}),
+    )?;
+    let created = projects
+        .create_project(
+            &creator,
+            request,
+            unique_key("collaborative-create")?,
+            "collaborative-create",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    let id = ProjectId::from_uuid(response_uuid(&created, "id")?);
+    let locator = ProjectLocator::Id(id);
+    assert_eq!(created.body["created_by"]["type"], "carbon");
+    assert_eq!(
+        created.body["collaborators"][0]["id"],
+        creator.actor.id.as_str()
+    );
+    assert!(matches!(
+        projects.get_project(&outsider, &locator).await,
+        Err(AppError::NotFound)
+    ));
+    assert!(
+        projects
+            .list_projects(&outsider, ProjectQuery::default())
+            .await?
+            .items
+            .is_empty()
+    );
+    assert!(projects.get_project(&tagged, &locator).await.is_ok());
+    let tasks = projects
+        .list_tasks(&worker, &locator, CollectionQuery::default())
+        .await?
+        .items;
+    assert_eq!(tasks.len(), 2);
+    let parent = tasks
+        .iter()
+        .find(|t| t.parent_task_id.is_none())
+        .context("parent")?;
+    let child = tasks
+        .iter()
+        .find(|t| t.parent_task_id.is_some())
+        .context("child")?;
+    let todo_id = parent.todo_id.context("assigned todo")?;
+    assert_eq!(todos.get(&worker, todo_id).await?.project_id, Some(id));
+    assert!(matches!(
+        todos.get(&outsider, todo_id).await,
+        Err(AppError::NotFound)
+    ));
+    assert!(matches!(
+        todos
+            .list_notes(&outsider, todo_id, CollectionQuery::default())
+            .await,
+        Err(AppError::NotFound)
+    ));
+    todos
+        .update(
+            &worker,
+            todo_id,
+            TodoPatch {
+                status: Some(TodoStatus::Completed),
+                ..Default::default()
+            },
+            unique_key("complete-linked")?,
+            "complete-linked",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    assert_eq!(
+        projects
+            .list_tasks(&creator, &locator, CollectionQuery::default())
+            .await?
+            .items
+            .iter()
+            .find(|t| t.id == parent.id)
+            .context("updated task")?
+            .status,
+        TodoStatus::Completed
+    );
+    let a = projects.claim_task(
+        &creator,
+        &locator,
+        child.id,
+        unique_key("claim-a")?,
+        "claim-a",
+    );
+    let b = projects.claim_task(
+        &worker,
+        &locator,
+        child.id,
+        unique_key("claim-b")?,
+        "claim-b",
+    );
+    let (a, b) = tokio::join!(a, b);
+    assert_ne!(a.is_ok(), b.is_ok(), "only one concurrent claimant wins");
+    let replay_key = unique_key("private-patch")?;
+    let patch = ProjectPatch {
+        description: Some("worker contribution".into()),
+        ..Default::default()
+    };
+    projects
+        .update_project(
+            &worker,
+            &locator,
+            patch.clone(),
+            replay_key.clone(),
+            "private-patch",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    projects
+        .update_project(
+            &creator,
+            &locator,
+            ProjectPatch {
+                silicon_ids: Some(vec![]),
+                ..Default::default()
+            },
+            unique_key("revoke")?,
+            "revoke",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    assert!(matches!(
+        projects
+            .update_project(&worker, &locator, patch, replay_key, "private-replay")
+            .await,
+        Err(AppError::NotFound)
+    ));
+    assert!(matches!(
+        projects.versions(&worker, &locator, None, 20).await,
+        Err(AppError::NotFound)
+    ));
+    assert!(matches!(
+        todos.get(&worker, todo_id).await,
+        Err(AppError::NotFound)
+    ));
+    let assigned = todos
+        .create(
+            &creator,
+            serde_json::from_value(serde_json::json!({
+                "title":"Follow up", "assigned_to":worker.actor.id, "project_id":id
+            }))?,
+            unique_key("private-followup")?,
+            "private-followup",
+        )
+        .await?;
+    let assigned_id = TodoId::from_uuid(response_uuid(&assigned, "id")?);
+    assert_eq!(todos.get(&worker, assigned_id).await?.project_id, Some(id));
+    let read = projects
+        .get_project(&creator, &locator)
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    assert!(read.collaborators.iter().any(|a| a.id == worker.actor.id));
+    assert!(read.version >= 5);
+    projects
+        .delete_task(&creator, &locator, parent.id, "delete-subtree")
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    assert!(
+        projects
+            .list_tasks(&creator, &locator, CollectionQuery::default())
+            .await?
+            .items
+            .is_empty()
+    );
+    assert!(matches!(
+        todos.get(&creator, todo_id).await,
+        Err(AppError::NotFound)
+    ));
+    let metadata = projects
+        .versions(&creator, &locator, None, 1)
+        .await
+        .map_err(|e| anyhow::anyhow!("line {}: {e:?}", line!()))?;
+    let version = metadata["items"][0]["version"]
+        .as_i64()
+        .context("version")?;
+    assert_eq!(
+        projects.version(&creator, &locator, version).await?["tasks"],
+        serde_json::json!([])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn contract_sunset_and_email_preferences_enforce_their_lifecycle() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let mut tx = pool.begin().await?;
+    sqlx::query("INSERT INTO commit.contract_versions(version,status,introduced_at,deprecated_at) VALUES(77,'deprecated',clock_timestamp()-interval '9 days',clock_timestamp()-interval '8 days'),(78,'deprecated',clock_timestamp()-interval '9 days',clock_timestamp())").execute(&mut *tx).await?;
+    let retired: String = sqlx::query_scalar("SELECT commit.admit_contract(77,true)")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(retired, "sunset");
+    let active: String = sqlx::query_scalar("SELECT commit.admit_contract(78,true)")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(active, "deprecated");
+    let requests: i64 =
+        sqlx::query_scalar("SELECT requests FROM commit.contract_versions WHERE version=78")
+            .fetch_one(&mut *tx)
+            .await?;
+    assert_eq!(requests, 0);
+    tx.rollback().await?;
+    let org = TestOrganization::unique("email")?;
+    let actor = org.actor("recipient", ActorType::Carbon, OrganizationRole::Member)?;
+    let service = ProjectService::new(
+        pool.clone(),
+        Arc::new(TestDirectory::default()),
+        DomainLimits::default(),
+        IDEMPOTENCY_TTL,
+        AUDIT_RETENTION,
+    );
+    let created = service
+        .create_project(
+            &actor,
+            serde_json::from_value(serde_json::json!({"name":"Email release"}))?,
+            unique_key("email-project")?,
+            "email-project",
+        )
+        .await?;
+    let id = ProjectId::from_uuid(response_uuid(&created, "id")?);
+    sqlx::query("INSERT INTO commit.email_preferences(organization_id,principal_id,email) VALUES($1,$2,'recipient@organization.test')").bind(org.id.into_uuid()).bind(actor.actor.principal_id.into_uuid()).execute(&pool).await?;
+    service
+        .complete_project(
+            &actor,
+            &ProjectLocator::Id(id),
+            ProjectCompletionCreate {
+                title: "Done".into(),
+                description: "Release complete".into(),
+            },
+            unique_key("email-completion")?,
+            "email-completion",
+        )
+        .await?;
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM commit.email_jobs WHERE organization_id=$1 AND recipient='recipient@organization.test' AND kind='project_completed'").bind(org.id.into_uuid()).fetch_one(&pool).await?;
+    assert_eq!(count, 1);
+    sqlx::query("UPDATE commit.email_preferences SET enabled=false WHERE organization_id=$1")
+        .bind(org.id.into_uuid())
+        .execute(&pool)
+        .await?;
+    let result: serde_json::Value = sqlx::query_scalar("SELECT commit.claim_email()")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(result["simulated"], true);
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM commit.email_jobs WHERE organization_id=$1")
+            .bind(org.id.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(status, "suppressed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_history_retains_only_the_latest_thousand_snapshots() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let org = TestOrganization::unique("history-cap")?;
+    let actor = org.actor("author", ActorType::Carbon, OrganizationRole::Member)?;
+    let service = ProjectService::new(
+        pool.clone(),
+        Arc::new(TestDirectory::default()),
+        DomainLimits::default(),
+        IDEMPOTENCY_TTL,
+        AUDIT_RETENTION,
+    );
+    let project = service
+        .create_project(
+            &actor,
+            serde_json::from_value(serde_json::json!({"name":"History"}))?,
+            unique_key("history-create")?,
+            "history-create",
+        )
+        .await?;
+    let id = response_uuid(&project, "id")?;
+    sqlx::query("INSERT INTO commit.audit_events(id,organization_id,actor_principal_id,action,resource_type,resource_id,request_id) SELECT gen_random_uuid(),$1,$2,'project.updated','project',$3,'history-cap-'||n FROM generate_series(1,1005) n")
+ .bind(org.id.into_uuid()).bind(actor.actor.principal_id.into_uuid()).bind(id).execute(&pool).await?;
+    let (count,min,max):(i64,i64,i64)=sqlx::query_as("SELECT count(*),min(version),max(version) FROM commit.project_versions WHERE organization_id=$1 AND project_id=$2").bind(org.id.into_uuid()).bind(id).fetch_one(&pool).await?;
+    assert_eq!((count, min, max), (1000, 7, 1006));
     Ok(())
 }

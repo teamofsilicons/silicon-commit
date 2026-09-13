@@ -223,6 +223,8 @@ pub struct VerifiedActor {
     pub organization_role: OrganizationRole,
     /// Current explicit IAM capabilities.
     pub capabilities: CapabilitySet,
+    /// Live IAM membership tags; never supplied by a request header.
+    pub tags: BTreeSet<String>,
     grant: InboundCredential,
 }
 
@@ -246,8 +248,16 @@ impl VerifiedActor {
             actor,
             organization_role,
             capabilities,
+            tags: BTreeSet::new(),
             grant,
         }
+    }
+
+    /// Attaches tags obtained from the same verified IAM authorization.
+    #[must_use]
+    pub fn with_tags(mut self, tags: BTreeSet<String>) -> Self {
+        self.tags = tags;
+        self
     }
 
     /// Returns whether the actor has organization-wide todo management power.
@@ -280,6 +290,7 @@ impl fmt::Debug for VerifiedActor {
             .field("actor", &self.actor)
             .field("organization_role", &self.organization_role)
             .field("capabilities", &self.capabilities)
+            .field("tags", &self.tags)
             .field("grant", &"[REDACTED]")
             .finish()
     }

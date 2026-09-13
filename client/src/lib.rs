@@ -145,6 +145,8 @@ pub struct Client {
     http: HttpClient,
     base: Url,
     bearer: Option<SecretString>,
+    telemetry: bool,
+    source: &'static str,
     test_key: Option<SecretString>,
     org_id: Option<String>,
     mutation: Option<Mutation>,
@@ -196,6 +198,8 @@ impl Client {
             http,
             base,
             bearer: None,
+            telemetry: true,
+            source: "rust-client",
             test_key: None,
             org_id: None,
             mutation: None,
@@ -207,13 +211,85 @@ impl Client {
     }
     pub fn with_test_key(mut self, key: impl Into<String>) -> Result<Self, Error> {
         let key = key.into();
-        if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        if !valid_testing_selector(&key) {
             return Err(Error::Invalid(
-                "test-environment key must be exactly 32 alphanumeric characters",
+                "test selector must be an IAM test app_secret or a legacy 32-character Commit key",
             ));
         }
         self.test_key = Some(SecretString::from(key));
         Ok(self)
+    }
+    /// Selects an IAM sandbox using only the imported application's secret.
+    pub fn with_test_app_secret(self, secret: impl Into<String>) -> Result<Self, Error> {
+        self.with_test_key(secret)
+    }
+    /// Live metadata for the selected environment. Never returns a secret.
+    pub async fn contracts(&self) -> Result<Value, Error> {
+        self.get(&["contracts"], &[]).await
+    }
+    /// Opts this client instance out of diagnostic telemetry.
+    pub fn with_telemetry(mut self, enabled: bool) -> Self {
+        self.telemetry = enabled;
+        self
+    }
+    /// Identifies the interface in request diagnostics; no command arguments are sent.
+    pub fn with_source(mut self, source: &'static str) -> Result<Self, Error> {
+        if !matches!(source, "cli" | "browser" | "daemon" | "rust-client") {
+            return Err(Error::Invalid("unknown client source"));
+        }
+        self.source = source;
+        Ok(self)
+    }
+    /// Reads this identity's organization email preferences.
+    pub async fn email_settings(&self) -> Result<Value, Error> {
+        self.get(&["email-settings"], &[]).await
+    }
+    /// Replaces the organization email and event subscriptions.
+    pub async fn set_email_settings(&self, body: &Value) -> Result<Value, Error> {
+        self.write(Method::PUT, &["email-settings"], body).await
+    }
+    /// Queues a bug report for Commit maintainers; preserve the mutation across retries.
+    pub async fn report(&self, body: &Value) -> Result<Value, Error> {
+        self.write(Method::POST, &["reports"], body).await
+    }
+    pub async fn testing_context(&self) -> Result<Value, Error> {
+        self.get(&["testing-context"], &[]).await
+    }
+    /// Atomically take an unassigned task.
+    pub async fn claim_project_task(&self, project: &str, task: &str) -> Result<Value, Error> {
+        self.write(
+            Method::POST,
+            &["projects", project, "tasks", task, "claim"],
+            &serde_json::json!({}),
+        )
+        .await
+    }
+    /// Remove a task subtree and its linked todos.
+    pub async fn delete_project_task(&self, project: &str, task: &str) -> Result<Value, Error> {
+        self.execute(
+            Method::DELETE,
+            &["projects", project, "tasks", task],
+            None,
+            &[],
+            false,
+        )
+        .await
+    }
+    /// Retained project version metadata, newest first.
+    pub async fn project_versions(
+        &self,
+        project: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Value, Error> {
+        self.get(&["projects", project, "versions"], query).await
+    }
+    /// One complete retained project snapshot.
+    pub async fn project_version(&self, project: &str, version: i64) -> Result<Value, Error> {
+        self.get(
+            &["projects", project, "versions", &version.to_string()],
+            &[],
+        )
+        .await
     }
     pub fn with_org_id(mut self, org_id: impl Into<String>) -> Self {
         self.org_id = Some(org_id.into());
@@ -565,7 +641,13 @@ impl Client {
         let mut req = self
             .http
             .request(method, self.url(path, root)?)
-            .query(query);
+            .query(query)
+            .header("x-commit-supported-versions", "1")
+            .header("x-commit-client", self.source)
+            .header(
+                "x-commit-telemetry",
+                if self.telemetry { "on" } else { "off" },
+            );
         if !root {
             if let Some(token) = &self.bearer {
                 req = req.bearer_auth(token.expose_secret());
@@ -575,10 +657,8 @@ impl Client {
             }
             if let Some(key) = &self.test_key {
                 let key = key.expose_secret();
-                if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                    return Err(Error::Invalid(
-                        "testing key must be exactly 32 alphanumeric characters",
-                    ));
+                if !valid_testing_selector(key) {
+                    return Err(Error::Invalid("invalid testing application secret"));
                 }
                 req = req.header("x-testing-environment-key", key);
             }
@@ -594,6 +674,15 @@ impl Client {
             req = req.header("content-type", "application/json").body(body);
         }
         let mut response = req.send().await.map_err(transport)?;
+        if response
+            .headers()
+            .get("x-commit-api-version")
+            .is_some_and(|v| v != "1")
+        {
+            return Err(Error::Invalid(
+                "server selected an unsupported API contract",
+            ));
+        }
         let status = response.status();
         let request_id = response
             .headers()
@@ -639,4 +728,13 @@ fn transport(error: reqwest::Error) -> Error {
 }
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T, Error> {
     serde_json::from_value(value).map_err(Error::Decode)
+}
+
+fn valid_testing_selector(key: &str) -> bool {
+    (key.len() == 32 && key.bytes().all(|b| b.is_ascii_alphanumeric()))
+        || (key.len() == 47
+            && key.starts_with("ask_")
+            && key[4..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
 }

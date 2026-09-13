@@ -119,10 +119,16 @@ async fn logout_revokes_the_saved_session_before_removing_only_its_credentials()
         let state = configured.0.join(".commit");
         fs::create_dir_all(&state).unwrap();
         fs::write(state.join("test-key"), b"unrelated configuration").unwrap();
-        let session = state.join("session.json");
+        let session = state.join(test_key.map_or_else(
+            || "session.json".to_owned(),
+            |key| {
+                use sha2::{Digest, Sha256};
+                format!("test-{:x}.json", Sha256::digest(key.as_bytes()))
+            },
+        ));
         let saved = serde_json::to_vec(&json!({
             "access_token": "oat_saved", "refresh_token": "ort_saved",
-            "api_url": server.uri(), "org_id": "tos"
+            "api_url": server.uri(), "org_id": "tos", "test_key":test_key
         }))
         .unwrap();
         fs::write(&session, &saved).unwrap();

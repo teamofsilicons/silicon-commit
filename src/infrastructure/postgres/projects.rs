@@ -50,6 +50,9 @@ const PROJECT_SELECT: &str = r"
            project.slug,
            project.uid,
            project.status,
+           project.description, project.attachments, project.private, project.tags,
+           (SELECT coalesce(max(v.version),0) FROM commit.project_versions v WHERE v.organization_id=project.organization_id AND v.project_id=project.id) AS version,
+           (SELECT coalesce(jsonb_agg(jsonb_build_object('type',a.actor_type,'id',a.actor_id) ORDER BY c.first_contributed_at,a.actor_id),'[]') FROM commit.project_collaborators c JOIN commit.actor_projection a ON a.organization_id=c.organization_id AND a.principal_id=c.principal_id WHERE c.organization_id=project.organization_id AND c.project_id=project.id) AS collaborators,
            creator.principal_id AS creator_principal_id,
            creator.actor_type AS creator_actor_type,
            creator.actor_id AS creator_actor_id,
@@ -206,10 +209,38 @@ pub(crate) async fn acquire_idempotency(
     .bind(identity.operation)
     .bind(&identity.resource_path)
     .bind(identity.key.as_str())
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await?;
 
-    replay_from_record(record, identity)
+    let response = replay_from_record(record, identity)?;
+    if let Some(response) = &response {
+        let raw = identity
+            .resource_path
+            .strip_prefix("/projects/")
+            .and_then(|p| p.split('/').next());
+        let locator = raw
+            .and_then(|s| s.parse::<ProjectLocator>().ok())
+            .or_else(|| {
+                (identity.operation == "createProject")
+                    .then(|| {
+                        response
+                            .body
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|s| s.parse::<ProjectLocator>().ok())
+                    })
+                    .flatten()
+            });
+        if let Some(locator) = locator {
+            let project = lock_project(connection, actor.organization_id, &locator)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if !can_access(connection, actor, project.id).await? {
+                return Err(AppError::NotFound);
+            }
+        }
+    }
+    Ok(response)
 }
 
 fn replay_from_record(
@@ -355,13 +386,14 @@ pub(crate) async fn insert_audit(
 /// Loads a stable, keyset-ordered page plus one look-ahead project.
 pub(crate) async fn list_projects(
     pool: &PgPool,
-    organization_id: OrganizationId,
+    actor: &VerifiedActor,
     query: &ProjectQuery,
 ) -> Result<Vec<Project>, AppError> {
     let statement = format!(
         r"
         {PROJECT_SELECT}
          WHERE project.organization_id = $1
+           AND commit.project_access(project.organization_id, project.id, $7, $8)
            AND ($2::commit.project_status IS NULL OR project.status = $2)
            AND (
                 $3::text IS NULL
@@ -393,12 +425,14 @@ pub(crate) async fn list_projects(
     let fetch_limit = i64::from(query.limit.get()) + 1;
 
     let rows = sqlx::query_as::<_, ProjectRow>(AssertSqlSafe(statement))
-        .bind(organization_id.into_uuid())
+        .bind(actor.organization_id.into_uuid())
         .bind(query.status)
         .bind(participant_id)
         .bind(cursor_created_at)
         .bind(cursor_id)
         .bind(fetch_limit)
+        .bind(actor.actor.principal_id.into_uuid())
+        .bind(actor.tags.iter().cloned().collect::<Vec<_>>())
         .fetch_all(pool)
         .await?;
 
@@ -519,34 +553,6 @@ impl LockedProjectRow {
     }
 }
 
-/// Reports whether the principal is a current project participant.
-pub(crate) async fn is_active_participant(
-    connection: &mut PgConnection,
-    organization_id: OrganizationId,
-    project_id: ProjectId,
-    actor: &Actor,
-) -> Result<bool, AppError> {
-    let participates = sqlx::query_scalar::<_, bool>(
-        r"
-        SELECT EXISTS (
-            SELECT 1
-              FROM commit.project_participants
-             WHERE organization_id = $1
-               AND project_id = $2
-               AND silicon_principal_id = $3
-               AND removed_at IS NULL
-        )
-        ",
-    )
-    .bind(organization_id.into_uuid())
-    .bind(project_id.into_uuid())
-    .bind(actor.principal_id.into_uuid())
-    .fetch_one(connection)
-    .await?;
-
-    Ok(participates)
-}
-
 /// Chooses a collision-free millisecond creation time for the documented UID.
 pub(crate) async fn next_project_created_at(
     connection: &mut PgConnection,
@@ -620,9 +626,9 @@ pub(crate) async fn insert_project(
             status,
             created_by_principal_id,
             created_at,
-            updated_at
+            updated_at, description, attachments, private, tags
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12)
         ",
     )
     .bind(project_id.into_uuid())
@@ -633,6 +639,10 @@ pub(crate) async fn insert_project(
     .bind(ProjectStatus::YetToStart)
     .bind(actor.actor.principal_id.into_uuid())
     .bind(created_at)
+    .bind(&command.details.description)
+    .bind(Json(&command.details.attachments))
+    .bind(command.details.private)
+    .bind(&command.details.tags)
     .execute(&mut *connection)
     .await?;
 
@@ -677,6 +687,10 @@ pub(crate) async fn update_project(
         UPDATE commit.projects
            SET name = coalesce($3, name),
                status = coalesce($4, status),
+               description = coalesce($5, description),
+               attachments = coalesce($6, attachments),
+               private = coalesce($7, private),
+               tags = coalesce($8, tags),
                updated_at = GREATEST(updated_at, clock_timestamp())
          WHERE organization_id = $1
            AND id = $2
@@ -686,6 +700,10 @@ pub(crate) async fn update_project(
     .bind(project_id.into_uuid())
     .bind(command.name.as_ref().map(RequiredText::as_str))
     .bind(command.status)
+    .bind(&command.description)
+    .bind(command.attachments.as_ref().map(Json))
+    .bind(command.private)
+    .bind(&command.tags)
     .execute(&mut *connection)
     .await?;
 
@@ -720,7 +738,7 @@ pub(crate) async fn update_project(
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("updated project disappeared")))
 }
 
-async fn insert_missing_participants(
+pub(crate) async fn insert_missing_participants(
     connection: &mut PgConnection,
     actor: &VerifiedActor,
     project_id: ProjectId,
@@ -898,6 +916,7 @@ pub(crate) async fn parent_task_exists(
              WHERE organization_id = $1
                AND project_id = $2
                AND id = $3
+               AND deleted_at IS NULL
         )
         ",
     )
@@ -968,7 +987,7 @@ pub(crate) async fn update_task(
                updated_at = GREATEST(updated_at, clock_timestamp())
          WHERE organization_id = $1
            AND project_id = $2
-           AND id = $3
+           AND id = $3 AND deleted_at IS NULL
         ",
     )
     .bind(actor.organization_id.into_uuid())
@@ -987,7 +1006,7 @@ pub(crate) async fn update_task(
     fetch_task_by_id(connection, actor.organization_id, project_id, task_id).await
 }
 
-async fn fetch_task_by_id(
+pub(crate) async fn fetch_task_by_id(
     connection: &mut PgConnection,
     organization_id: OrganizationId,
     project_id: ProjectId,
@@ -1204,6 +1223,8 @@ const PROJECT_TASK_SELECT_BASE: &str = r"
            task.title,
            task.description,
            task.status,
+           (SELECT jsonb_build_object('type',a.actor_type,'id',a.actor_id) FROM commit.actor_projection a WHERE a.organization_id=task.organization_id AND a.principal_id=task.assigned_to_principal_id) AS assigned_to,
+           task.todo_id,
            author.principal_id AS author_principal_id,
            author.actor_type AS author_actor_type,
            author.actor_id AS author_actor_id,
@@ -1214,6 +1235,7 @@ const PROJECT_TASK_SELECT_BASE: &str = r"
        AND author.principal_id = task.created_by_principal_id
      WHERE task.organization_id = $1
        AND task.project_id = $2
+       AND task.deleted_at IS NULL
 ";
 
 #[derive(Debug, FromRow)]
@@ -1240,6 +1262,12 @@ struct ProjectRow {
     participant_principal_ids: Vec<Uuid>,
     participant_actor_types: Vec<String>,
     participant_actor_ids: Vec<String>,
+    description: String,
+    attachments: Json<Vec<crate::domain::AttachmentUrl>>,
+    private: bool,
+    tags: Vec<String>,
+    version: i64,
+    collaborators: Json<Vec<crate::domain::ActorRef>>,
 }
 
 impl ProjectRow {
@@ -1260,14 +1288,25 @@ impl ProjectRow {
             .map(|((principal_id, actor_type), actor_id)| {
                 let actor_type = ActorType::from_str(&actor_type)
                     .map_err(|error| invalid_row(error.to_string()))?;
-                if actor_type != ActorType::Silicon {
-                    return Err(invalid_row("project participant is not a Silicon"));
-                }
                 actor_from_row(principal_id, actor_type, actor_id)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let carbon_ids = silicons
+            .iter()
+            .filter(|a| !a.is_silicon())
+            .map(|a| a.id.clone())
+            .collect();
         Ok(Project {
+            details: crate::domain::project::ProjectDetails {
+                description: self.description,
+                attachments: self.attachments.0,
+                private: self.private,
+                tags: self.tags,
+                carbon_ids,
+            },
+            version: self.version,
+            collaborators: self.collaborators.0,
             id: ProjectId::from_uuid(self.id),
             organization_id: OrganizationId::from_uuid(self.organization_id),
             org_id: PublicOrganizationId::new(self.org_id)
@@ -1335,11 +1374,15 @@ struct ProjectTaskRow {
     author_actor_type: ActorType,
     author_actor_id: String,
     created_at: OffsetDateTime,
+    assigned_to: Option<Json<crate::domain::ActorRef>>,
+    todo_id: Option<Uuid>,
 }
 
 impl ProjectTaskRow {
     fn into_domain(self) -> Result<ProjectTask, AppError> {
         Ok(ProjectTask {
+            assigned_to: self.assigned_to.map(|a| a.0),
+            todo_id: self.todo_id.map(crate::domain::TodoId::from_uuid),
             id: ProjectTaskId::from_uuid(self.id),
             project_id: ProjectId::from_uuid(self.project_id),
             parent_task_id: self.parent_task_id.map(ProjectTaskId::from_uuid),
@@ -1427,6 +1470,23 @@ fn invalid_row(message: impl Into<String>) -> AppError {
         "invalid persisted project data: {}",
         message.into()
     ))
+}
+
+/// Evaluates private access using live IAM tags and persisted explicit invites.
+pub(crate) async fn can_access(
+    connection: &mut PgConnection,
+    actor: &VerifiedActor,
+    project_id: ProjectId,
+) -> Result<bool, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT commit.project_access($1,$2,$3,$4)")
+            .bind(actor.organization_id.into_uuid())
+            .bind(project_id.into_uuid())
+            .bind(actor.actor.principal_id.into_uuid())
+            .bind(actor.tags.iter().cloned().collect::<Vec<_>>())
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 #[cfg(test)]

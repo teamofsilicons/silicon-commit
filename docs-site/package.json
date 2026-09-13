@@ -1,0 +1,1 @@
+{"name":"silicon-commit-docs","version":"0.2.0","private":true,"type":"module","scripts":{"build":"node build.mjs","check":"node check.mjs"},"dependencies":{"marked":"18.0.11"}}

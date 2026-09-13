@@ -38,6 +38,7 @@ export function TodoForm(p: {
       p.todo?.status || "yet_to_do",
     ),
     [urls, setUrls] = createSignal(p.todo?.attachments.join("\n") || "");
+  const [projectId, setProjectId] = createSignal(p.todo?.project_id || "");
   const a = useAction();
   const submit = (e: SubmitEvent) => {
     e.preventDefault();
@@ -59,6 +60,7 @@ export function TodoForm(p: {
       )
         throw new Error("Each attachment must be a complete HTTPS URL.");
       const body = {
+        project_id: projectId().trim() || null,
         title: title(),
         description: description() || null,
         assigned_to: assigned().trim(),
@@ -87,6 +89,15 @@ export function TodoForm(p: {
             value={title()}
             onInput={(e) => setTitle(e.currentTarget.value)}
             placeholder="What needs to happen?"
+          />
+        </Field>
+        <Field
+          label="Related project"
+          hint="Optional project UUID; linked project tasks keep this relationship."
+        >
+          <input
+            value={projectId()}
+            onInput={(e) => setProjectId(e.currentTarget.value)}
           />
         </Field>
         <Field label="Description">
@@ -370,6 +381,11 @@ export function Todos() {
                           <a class="row-title" href={"#/todos/" + t.id}>
                             {t.title}
                           </a>
+                          <Show when={t.project_id}>
+                            <a href={"#/projects/" + t.project_id}>
+                              Open related project
+                            </a>
+                          </Show>
                           <Show when={t.attachments.length}>
                             <small>
                               {t.attachments.length} attachment
@@ -489,6 +505,11 @@ export function TodoDetail(p: { id: string }) {
                         <small>{label(t.assigned_by.type)}</small>
                       </div>
                     </div>
+                    <Show when={t.project_id}>
+                      <a href={"#/projects/" + t.project_id}>
+                        Open related project
+                      </a>
+                    </Show>
                     <Show when={t.attachments.length}>
                       <div class="attachment-list">
                         <h3>Attachments</h3>

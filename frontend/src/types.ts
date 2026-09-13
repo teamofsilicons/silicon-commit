@@ -1,6 +1,7 @@
 export type Actor = { id: string; type: "carbon" | "silicon" };
 export type Session = {
   authenticated: boolean;
+  environment_name?: string;
   actor?: { type: "carbon" | "silicon"; public_id: string };
   org_id?: string;
 };
@@ -11,6 +12,7 @@ export type TodoStatus =
   | "completed"
   | "canceled";
 export type Todo = {
+  project_id?: string | null;
   id: string;
   org_id: string;
   title: string;
@@ -29,6 +31,13 @@ export type Note = {
   created_at: string;
 };
 export type Project = {
+  description: string;
+  attachments: string[];
+  private: boolean;
+  carbon_ids: string[];
+  tags: string[];
+  collaborators: Actor[];
+  version: number;
   id: string;
   org_id: string;
   name: string;
@@ -41,6 +50,8 @@ export type Project = {
   updated_at: string;
 };
 export type Task = {
+  assigned_to?: Actor | null;
+  todo_id?: string | null;
   id: string;
   project_id: string;
   parent_task_id: string | null;

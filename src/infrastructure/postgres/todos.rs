@@ -29,6 +29,7 @@ const ADVISORY_LOCK_SEED: i64 = 7_621_913_449_043_511_527;
 const TODO_PROJECTION: &str = r#"
     SELECT
         todo.id,
+        todo.project_id,
         todo.organization_id,
         organization.org_id,
         todo.title,
@@ -70,6 +71,7 @@ pub(crate) struct NewTodo<'a> {
     pub(crate) assigned_to_principal_id: PrincipalId,
     pub(crate) status: TodoStatus,
     pub(crate) attachments: &'a [AttachmentUrl],
+    pub(crate) project_id: Option<crate::domain::ProjectId>,
 }
 
 /// Full desired todo state after an authorized patch.
@@ -80,6 +82,7 @@ pub(crate) struct TodoReplacement<'a> {
     pub(crate) status: TodoStatus,
     pub(crate) attachments: &'a [AttachmentUrl],
     pub(crate) replace_attachments: bool,
+    pub(crate) project_id: Option<crate::domain::ProjectId>,
 }
 
 /// Complete immutable Hook event selected within a todo mutation transaction.
@@ -142,6 +145,15 @@ pub(crate) async fn list_todos(
         .push(" WHERE todo.organization_id = ")
         .push_bind(actor.organization_id.into_uuid())
         .push(" AND todo.deleted_at IS NULL");
+
+    builder.push(" AND (todo.project_id IS NULL OR commit.project_access(todo.organization_id,todo.project_id,")
+        .push_bind(actor.actor.principal_id.into_uuid()).push(",")
+        .push_bind(actor.tags.iter().cloned().collect::<Vec<_>>()).push("))");
+    if let Some(project_id) = query.project_id {
+        builder
+            .push(" AND todo.project_id=")
+            .push_bind(project_id.into_uuid());
+    }
 
     match query.view {
         TodoView::AssignedToMe => {
@@ -428,9 +440,9 @@ pub(crate) async fn insert_todo(
             description,
             assigned_by_principal_id,
             assigned_to_principal_id,
-            status
+            status, project_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(todo.id.into_uuid())
@@ -440,6 +452,7 @@ pub(crate) async fn insert_todo(
     .bind(todo.assigned_by_principal_id.into_uuid())
     .bind(todo.assigned_to_principal_id.into_uuid())
     .bind(todo.status)
+    .bind(todo.project_id.map(crate::domain::ProjectId::into_uuid))
     .execute(&mut *connection)
     .await?;
     insert_attachments(connection, todo.organization_id, todo.id, todo.attachments).await
@@ -458,7 +471,7 @@ pub(crate) async fn update_todo(
         SET title = $3,
             description = $4,
             assigned_to_principal_id = $5,
-            status = $6
+            status = $6, project_id = $7
         WHERE organization_id = $1
           AND id = $2
           AND deleted_at IS NULL
@@ -470,6 +483,11 @@ pub(crate) async fn update_todo(
     .bind(replacement.description.map(LimitedText::as_str))
     .bind(replacement.assigned_to_principal_id.into_uuid())
     .bind(replacement.status)
+    .bind(
+        replacement
+            .project_id
+            .map(crate::domain::ProjectId::into_uuid),
+    )
     .execute(&mut *connection)
     .await?;
     if result.rows_affected() != 1 {
@@ -906,6 +924,7 @@ struct TodoRecord {
     attachments: Vec<String>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
+    project_id: Option<Uuid>,
 }
 
 impl TodoRecord {
@@ -927,6 +946,7 @@ impl TodoRecord {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Todo {
+            project_id: self.project_id.map(crate::domain::ProjectId::from_uuid),
             id: TodoId::from_uuid(self.id),
             organization_id: OrganizationId::from_uuid(self.organization_id),
             org_id: PublicOrganizationId::new(self.org_id).map_err(corrupt_persisted_data)?,

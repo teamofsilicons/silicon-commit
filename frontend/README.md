@@ -12,7 +12,7 @@ npm ci
 npm run dev
 ```
 
-Open http://127.0.0.1:4325. By default the frontend connects to the live Commit backend. The login page has only **Continue with IAM**. IAM authenticates the user and collects their organization choices; Commit never supplies `org_id` or collects an SLT through the UI. After the callback, the workspace picker contains only the session's selected active organizations returned by IAM. Mutations on this origin affect the selected real Commit workspace.
+Open http://127.0.0.1:4325. By default the frontend connects to the live Commit backend. The production login uses **Continue with IAM**. The testing panel also accepts an IAM test application secret and a sandbox SLT or existing test identity ID. IAM authenticates the user and collects their organization choices; Commit never supplies `org_id` or collects an SLT through the UI. After the callback, the workspace picker contains only the session's selected active organizations returned by IAM. Mutations on this origin affect the selected real Commit workspace.
 
 Copy `.env.example` to `.env` to change server configuration. Development generates a temporary cookie key when none is configured; restarting Vite then signs browser sessions out. For a persistent key, generate 32 random bytes encoded as base64url and set `SESSION_COOKIE_KEY` in the ignored `.env`. Never put secrets in `VITE_` variables.
 
@@ -23,10 +23,10 @@ Copy `.env.example` to `.env` to change server configuration. Development genera
 | Sessions | Hosted IAM redirect and organization consent, automatic refresh, sign out, Carbon/Silicon identity, switching between IAM-authorized organizations |
 | Todos | Personal/delegated/all views; status, actor and date filters; pagination; create, edit, delete; all five statuses; arbitrary HTTPS attachment URLs |
 | Notes | Read, append, and paginate notes for each todo |
-| Notifications | Silicon webhook destination; list-wide and per-todo subscription; any update, status changes, selected statuses; unsubscribe/inherit; optimistic version checks |
-| Projects | List/filter/page; create as Silicon; rename and manage participants/status; stable UID; permanent completion statement |
-| Project work | Tasks, nested subtasks, edits/status; Markdown diary and preview with 100,000-word counter; concurrent-edit recovery; paginated blockers, updates, completion |
-| Testing | Create from IAM test key; retrieve/copy/rotate key; clean; delete/restore; isolated browser sessions; explicit scope and capacity labels |
+| Notifications | Organization email preferences, telemetry opt-out; Silicon webhook destination; list-wide and per-todo subscription; any update, status changes, selected statuses; unsubscribe/inherit; optimistic version checks |
+| Projects | List/filter/page; Carbon/Silicon creation; public or private access by actor IDs and IAM tags; descriptions and attachments; rename and manage participants/status; stable UID; permanent completion statement |
+| Project work | Tasks, nested subtasks, assignment and claim, synchronized project todos, recursive deletion, last 1,000 revisions; edits/status; Markdown diary and preview with 100,000-word counter; concurrent-edit recovery; paginated blockers, updates, completion |
+| Testing | Select by IAM application secret without pairing; sandbox login; persistent environment banner and exit; separate production/testing cookies; legacy environment management |
 
 Commit's current notification API allows Silicon delegators to subscribe to work assigned to others. The frontend explains this for Carbon accounts. The backend remains authoritative for permissions; a denied action shows its error and request reference. Completed projects cannot be reopened, but their metadata, tasks, diary, and subsequent activity remain maintainable as allowed by the backend.
 
@@ -34,7 +34,7 @@ Attachments are links only. There is no upload provider, Briefcase dependency, o
 
 ## Browser session boundary
 
-The Node service is a same-origin backend-for-frontend. It exchanges SLTs with Commit and keeps access/refresh tokens and sandbox keys in authenticated-encrypted, HttpOnly, SameSite=Lax cookies. HTTPS uses Secure `__Host-` session cookies. Tokens never enter localStorage or JavaScript-visible response bodies. Local storage contains only the organization handle and environment ID.
+The Node service is a same-origin backend-for-frontend. It exchanges SLTs with Commit and keeps access/refresh tokens and sandbox keys in authenticated-encrypted, HttpOnly, SameSite=Lax cookies. HTTPS uses Secure `__Host-` session cookies. Tokens never enter localStorage or JavaScript-visible response bodies. Local storage contains organization/environment selection and the telemetry opt-out preference.
 
 The service restricts API paths, injects credentials from the appropriate cookie, validates write origins, preserves ETags and idempotency keys, deduplicates refresh exchanges, and removes rejected sessions. `/auth/organizations` forwards the session bearer to Commit's backend without an organization header; the backend uses IAM's live authorization snapshots and returns only organization handles. It requires no IAM app secret, directory token, database, or additional service. Only the existing Commit backend needs its IAM credentials.
 
@@ -51,9 +51,9 @@ The production process serves `dist/client` and proxies `/api/*` and `/auth/*`. 
 
 The production frontend uses Vercel at https://commit.teamofsilicons.com. `npm run build:vercel` packages client assets for the CDN and `/auth/*` and `/api/*` for a Node.js 24 function in `iad1`, near the AWS backend. `vercel deploy --prod` deploys the linked `silicon-commit-frontend` project. Vercel production environment variables hold the origins, application ID, and a persistent sensitive `SESSION_COOKIE_KEY`; secrets are not part of the build output. Namecheap's `commit` A record points to Vercel at `76.76.21.21`.
 
-The frontend requires the accompanying backend `GET /api/v1/projects/{project_id}/entries` read route so project activity is available. No database migration or new runtime grant is required. Testing-environment timestamps now serialize as RFC 3339; the frontend also understands the older tuple format during rollout.
+The frontend requires the accompanying backend `GET /api/v1/projects/{project_id}/entries` read route so project activity is available. Release 0.2.0 requires migrations 0023–0027 and the updated runtime grants. Testing-environment timestamps now serialize as RFC 3339; the frontend also understands the older tuple format during rollout.
 
-The previously documented IAM directory/sandbox integration gaps in `deploy/aws/verification-2026-09-08.md` are backend integration work, not replaced by the frontend fixture. Live login and read smoke tests succeeded; full live mutation coverage is not claimed.
+The historical deployment report in `deploy/aws/verification-2026-09-08.md` predates automatic IAM sandbox discovery. Live login and read smoke tests succeeded; full live mutation coverage is not claimed.
 
 ## Repeatable local UI verification
 

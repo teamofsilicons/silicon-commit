@@ -64,9 +64,25 @@ impl SessionService {
         &self.app_id
     }
 
-    fn testing_client(&self, credentials: &IamTestingCredentials) -> Result<Client, AppError> {
+    pub(crate) fn testing_client(
+        &self,
+        credentials: &IamTestingCredentials,
+    ) -> Result<Client, AppError> {
         if credentials.app_id != self.app_id {
             return Err(AppError::Unauthenticated);
+        }
+        if credentials.environment_key.expose_secret().is_empty() {
+            return self
+                .client
+                .with_credential(Credential::application(
+                    &credentials.app_id,
+                    credentials.app_secret.expose_secret(),
+                ))
+                .with_testing_application(
+                    &credentials.app_id,
+                    credentials.app_secret.expose_secret(),
+                )
+                .map_err(map_error);
         }
         let environment =
             silicon_iam_client::EnvironmentKey::new(credentials.environment_key.expose_secret())
@@ -146,7 +162,7 @@ pub(crate) async fn status(
                 })
         })
         .transpose()?;
-    super::test_environments::resolve_context(&state.pool, &headers).await?;
+    super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
     verified_status(
         &client,
@@ -156,6 +172,16 @@ pub(crate) async fn status(
     )
     .await
     .map(Json)
+}
+
+fn snapshot_environment_matches(environment: Option<uuid::Uuid>) -> bool {
+    match request_context::current_iam_testing_credentials() {
+        None => environment.is_none(),
+        Some(credentials) if credentials.environment_key.expose_secret().is_empty() => {
+            environment == request_context::testing_scope().map(|s| s.id)
+        }
+        Some(_) => true, // Legacy root-selected IAM performs the environment binding.
+    }
 }
 
 async fn verified_status(
@@ -182,6 +208,7 @@ async fn verified_status(
     let first = snapshots.first().ok_or(AppError::Unauthenticated)?;
     if snapshots.iter().any(|snapshot| {
         snapshot.audience != app_id
+            || !snapshot_environment_matches(snapshot.testing_environment_id)
             || snapshot.principal_id != first.principal_id
             || snapshot.public_id != first.public_id
             || snapshot.actor_type != first.actor_type
@@ -190,14 +217,23 @@ async fn verified_status(
         return Err(AppError::Unauthenticated);
     }
     let actor = crate::domain::ActorRef::new(
-        match first.actor_type {
-            models::ApplicationAuthorizationActorType::Carbon => crate::domain::ActorType::Carbon,
-            models::ApplicationAuthorizationActorType::Silicon => crate::domain::ActorType::Silicon,
-            models::ApplicationAuthorizationActorType::Other(_) => {
+        match first.actor_type.as_ref() {
+            Some(models::ApplicationAuthorizationActorType::Carbon) => {
+                crate::domain::ActorType::Carbon
+            }
+            Some(models::ApplicationAuthorizationActorType::Silicon) => {
+                crate::domain::ActorType::Silicon
+            }
+            Some(models::ApplicationAuthorizationActorType::Other(_)) | None => {
                 return Err(AppError::BadGateway);
             }
         },
-        first.public_id.parse().map_err(|_| AppError::BadGateway)?,
+        first
+            .public_id
+            .as_ref()
+            .ok_or(AppError::BadGateway)?
+            .parse()
+            .map_err(|_| AppError::BadGateway)?,
     );
     let organizations = snapshots
         .iter()
@@ -252,7 +288,7 @@ pub(crate) async fn organizations(
         .sessions
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
-    super::test_environments::resolve_context(&state.pool, &headers).await?;
+    super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
     selected_organizations(&client, &service.app_id, token.expose_secret())
         .await
@@ -272,7 +308,9 @@ async fn selected_organizations(
         .ok_or(AppError::Unauthenticated)?;
     let mut organizations = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
-        if snapshot.audience != app_id {
+        if snapshot.audience != app_id
+            || !snapshot_environment_matches(snapshot.testing_environment_id)
+        {
             return Err(AppError::Unauthenticated);
         }
         organizations.push(
@@ -297,8 +335,12 @@ pub(crate) async fn login(
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
     let mutation = mutation(&headers)?;
-    super::test_environments::resolve_context(&state.pool, &headers).await?;
+    super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
+    if request_context::testing_scope().is_none() && !input.slt.expose_secret().starts_with("slt_")
+    {
+        return Err(AppError::Unauthenticated);
+    }
     client
         .oauth()
         .login(&service.app_id, input.slt.expose_secret(), &mutation)
@@ -317,7 +359,7 @@ pub(crate) async fn refresh(
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
     let mutation = mutation(&headers)?;
-    super::test_environments::resolve_context(&state.pool, &headers).await?;
+    super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
     client
         .oauth()
@@ -341,7 +383,7 @@ pub(crate) async fn logout(
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
     let mutation = mutation(&headers)?;
-    super::test_environments::resolve_context(&state.pool, &headers).await?;
+    super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
     client
         .oauth()

@@ -82,7 +82,8 @@ pub fn request(
 ) -> Result<AuthenticationRequest, AppError> {
     let environment_key = optional_header(headers, "x-testing-environment-key")?;
     if let Some(key) = environment_key.as_deref()
-        && (key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        && (!key.starts_with("ask_")
+            && (key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric())))
     {
         return Err(AppError::BadRequest {
             code: "invalid_testing_environment_key".into(),

@@ -19,6 +19,13 @@ pub async fn capacity(connection: &mut PgConnection, projects: bool) -> Result<(
     let Some(scope) = request_context::testing_scope() else {
         return Ok(());
     };
+    // Secret-selected environments follow the full production workflow; legacy
+    // manually-paired environments preserve their historical demo caps.
+    let discovered:bool=sqlx::query_scalar("SELECT iam_environment_id IS NOT NULL FROM commit.testing_environments WHERE environment_id=$1")
+        .bind(scope.id).fetch_one(&mut *connection).await?;
+    if discovered {
+        return Ok(());
+    }
     let sql = if projects {
         "SELECT count(*) FROM commit.projects WHERE organization_id IN (SELECT storage_organization_id FROM commit.testing_organizations WHERE environment_id=$1)"
     } else {

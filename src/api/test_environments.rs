@@ -1,5 +1,7 @@
 //! Organization-owned testing-environment lifecycle metadata.
 
+pub(crate) mod discovery;
+
 use super::{AppState, auth::action, extract::StrictJson};
 use crate::{
     application::ports::OrganizationRole,
@@ -21,19 +23,24 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 /// Resolves and pins the Commit test key to one active environment.
-pub(crate) async fn resolve_context(
-    pool: &sqlx::PgPool,
-    headers: &HeaderMap,
-) -> Result<(), AppError> {
-    let mut values = headers.get_all("x-testing-environment-key").iter();
-    let Some(raw) = values.next() else {
+pub(crate) async fn resolve_context(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+    let direct = super::auth::optional_header(headers, "x-testing-app-secret")?;
+    let legacy = super::auth::optional_header(headers, "x-testing-environment-key")?;
+    if direct.is_some() && legacy.is_some() {
+        return Err(AppError::BadRequest {
+            code: "mixed_testing_selectors".into(),
+        });
+    }
+    let Some(key) = direct.as_deref().or(legacy.as_deref()) else {
         return Ok(());
     };
-    let key = raw.to_str().map_err(|_| AppError::Unauthenticated)?;
-    if values.next().is_some() || key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric())
-    {
+    if direct.is_some() || key.starts_with("ask_") {
+        return discovery::discover(state, key).await;
+    }
+    if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(AppError::Unauthenticated);
     }
+    let pool = &state.pool;
     let row = sqlx::query_as::<_, (Uuid, i64, Vec<u8>, Option<String>, Option<Vec<u8>>)>("UPDATE commit.testing_environments SET last_activity_at=clock_timestamp() WHERE key_digest=$1 AND status='active' RETURNING environment_id,version,iam_test_key_ciphertext,iam_app_id,iam_app_secret_ciphertext")
         .bind(digest(key)).fetch_optional(pool).await.map_err(internal)?.ok_or(AppError::Unauthenticated)?;
     let (Some(app_id), Some(app_secret_ciphertext)) = (row.3, row.4) else {
@@ -207,7 +214,8 @@ pub(crate) async fn pair_iam_credentials(
 }
 
 fn require_production_control_plane(headers: &HeaderMap) -> Result<(), AppError> {
-    if headers.contains_key("x-testing-environment-key")
+    if headers.contains_key("x-testing-app-secret")
+        || headers.contains_key("x-testing-environment-key")
         || request_context::testing_scope().is_some()
     {
         return Err(AppError::Forbidden);
@@ -369,7 +377,7 @@ pub(crate) async fn clean(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Environment>, AppError> {
-    resolve_context(&state.pool, &headers).await?;
+    resolve_context(&state, &headers).await?;
     let scope = crate::request_context::testing_scope().ok_or(AppError::BadRequest {
         code: "testing_environment_required".into(),
     })?;
@@ -377,6 +385,9 @@ pub(crate) async fn clean(
         return Err(AppError::NotFound);
     }
     let key = crate::request_context::current_environment_key().ok_or(AppError::Unauthenticated)?;
+    if key.starts_with("ask_") {
+        return Err(AppError::Forbidden);
+    }
     let mut tx = state.pool.begin().await.map_err(internal)?;
     sqlx::query("SELECT commit.clean_testing_environment($1,$2)")
         .bind(id)
@@ -475,8 +486,10 @@ mod tests {
         Ok(headers)
     }
 
-    async fn scoped<T>(future: impl std::future::Future<Output = T>) -> T {
-        request_context::scope(Uuid::new_v4().to_string(), future).await
+    fn scoped<T>(
+        future: impl std::future::Future<Output = T>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = T>>> {
+        Box::pin(request_context::scope(Uuid::new_v4().to_string(), future))
     }
 
     #[test]
@@ -836,6 +849,118 @@ mod tests {
             .execute(&pool)
             .await?;
         pool.close().await;
+        Ok(())
+    }
+    #[tokio::test]
+    async fn discovered_secret_is_live_scoped_and_clean_generation_removes_only_its_data()
+    -> anyhow::Result<()> {
+        let Ok(url) = std::env::var("COMMIT_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let pool = sqlx::PgPool::connect(&url).await?;
+        // The migration-aware pairing test may run concurrently; acquire the same migration path.
+        let owner: String = sqlx::query_scalar("SELECT current_user::text")
+            .fetch_one(&pool)
+            .await?;
+        postgres::migrate(&pool, &owner).await?;
+        let server = MockServer::start().await;
+        let mut state = crate::api::tests::test_state_with_pool(
+            Arc::new(TrustedHeaderIdentityProvider::default()),
+            pool.clone(),
+        )?;
+        state.sessions = Some(Arc::new(sessions::SessionService::new(
+            &IamSettings {
+                mode: AuthenticationMode::Iam,
+                base_url: server.uri().parse()?,
+                app_id: Some("tos>commit".into()),
+                app_secret: Some(SecretString::from("production-secret-never-sent")),
+                audience: "tos>commit".into(),
+                webhook_secret: None,
+                webhook_key_version: 1,
+            },
+            Duration::from_secs(2),
+        )?));
+        let test_secret = format!(
+            "ask_{}{}",
+            Uuid::new_v4().simple(),
+            &Uuid::new_v4().simple().to_string()[..11]
+        );
+        let id = Uuid::new_v4();
+        let fixture = |version: i64, cleaned: Option<&str>| json!({"environment_id":id,"application":{"app_id":"tos>commit","base_url":"https://backend.commit.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":"Discovered sandbox","version":version,"key_generation":1,"cleaned_at":cleaned,"created_at":"2026-01-01T00:00:00Z","creator_type":"carbon","creator_id":"owner"},"webhook_key_digest":format!("{}{}",id.simple(),id.simple())});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/application/testing-context"))
+            .and(header("x-testing-application", basic(&test_secret)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fixture(1, None)))
+            .mount(&server)
+            .await;
+        scoped(discovery::discover(&state, &test_secret)).await?;
+        let stored: (i64, String) = sqlx::query_as(
+            "SELECT version,name FROM commit.testing_environments WHERE environment_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(stored.1, "Discovered sandbox");
+        scoped(discovery::discover(&state, &test_secret)).await?;
+        let unchanged: i64 = sqlx::query_scalar(
+            "SELECT version FROM commit.testing_environments WHERE environment_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(unchanged, stored.0);
+        // No prod organization or actor is required to discover the empty sandbox.
+        let paired:bool=sqlx::query_scalar("SELECT iam_environment_id=environment_id FROM commit.testing_environments WHERE environment_id=$1").bind(id).fetch_one(&pool).await?;
+        assert!(paired);
+        let retained = Uuid::new_v4();
+        sqlx::query("INSERT INTO commit.telemetry_events(id,environment_id,event) VALUES(gen_random_uuid(),$1,'{}'),($2,NULL,'{}')").bind(id).bind(retained).execute(&pool).await?;
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(fixture(2, Some("2026-09-13T00:00:00Z"))),
+            )
+            .mount(&server)
+            .await;
+        scoped(discovery::discover(&state, &test_secret)).await?;
+        let newer: i64 = sqlx::query_scalar(
+            "SELECT version FROM commit.testing_environments WHERE environment_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(newer > unchanged);
+        let isolated: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM commit.telemetry_events WHERE environment_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(isolated, 0);
+        let production: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM commit.telemetry_events WHERE id=$1")
+                .bind(retained)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(production, 1);
+        sqlx::query("DELETE FROM commit.telemetry_events WHERE id=$1")
+            .bind(retained)
+            .execute(&pool)
+            .await?;
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(json!({"error":{"code":"unauthorized","message":"revoked"}})),
+            )
+            .mount(&server)
+            .await;
+        assert!(
+            scoped(discovery::discover(&state, &test_secret))
+                .await
+                .is_err()
+        );
         Ok(())
     }
 }

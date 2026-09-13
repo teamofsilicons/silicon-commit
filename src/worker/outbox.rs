@@ -79,8 +79,30 @@ impl OutboxProcessor {
         claim: ClaimedEvent,
     ) {
         let publisher = Arc::clone(&self.publisher);
+        let pool = self.pool.clone();
         deliveries.spawn(async move {
-            let result = publisher.publish(&claim.event).await;
+            let result = if claim.testing {
+                Ok(())
+            } else {
+                // Keep the project visibility lock through dispatch so a revoke
+                // cannot commit between the authorization check and the webhook.
+                match pool.begin().await {
+                    Ok(mut tx) => {
+                        let allowed = sqlx::query_scalar::<_, bool>(
+                            "SELECT commit.lock_notification_access($1)",
+                        )
+                        .bind(claim.event.event_id)
+                        .fetch_one(&mut *tx)
+                        .await;
+                        match allowed {
+                            Ok(true) => publisher.publish(&claim.event).await,
+                            Ok(false) => Ok(()),
+                            Err(_) => Err(WebhookPublishError::Unavailable),
+                        }
+                    }
+                    Err(_) => Err(WebhookPublishError::Unavailable),
+                }
+            };
             (claim, result)
         });
     }
@@ -189,6 +211,7 @@ impl OutboxProcessor {
             )
             SELECT claimed.id,
                    organization.org_id,
+                   (organization.environment_id IS NOT NULL) AS testing,
                    recipient.actor_id AS silicon_id,
                    claimed.event_type,
                    claimed.payload_version,
@@ -323,6 +346,7 @@ impl OutboxProcessor {
 
 #[derive(FromRow)]
 struct ClaimedRow {
+    testing: bool,
     id: Uuid,
     org_id: String,
     silicon_id: String,
@@ -339,6 +363,7 @@ struct ClaimedRow {
 }
 
 struct ClaimedEvent {
+    testing: bool,
     event: WebhookEvent,
     attempt_count: i32,
 }
@@ -399,6 +424,7 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         Ok(Self {
+            testing: row.testing,
             event: WebhookEvent {
                 event_id: row.id,
                 org_id,
@@ -450,6 +476,7 @@ mod tests {
     fn claimed_event_promotes_the_persisted_request_correlation() {
         let request_id = "01900000-0000-7000-8000-000000000001";
         let row = ClaimedRow {
+            testing: false,
             id: Uuid::now_v7(),
             org_id: "test-org".to_owned(),
             silicon_id: "silicon-one".to_owned(),
@@ -475,6 +502,7 @@ mod tests {
     #[test]
     fn claimed_event_reconstructs_the_immutable_routing_snapshot() {
         let row = ClaimedRow {
+            testing: false,
             id: Uuid::now_v7(),
             org_id: "test-org".to_owned(),
             silicon_id: "silicon-one".to_owned(),
@@ -510,6 +538,7 @@ mod tests {
     #[test]
     fn claimed_event_rejects_an_incomplete_routing_snapshot() {
         let row = ClaimedRow {
+            testing: false,
             id: Uuid::now_v7(),
             org_id: "test-org".to_owned(),
             silicon_id: "silicon-one".to_owned(),

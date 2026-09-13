@@ -61,6 +61,7 @@ export async function request<T>(
     fingerprint = [scope, org(), method, path, body].join("|");
   const headers: Record<string, string> = {
     "X-Commit-Environment": scope,
+    "X-Commit-Telemetry": read("commit.telemetry", "on"),
   };
   if (path.startsWith("/api/") && org()) headers["X-Org-ID"] = org();
   if (method !== "GET") {

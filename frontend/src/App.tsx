@@ -21,6 +21,7 @@ import {
   setOrg,
   setSession,
 } from "./api";
+import { TestingLogin, TestingBanner } from "./Testing";
 import type { Session } from "./types";
 import { Todos, TodoDetail } from "./Todos";
 import { Projects, ProjectDetail } from "./Projects";
@@ -68,276 +69,261 @@ export default function App() {
   const route = () => path().split("?")[0].split("/").filter(Boolean),
     active = () => route()[0] || "todos";
   return (
-    <Show
-      when={!auth.loading || auth()}
-      fallback={
-        <div class="boot">
-          <Brand />
-          <p>
-            <span class="spinner" />
-            Opening your workspace…
-          </p>
-        </div>
-      }
-    >
+    <>
+      <TestingBanner />
       <Show
-        when={session().authenticated}
-        fallback={<Login error={auth.error} />}
-      >
-        <div class="app-shell">
-          <a
-            class="skip-link"
-            href="#main"
-            onClick={(e) => {
-              e.preventDefault();
-              document.getElementById("main")?.focus();
-            }}
-          >
-            Skip to content
-          </a>
-          <Show when={mobile()}>
-            <button
-              class="nav-backdrop"
-              aria-label="Close navigation"
-              onClick={() => setMobile(false)}
-            />
-          </Show>
-          <aside
-            id="main-sidebar"
-            class={"sidebar " + (mobile() ? "open" : "")}
-          >
+        when={!auth.loading || auth()}
+        fallback={
+          <div class="boot">
             <Brand />
-            <div class="org-picker">
-              <Field label="ORGANIZATION">
-                <select
-                  aria-label="Organization"
-                  value={org()}
-                  disabled={
-                    organizations.loading ||
-                    !!organizations.error ||
-                    !organizations()?.length
-                  }
-                  onChange={(e) => {
-                    setOrg(e.currentTarget.value);
-                    setMobile(false);
-                  }}
-                >
-                  <Show when={!organizations()?.length}>
-                    <option value="">
-                      {organizations.loading
-                        ? "Loading organizations…"
-                        : "No organizations available"}
-                    </option>
-                  </Show>
-                  <For each={organizations()}>
-                    {(id) => <option value={id}>{id}</option>}
-                  </For>
-                </select>
-              </Field>
-            </div>
-            <nav aria-label="Main navigation">
-              <For
-                each={[
-                  ["todos", "Todos"],
-                  ["projects", "Projects"],
-                  ["notifications", "Notifications"],
-                  ["environments", "Testing environments"],
-                ]}
-              >
-                {([key, name]) => (
-                  <a
-                    href={"#/" + key}
-                    class={active() === key ? "active" : ""}
-                    aria-current={active() === key ? "page" : undefined}
-                    onClick={() => setMobile(false)}
+            <p>
+              <span class="spinner" />
+              Opening your workspace…
+            </p>
+          </div>
+        }
+      >
+        <Show
+          when={session().authenticated}
+          fallback={<Login error={auth.error} />}
+        >
+          <div class="app-shell">
+            <a
+              class="skip-link"
+              href="#main"
+              onClick={(e) => {
+                e.preventDefault();
+                document.getElementById("main")?.focus();
+              }}
+            >
+              Skip to content
+            </a>
+            <Show when={mobile()}>
+              <button
+                class="nav-backdrop"
+                aria-label="Close navigation"
+                onClick={() => setMobile(false)}
+              />
+            </Show>
+            <aside
+              id="main-sidebar"
+              class={"sidebar " + (mobile() ? "open" : "")}
+            >
+              <Brand />
+              <div class="org-picker">
+                <Field label="ORGANIZATION">
+                  <select
+                    aria-label="Organization"
+                    value={org()}
+                    disabled={
+                      organizations.loading ||
+                      !!organizations.error ||
+                      !organizations()?.length
+                    }
+                    onChange={(e) => {
+                      setOrg(e.currentTarget.value);
+                      setMobile(false);
+                    }}
                   >
-                    <Icon name={key} />
-                    {name}
-                  </a>
-                )}
-              </For>
-            </nav>
-            <div class="sidebar-bottom">
-              <a
-                class="secondary-link"
-                href="https://iam.teamofsilicons.com/"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Open Silicon IAM ↗
-              </a>
-              <div class="profile">
-                <span class="avatar">
-                  {session().actor?.public_id?.slice(0, 1).toUpperCase()}
-                </span>
-                <div>
-                  <strong>{session().actor?.public_id}</strong>
-                  <small>
-                    {session().actor?.type === "silicon" ? "Silicon" : "Carbon"}
-                  </small>
+                    <Show when={!organizations()?.length}>
+                      <option value="">
+                        {organizations.loading
+                          ? "Loading organizations…"
+                          : "No organizations available"}
+                      </option>
+                    </Show>
+                    <For each={organizations()}>
+                      {(id) => <option value={id}>{id}</option>}
+                    </For>
+                  </select>
+                </Field>
+              </div>
+              <nav aria-label="Main navigation">
+                <For
+                  each={[
+                    ["todos", "Todos"],
+                    ["projects", "Projects"],
+                    ["notifications", "Notifications"],
+                    ["environments", "Testing environments"],
+                  ]}
+                >
+                  {([key, name]) => (
+                    <a
+                      href={"#/" + key}
+                      class={active() === key ? "active" : ""}
+                      aria-current={active() === key ? "page" : undefined}
+                      onClick={() => setMobile(false)}
+                    >
+                      <Icon name={key} />
+                      {name}
+                    </a>
+                  )}
+                </For>
+              </nav>
+              <div class="sidebar-bottom">
+                <a
+                  class="secondary-link"
+                  href="https://iam.teamofsilicons.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open Silicon IAM ↗
+                </a>
+                <div class="profile">
+                  <span class="avatar">
+                    {session().actor?.public_id?.slice(0, 1).toUpperCase()}
+                  </span>
+                  <div>
+                    <strong>{session().actor?.public_id}</strong>
+                    <small>
+                      {session().actor?.type === "silicon"
+                        ? "Silicon"
+                        : "Carbon"}
+                    </small>
+                  </div>
                 </div>
               </div>
-            </div>
-          </aside>
-          <div class="main-shell">
-            <header class="topbar">
-              <button
-                class="menu-button icon-button"
-                aria-label="Open navigation"
-                aria-expanded={mobile()}
-                aria-controls="main-sidebar"
-                onClick={() => setMobile(true)}
-              >
-                ☰
-              </button>
-              <div class="breadcrumb">
-                Silicon / <strong>Commit</strong>
-                <span class="divider" />
-                <span
-                  class={
-                    "environment-label " +
-                    (environment() !== "production" ? "test" : "")
+            </aside>
+            <div class="main-shell">
+              <header class="topbar">
+                <button
+                  class="menu-button icon-button"
+                  aria-label="Open navigation"
+                  aria-expanded={mobile()}
+                  aria-controls="main-sidebar"
+                  onClick={() => setMobile(true)}
+                >
+                  ☰
+                </button>
+                <div class="breadcrumb">
+                  Silicon / <strong>Commit</strong>
+                  <span class="divider" />
+                  <span
+                    class={
+                      "environment-label " +
+                      (environment() !== "production" ? "test" : "")
+                    }
+                  >
+                    <span />
+                    {environment() === "production"
+                      ? "Production"
+                      : "Testing workspace"}
+                  </span>
+                </div>
+                <button
+                  class="text-button"
+                  disabled={logout.busy()}
+                  onClick={() =>
+                    logout.run(async () => {
+                      await request("/auth/logout", { method: "POST" });
+                      setSession({ authenticated: false });
+                      await refetch();
+                    })
                   }
                 >
-                  <span />
-                  {environment() === "production"
-                    ? "Production"
-                    : "Testing workspace"}
-                </span>
-              </div>
-              <button
-                class="text-button"
-                disabled={logout.busy()}
-                onClick={() =>
-                  logout.run(async () => {
-                    await request("/auth/logout", { method: "POST" });
-                    setSession({ authenticated: false });
-                    await refetch();
-                  })
-                }
-              >
-                Sign out
-              </button>
-            </header>
-            <Show when={environment() !== "production"}>
-              <div class="testing-banner">
-                <strong>Testing environment</strong>
-                <code>{environment()}</code>
-                <span>100 todos · 10 projects</span>
-                <button
-                  class="text-button"
-                  onClick={() => setClean(environment())}
-                >
-                  Clean workspace
+                  Sign out
                 </button>
-                <button
-                  class="text-button"
-                  onClick={() => {
-                    setEnvironment("production");
-                    navigate("/environments");
-                  }}
+              </header>
+              <main id="main" tabindex="-1">
+                <ErrorBox error={logout.error()} />
+                <Show
+                  when={
+                    !organizations.loading &&
+                    !organizations.error &&
+                    organizations()?.includes(org())
+                  }
+                  fallback={
+                    <div class="panel">
+                      <Show when={organizations.loading}>
+                        <p>Loading your organizations…</p>
+                      </Show>
+                      <ErrorBox error={organizations.error} />
+                      <Show when={organizations.error}>
+                        <button
+                          class="button"
+                          onClick={() => void reloadOrganizations()}
+                        >
+                          Try again
+                        </button>
+                      </Show>
+                      <Show
+                        when={!organizations.loading && !organizations.error}
+                      >
+                        <p>
+                          No organizations are available for this session.
+                          Choose your organizations in IAM to continue.
+                        </p>
+                        <a
+                          class="button primary"
+                          href="/auth/start"
+                          onClick={() => setEnvironment("production")}
+                        >
+                          Continue with IAM
+                        </a>
+                      </Show>
+                    </div>
+                  }
                 >
-                  Return to production →
-                </button>
-              </div>
-            </Show>
-            <main id="main" tabindex="-1">
-              <ErrorBox error={logout.error()} />
-              <Show
-                when={
-                  !organizations.loading &&
-                  !organizations.error &&
-                  organizations()?.includes(org())
-                }
-                fallback={
-                  <div class="panel">
-                    <Show when={organizations.loading}>
-                      <p>Loading your organizations…</p>
-                    </Show>
-                    <ErrorBox error={organizations.error} />
-                    <Show when={organizations.error}>
-                      <button
-                        class="button"
-                        onClick={() => void reloadOrganizations()}
-                      >
-                        Try again
-                      </button>
-                    </Show>
-                    <Show when={!organizations.loading && !organizations.error}>
-                      <p>
-                        No organizations are available for this session. Choose
-                        your organizations in IAM to continue.
-                      </p>
-                      <a
-                        class="button primary"
-                        href="/auth/start"
-                        onClick={() => setEnvironment("production")}
-                      >
-                        Continue with IAM
-                      </a>
-                    </Show>
-                  </div>
-                }
-              >
-                <Show when={context() + "|" + path()} keyed>
-                  {(_scope) => (
-                    <Switch>
-                      <Match when={active() === "todos" && route()[1]}>
-                        <TodoDetail id={decodeRoute(route()[1])} />
-                      </Match>
-                      <Match when={active() === "projects" && route()[1]}>
-                        <ProjectDetail id={decodeRoute(route()[1])} />
-                      </Match>
-                      <Match when={active() === "projects"}>
-                        <Projects />
-                      </Match>
-                      <Match when={active() === "notifications"}>
-                        <Notifications />
-                      </Match>
-                      <Match when={active() === "environments"}>
-                        <Environments />
-                      </Match>
-                      <Match
-                        when={active() === "todos" || active() === "login"}
-                      >
-                        <Todos />
-                      </Match>
-                      <Match when={true}>
-                        <div class="panel">
-                          <h1>Page not found</h1>
-                          <a href="#/todos">Return to todos →</a>
-                        </div>
-                      </Match>
-                    </Switch>
-                  )}
+                  <Show when={context() + "|" + path()} keyed>
+                    {(_scope) => (
+                      <Switch>
+                        <Match when={active() === "todos" && route()[1]}>
+                          <TodoDetail id={decodeRoute(route()[1])} />
+                        </Match>
+                        <Match when={active() === "projects" && route()[1]}>
+                          <ProjectDetail id={decodeRoute(route()[1])} />
+                        </Match>
+                        <Match when={active() === "projects"}>
+                          <Projects />
+                        </Match>
+                        <Match when={active() === "notifications"}>
+                          <Notifications />
+                        </Match>
+                        <Match when={active() === "environments"}>
+                          <Environments />
+                        </Match>
+                        <Match
+                          when={active() === "todos" || active() === "login"}
+                        >
+                          <Todos />
+                        </Match>
+                        <Match when={true}>
+                          <div class="panel">
+                            <h1>Page not found</h1>
+                            <a href="#/todos">Return to todos →</a>
+                          </div>
+                        </Match>
+                      </Switch>
+                    )}
+                  </Show>
                 </Show>
+              </main>
+              <Show when={clean()} keyed>
+                {(id) => (
+                  <Confirm
+                    title="Clean this testing workspace?"
+                    message="All todos, projects, and activity in this testing workspace will be removed permanently. Its name and key remain."
+                    label="Clean workspace"
+                    close={() => setClean(undefined)}
+                    action={async () => {
+                      await api("/test-environments/" + id + "/clean", {
+                        method: "POST",
+                        body: {},
+                      });
+                      window.location.reload();
+                    }}
+                  />
+                )}
               </Show>
-            </main>
-            <Show when={clean()} keyed>
-              {(id) => (
-                <Confirm
-                  title="Clean this testing workspace?"
-                  message="All todos, projects, and activity in this testing workspace will be removed permanently. Its name and key remain."
-                  label="Clean workspace"
-                  close={() => setClean(undefined)}
-                  action={async () => {
-                    await api("/test-environments/" + id + "/clean", {
-                      method: "POST",
-                      body: {},
-                    });
-                    window.location.reload();
-                  }}
-                />
-              )}
-            </Show>
-            <footer>
-              <span>Silicon Commit</span>
-              <span>A shared place for work.</span>
-            </footer>
+              <footer>
+                <span>Silicon Commit</span>
+                <span>A shared place for work.</span>
+              </footer>
+            </div>
           </div>
-        </div>
+        </Show>
       </Show>
-    </Show>
+    </>
   );
 }
 function Brand() {
@@ -402,6 +388,7 @@ function Login(p: { error?: unknown }) {
           >
             Continue with IAM <Icon name="arrow" />
           </a>
+          <TestingLogin />
           <p class="login-footnote">
             Identity and access are managed by Silicon IAM. Commit never asks
             for your IAM password.

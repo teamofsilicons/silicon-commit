@@ -142,6 +142,9 @@ impl NotificationSettingsService {
         actor: &VerifiedActor,
         todo_id: TodoId,
     ) -> Result<TodoNotificationSubscription, AppError> {
+        let mut connection = self.pool.acquire().await?;
+        super::todos::authorize_related_project(&mut connection, actor, todo_id, false).await?;
+        drop(connection);
         authorize_silicon(actor)?;
         let target =
             store::get_todo_notification_target(&self.pool, actor.organization_id, todo_id)
@@ -172,6 +175,7 @@ impl NotificationSettingsService {
 
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
+        super::todos::authorize_related_project(&mut transaction, actor, todo_id, true).await?;
         let target = store::lock_todo_notification_target(
             transaction.as_mut(),
             actor.organization_id,

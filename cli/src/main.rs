@@ -1,3 +1,5 @@
+mod daemon;
+mod runtime;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,7 +12,7 @@ use std::{fs, path::PathBuf};
     bin_name = "commit",
     version,
     about = "Silicon Commit work manager",
-    after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test KEY for a sandbox and --no-update to skip automatic updates.\nRun commit <command> --help for arguments and subcommands."
+    after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test APP_SECRET for a sandbox. Install the hourly updater with commit daemon install.\nRun commit <command> --help for arguments and subcommands."
 )]
 struct Root {
     #[arg(
@@ -28,7 +30,7 @@ struct Root {
         global = true,
         env = "COMMIT_TEST_KEY",
         hide_env_values = true,
-        help = "32-character test-environment key"
+        help = "IAM test app_secret; selects a sandbox without an IAM root key"
     )]
     test: Option<String>,
     #[arg(long, global = true, help = "Reuse a key when retrying the same write")]
@@ -46,6 +48,29 @@ struct Root {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Browse bundled usage and development guides without network access.
+    Docs {
+        #[arg(default_value = "start")]
+        topic: String,
+    },
+    /// Select an IAM sandbox, inspect it, or return to the production session.
+    Testing {
+        #[command(subcommand)]
+        command: runtime::TestingCommand,
+    },
+    /// Install or control the independent hourly updater.
+    Daemon {
+        #[command(subcommand)]
+        command: daemon::DaemonCommand,
+    },
+    /// Submit a GitHub bug report, optionally with a patch PR.
+    Report {
+        message: String,
+        #[arg(long)]
+        pr: Option<String>,
+        #[arg(long)]
+        save_only: bool,
+    },
     /// Exchange an IAM short-lived token, or check the current login.
     Login(Login),
     /// Revoke the saved session and remove its local credentials.
@@ -74,6 +99,11 @@ enum Command {
         command: ProjectCommand,
     },
     /// Read notification settings, or replace them with --data JSON.
+    /// Configure the email used for this organization and subscribed event kinds.
+    Email {
+        #[arg(long)]
+        data: Option<String>,
+    },
     Notifications {
         #[arg(long)]
         data: Option<String>,
@@ -89,6 +119,18 @@ enum ConfigCommand {
     /// Set the home directory used for Commit's local state.
     #[command(name = "home", visible_alias = "set_home_dir")]
     Home { location: PathBuf },
+    /// Inspect non-secret local configuration.
+    Show,
+    /// Enable or disable automatic hourly updates.
+    Updates {
+        #[arg(value_parser=["on","off"])]
+        value: String,
+    },
+    /// Enable or disable diagnostics for all subsequent CLI requests.
+    Telemetry {
+        #[arg(value_parser=["on","off"])]
+        value: String,
+    },
 }
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -198,6 +240,18 @@ struct ProjectList {
 
 #[derive(Subcommand)]
 enum ProjectCommand {
+    /// Atomically take an unassigned project task or subtask.
+    Claim { project: String, task: String },
+    /// Remove a task subtree and its linked todos.
+    DeleteTask { project: String, task: String },
+    /// List the latest project revisions; use --before to page backward.
+    Versions {
+        id: String,
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Read a complete retained project snapshot.
+    Version { id: String, version: i64 },
     /// List resources in the current organization.
     List(ProjectList),
     /// Fetch a resource by its public ID.
@@ -299,6 +353,8 @@ struct Session {
     refresh_token: String,
     api_url: String,
     org_id: Option<String>,
+    #[serde(default)]
+    test_key: Option<String>,
 }
 fn parse_data(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let text = input
@@ -330,7 +386,8 @@ fn parse_todo_create(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
 fn session_path() -> PathBuf {
     configured_home_dir()
         .unwrap_or_else(default_home_dir)
-        .join(".commit/session.json")
+        .join(".commit")
+        .join(runtime::session_file())
 }
 fn default_home_dir() -> PathBuf {
     std::env::var_os("SILICON_HOME")
@@ -381,17 +438,7 @@ fn load_session() -> Option<Session> {
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
-    let p = session_path();
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&p, serde_json::to_vec_pretty(s)?)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    runtime::private_write(&session_path(), &serde_json::to_vec_pretty(s)?)
 }
 async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
     let directory = match fs::read_to_string(home_dir_config_path()) {
@@ -400,7 +447,7 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_home_dir(),
         Err(error) => return Err(error.into()),
     };
-    let path = directory.join(".commit/session.json");
+    let path = directory.join(".commit").join(runtime::session_file());
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -422,7 +469,10 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
     });
     // ponytail: legacy sessions do not store test context; callers must reuse
     // their login selector until a future session format persists it.
-    if let Some(key) = &a.test {
+    if saved.test_key.as_deref() != runtime::selected_key().as_deref() {
+        return Err("saved session belongs to a different environment; sign in again".into());
+    }
+    if let Some(key) = &saved.test_key {
         client = client.with_test_key(key)?;
     }
     client.logout(&saved.refresh_token).await?;
@@ -431,17 +481,60 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
 }
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    match run().await {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("Error: {error}");
-            std::process::ExitCode::FAILURE
+    runtime::initialize();
+    let result = match Root::try_parse() {
+        Ok(mut args) => {
+            args.test = runtime::selected_key();
+            run(args).await
         }
+        Err(error) => {
+            let code = error.exit_code();
+            let _ = error.print();
+            runtime::footer();
+            return std::process::ExitCode::from(u8::try_from(code).unwrap_or(2));
+        }
+    };
+    if let Err(error) = &result {
+        eprintln!(
+            "commit: {error}\nSee commit docs or commit <command> --help for usage and recovery steps."
+        );
+    }
+    runtime::footer();
+    if result.is_ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
     }
 }
+async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
+    match &a.command {
+        Command::Config {
+            command: ConfigCommand::Telemetry { value },
+        } => {
+            runtime::private_write(&runtime::directory().join("telemetry"), value.as_bytes())?;
+            println!("Telemetry {value}");
+            return Ok(());
+        }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let a = Root::parse();
+        Command::Docs { topic } => return runtime::docs(topic),
+        Command::Testing { command } => {
+            return runtime::testing(command, a.api_url.as_deref()).await;
+        }
+        Command::Daemon { command } => return daemon::command(command).await,
+        Command::Config {
+            command: ConfigCommand::Show,
+        } => {
+            println!(
+                "{}",
+                serde_json::json!({"home":configured_home_dir().unwrap_or_else(default_home_dir),"auto_update":daemon::updates_enabled(),"docs":"https://docs.commit.teamofsilicons.com","repository":"https://github.com/teamofsilicons/silicon-commit"})
+            );
+            return Ok(());
+        }
+        Command::Config {
+            command: ConfigCommand::Updates { value },
+        } => return daemon::configure_updates(value == "on"),
+        _ => {}
+    }
     if let Command::Config {
         command: ConfigCommand::Home { location },
     } = &a.command
@@ -454,11 +547,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let saved = load_session();
+    if saved
+        .as_ref()
+        .is_some_and(|s| s.test_key.as_deref() != runtime::selected_key().as_deref())
+    {
+        return Err("saved session environment mismatch; sign in again".into());
+    }
     let api = a
         .api_url
         .clone()
         .or_else(|| saved.as_ref().map(|s| s.api_url.clone()))
-        .unwrap_or_else(|| "http://127.0.0.1:8080".to_owned());
+        .unwrap_or_else(|| "https://backend.commit.teamofsilicons.com".to_owned());
     let token = a
         .token
         .clone()
@@ -467,17 +566,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .org_id
         .clone()
         .or_else(|| saved.as_ref().and_then(|s| s.org_id.clone()));
-    let mut c = Client::new(&api)?.with_mutation({
-        let mut m = if let Some(k) = a.idempotency_key {
-            Mutation::with_key(k)?
-        } else {
-            Mutation::new()
-        };
-        if let Some(v) = a.if_match {
-            m = m.if_match(v)?;
-        }
-        m
-    });
+    let mut c = Client::new(&api)?
+        .with_source("cli")?
+        .with_telemetry(runtime::telemetry_enabled())
+        .with_mutation({
+            let mut m = if let Some(k) = a.idempotency_key {
+                Mutation::with_key(k)?
+            } else {
+                Mutation::new()
+            };
+            if let Some(v) = a.if_match {
+                m = m.if_match(v)?;
+            }
+            m
+        });
     if let Some(t) = token {
         c = c.with_bearer(t);
     }
@@ -488,8 +590,38 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         c = c.with_test_key(k)?;
     }
     let output = match a.command {
-        Command::Config { .. } | Command::Logout(_) => {
+        Command::Docs { .. }
+        | Command::Testing { .. }
+        | Command::Daemon { .. }
+        | Command::Config { .. }
+        | Command::Logout(_) => {
             unreachable!("local session commands return before API setup")
+        }
+        Command::Report {
+            message,
+            pr,
+            save_only,
+        } => {
+            if save_only {
+                runtime::report(&message, pr.as_deref(), true)?;
+                return Ok(());
+            }
+            let result = c
+                .report(&serde_json::json!({"message":message,"pr":pr}))
+                .await?;
+            if pr.is_none() {
+                eprintln!(
+                    "You can also attach a fix with --pr https://github.com/teamofsilicons/silicon-commit/pull/NUMBER"
+                );
+            }
+            result
+        }
+        Command::Email { data: d } => {
+            if let Some(d) = d {
+                c.set_email_settings(&parse_data(&d)?).await?
+            } else {
+                c.email_settings().await?
+            }
         }
         Command::Iam(_) => c.iam().await?,
         Command::Login(Login {
@@ -505,9 +637,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     refresh_token: s.refresh_token.clone(),
                     api_url: api,
                     org_id: s.org_id.clone(),
+                    test_key: runtime::selected_key(),
                 })?;
             }
-            serde_json::to_value(s)?
+            if runtime::selected_key().is_some() {
+                runtime::remember_context(&c).await;
+            }
+            if x.no_save {
+                serde_json::to_value(s)?
+            } else {
+                serde_json::json!({"authenticated":true,"actor":s.actor,"org_id":s.org_id})
+            }
         }
         Command::Health => c.health().await?,
         Command::Ready => c.ready().await?,
@@ -572,6 +712,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Command::Projects { command } => match command {
+            ProjectCommand::Claim { project, task } => {
+                c.claim_project_task(&project, &task).await?
+            }
+            ProjectCommand::DeleteTask { project, task } => {
+                c.delete_project_task(&project, &task).await?
+            }
+            ProjectCommand::Versions { id, before } => {
+                let value = before.map(|v| v.to_string());
+                let query = value
+                    .as_deref()
+                    .map(|v| vec![("before", v)])
+                    .unwrap_or_default();
+                c.project_versions(&id, &query).await?
+            }
+            ProjectCommand::Version { id, version } => c.project_version(&id, version).await?,
             ProjectCommand::List(q) => {
                 let mut params = Vec::new();
                 if let Some(v) = q.status.as_deref() {
@@ -654,45 +809,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
-    maybe_check_update(a.no_update).await;
-    Ok(())
-}
 
-async fn maybe_check_update(disabled: bool) {
-    if disabled {
-        return;
-    }
-    let dir = configured_home_dir()
-        .unwrap_or_else(default_home_dir)
-        .join(".commit");
-    let marker = dir.join("last-update-check");
-    let now = std::time::SystemTime::now();
-    if let Ok(meta) = fs::metadata(&marker)
-        && let Ok(modified) = meta.modified()
-        && now.duration_since(modified).unwrap_or_default() < std::time::Duration::from_secs(3600)
-    {
-        return;
-    }
-    let _ = fs::create_dir_all(&dir);
-    let _ = fs::write(&marker, b"checked");
-    if let Ok(release) = silicon_commit_client::latest_cli_release().await
-        && release.version != env!("CARGO_PKG_VERSION")
-    {
-        eprintln!(
-            "A newer silicon-commit release is available: {}; updating the CLI",
-            release.version
-        );
-        // Run after the command has completed so an update cannot interrupt
-        // the user's requested operation. A failed install is non-fatal: the
-        // current binary remains usable and the next hourly check retries it.
-        match std::process::Command::new("cargo")
-            .args(["install", "--locked", "--force", "silicon-commit-cli"])
-            .stdout(std::process::Stdio::from(std::io::stderr()))
-            .status()
-        {
-            Ok(status) if status.success() => eprintln!("Silicon Commit CLI updated"),
-            Ok(_) => eprintln!("CLI update failed; continuing with the current version"),
-            Err(_) => eprintln!("cargo was unavailable; continuing with the current version"),
-        }
-    }
+    Ok(())
 }

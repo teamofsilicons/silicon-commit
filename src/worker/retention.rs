@@ -166,6 +166,14 @@ pub async fn run_cycle(
     pool: &PgPool,
     policy: RetentionPolicy,
 ) -> anyhow::Result<RetentionCycleReport> {
+    sqlx::query(
+        "DELETE FROM commit.telemetry_events WHERE created_at<clock_timestamp()-interval '30 days'",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("SELECT commit.sunset_idle_contracts()")
+        .execute(pool)
+        .await?;
     let mut totals = RetentionReport::default();
 
     for pass in 1..=MAX_PASSES_PER_CYCLE {

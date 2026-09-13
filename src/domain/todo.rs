@@ -104,6 +104,9 @@ pub struct TodoCreate {
     /// Canonical HTTPS attachment URLs from any image provider.
     #[serde(default)]
     pub attachments: Vec<AttachmentUrl>,
+    /// Related project, scoped to this todo's organization and environment.
+    #[serde(default)]
+    pub project_id: Option<super::ProjectId>,
 }
 
 impl TodoCreate {
@@ -117,6 +120,7 @@ impl TodoCreate {
         let attachments = validate_attachments(self.attachments, limits.attachments_per_todo)?;
 
         Ok(ValidatedTodoCreate {
+            project_id: self.project_id,
             title,
             description,
             assigned_to: self.assigned_to,
@@ -139,6 +143,8 @@ pub struct ValidatedTodoCreate {
     pub status: TodoStatus,
     /// Canonical HTTPS attachment URLs.
     pub attachments: Vec<AttachmentUrl>,
+    /// Related project, scoped to this todo's organization and environment.
+    pub project_id: Option<super::ProjectId>,
 }
 
 /// Three-state field used to distinguish absent PATCH fields from JSON `null`.
@@ -235,6 +241,9 @@ pub struct TodoPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub attachments: Option<Vec<AttachmentUrl>>,
+    /// Set or clear the related project; task-backed todos retain their project.
+    #[serde(default, skip_serializing_if = "NullablePatch::is_absent")]
+    pub project_id: NullablePatch<super::ProjectId>,
 }
 
 impl TodoPatch {
@@ -246,6 +255,7 @@ impl TodoPatch {
             && self.assigned_to.is_none()
             && self.status.is_none()
             && self.attachments.is_none()
+            && self.project_id.is_absent()
     }
 
     /// Validates all supplied fields and rejects an empty patch.
@@ -270,6 +280,7 @@ impl TodoPatch {
             .transpose()?;
 
         Ok(ValidatedTodoPatch {
+            project_id: self.project_id,
             title,
             description,
             assigned_to: self.assigned_to,
@@ -292,6 +303,8 @@ pub struct ValidatedTodoPatch {
     pub status: Option<TodoStatus>,
     /// Validated replacement attachment set.
     pub attachments: Option<Vec<AttachmentUrl>>,
+    /// Set or clear the related project; task-backed todos retain their project.
+    pub project_id: NullablePatch<super::ProjectId>,
 }
 
 /// Public todo aggregate with internal tenant and principal keys retained.
@@ -319,6 +332,8 @@ pub struct Todo {
     pub created_at: OffsetDateTime,
     /// Last meaningful update timestamp.
     pub updated_at: OffsetDateTime,
+    /// Related project, scoped to this todo's organization and environment.
+    pub project_id: Option<super::ProjectId>,
 }
 
 impl Todo {
@@ -342,6 +357,7 @@ impl Serialize for Todo {
     {
         #[derive(Serialize)]
         struct WireTodo<'a> {
+            project_id: Option<super::ProjectId>,
             id: TodoId,
             org_id: &'a PublicOrganizationId,
             title: &'a RequiredText,
@@ -357,6 +373,7 @@ impl Serialize for Todo {
         }
 
         WireTodo {
+            project_id: self.project_id,
             id: self.id,
             org_id: &self.org_id,
             title: &self.title,
@@ -439,6 +456,8 @@ pub struct TodoQuery {
     /// Validated page size.
     #[serde(default)]
     pub limit: PageLimit,
+    /// Filter by related project UUID.
+    pub project_id: Option<super::ProjectId>,
 }
 
 impl TodoQuery {

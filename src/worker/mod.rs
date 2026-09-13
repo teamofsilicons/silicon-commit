@@ -14,8 +14,10 @@ use crate::{
     shutdown,
 };
 
+mod email;
 pub mod outbox;
 pub mod retention;
+mod telemetry;
 
 /// Runs notification delivery and retention maintenance until shutdown.
 ///
@@ -59,7 +61,8 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
             }
             _ = poll.tick(), if outbox_jobs.is_empty() => {
                 let processor = processor.clone();
-                outbox_jobs.spawn(async move { processor.process_once().await });
+                let email_pool = pool.clone();
+                outbox_jobs.spawn(async move { let n = processor.process_once().await?; Ok(n + email::process_once(&email_pool).await? + telemetry::process_once(&email_pool).await?) });
             }
             result = outbox_jobs.join_next(), if !outbox_jobs.is_empty() => {
                 if let Some(result) = result {

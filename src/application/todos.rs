@@ -71,6 +71,7 @@ impl TodoService {
 
     /// Returns one active organization-visible todo.
     pub async fn get(&self, actor: &VerifiedActor, todo_id: TodoId) -> Result<Todo, AppError> {
+        self.check_project_access(actor, todo_id).await?;
         store::get_todo(&self.pool, actor.organization_id, todo_id)
             .await?
             .ok_or(AppError::NotFound)
@@ -121,7 +122,12 @@ impl TodoService {
             assigned_to_principal_id: assignee.actor.principal_id,
             status: request.status,
             attachments: &request.attachments,
+            project_id: request.project_id,
         };
+        if let Some(project_id) = request.project_id {
+            authorize_link(&mut transaction, actor, project_id).await?;
+            invite_assignee(&mut transaction, actor, project_id, &assignee.actor).await?;
+        }
         store::insert_todo(transaction.as_mut(), &new_todo).await?;
 
         let changes = json!({
@@ -179,6 +185,7 @@ impl TodoService {
         idempotency_key: IdempotencyKey,
         request_id: &str,
     ) -> Result<MutationResponse, AppError> {
+        self.check_project_access(actor, todo_id).await?;
         validate_request_id(request_id)?;
         let path = format!("/todos/{todo_id}");
         let mutation = mutation_identity(UPDATE_TODO_OPERATION, path, idempotency_key, &request)?;
@@ -198,6 +205,7 @@ impl TodoService {
 
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
+        lock_related_project(&mut transaction, actor, todo_id).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -230,7 +238,22 @@ impl TodoService {
             return Ok(response);
         }
 
+        if desired.project_id != current.project_id {
+            let linked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commit.project_tasks WHERE organization_id=$1 AND todo_id=$2)").bind(actor.organization_id.into_uuid()).bind(todo_id.into_uuid()).fetch_one(&mut *transaction).await?;
+            if linked {
+                return Err(AppError::Conflict {
+                    code: "project_task_link_is_immutable".into(),
+                });
+            }
+            if let Some(id) = desired.project_id {
+                authorize_link(&mut transaction, actor, id).await?;
+            }
+        }
+        if let Some(project_id) = desired.project_id {
+            invite_assignee(&mut transaction, actor, project_id, &desired.assigned_to).await?;
+        }
         let replacement = TodoReplacement {
+            project_id: desired.project_id,
             title: &desired.title,
             description: desired.description.as_ref(),
             assigned_to_principal_id: desired.assigned_to.principal_id,
@@ -315,9 +338,11 @@ impl TodoService {
         todo_id: TodoId,
         request_id: &str,
     ) -> Result<(), AppError> {
+        self.check_project_access(actor, todo_id).await?;
         validate_request_id(request_id)?;
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
+        lock_related_project(&mut transaction, actor, todo_id).await?;
         let current =
             match store::lock_delete_target(transaction.as_mut(), actor.organization_id, todo_id)
                 .await?
@@ -394,6 +419,7 @@ impl TodoService {
         todo_id: TodoId,
         query: CollectionQuery,
     ) -> Result<Page<TodoNote>, AppError> {
+        self.check_project_access(actor, todo_id).await?;
         let limit = query.limit;
         let notes = store::list_notes(&self.pool, actor.organization_id, todo_id, query)
             .await?
@@ -412,6 +438,7 @@ impl TodoService {
         idempotency_key: IdempotencyKey,
         request_id: &str,
     ) -> Result<MutationResponse, AppError> {
+        self.check_project_access(actor, todo_id).await?;
         validate_request_id(request_id)?;
         let path = format!("/todos/{todo_id}/notes");
         let fingerprint_input = note_fingerprint_input(&request);
@@ -428,6 +455,7 @@ impl TodoService {
 
         let mut transaction = self.pool.begin().await?;
         crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
+        lock_related_project(&mut transaction, actor, todo_id).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -577,6 +605,7 @@ fn validate_resolved_assignee(
 }
 
 struct DesiredTodo {
+    project_id: Option<crate::domain::ProjectId>,
     title: RequiredText,
     description: Option<LimitedText>,
     assigned_to: Actor,
@@ -631,7 +660,16 @@ impl DesiredTodo {
             TodoActivityKind::Updated
         };
 
+        let project_id = match patch.project_id {
+            NullablePatch::Absent => current.project_id,
+            NullablePatch::Null => None,
+            NullablePatch::Value(id) => Some(id),
+        };
+        if project_id != current.project_id {
+            changed_fields.push("project_id");
+        }
         Self {
+            project_id,
             title,
             description,
             assigned_to,
@@ -657,6 +695,22 @@ async fn replay_on_connection(
             code: Cow::Borrowed("idempotency_key_reused"),
         });
     }
+    let id = mutation
+        .resource_path
+        .strip_prefix("/todos/")
+        .and_then(|p| p.split('/').next())
+        .and_then(|v| v.parse::<TodoId>().ok())
+        .or_else(|| {
+            stored
+                .response
+                .body
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|v| v.parse::<TodoId>().ok())
+        });
+    if let Some(id) = id {
+        authorize_related_project(connection, actor, id, true).await?;
+    }
     Ok(Some(stored.response))
 }
 
@@ -665,7 +719,8 @@ fn authorize_patch(
     todo: &Todo,
     patch: &ValidatedTodoPatch,
 ) -> Result<(), AppError> {
-    let changes_content = patch.title.is_some()
+    let changes_content = !patch.project_id.is_absent()
+        || patch.title.is_some()
         || !patch.description.is_absent()
         || patch.assigned_to.is_some()
         || patch.attachments.is_some();
@@ -692,7 +747,7 @@ fn authorize_note(actor: &VerifiedActor, todo: &Todo) -> Result<(), AppError> {
     }
 }
 
-async fn enqueue_notification(
+pub(crate) async fn enqueue_notification(
     connection: &mut PgConnection,
     actor: &VerifiedActor,
     todo: &Todo,
@@ -762,6 +817,7 @@ fn mutation_response<T: serde::Serialize>(
 
 fn create_fingerprint_input(request: &TodoCreate) -> Value {
     json!({
+        "project_id": request.project_id,
         "title": request.title,
         "description": request.description,
         "assigned_to": request.assigned_to,
@@ -818,6 +874,85 @@ fn map_assignee_provider_error(error: ProviderError) -> AppError {
     }
 }
 
+impl TodoService {
+    async fn check_project_access(
+        &self,
+        actor: &VerifiedActor,
+        todo_id: TodoId,
+    ) -> Result<(), AppError> {
+        let mut connection = self.pool.acquire().await?;
+        authorize_related_project(&mut connection, actor, todo_id, false).await
+    }
+}
+/// Checks todo visibility before notes, subscriptions or mutation responses.
+pub(crate) async fn authorize_related_project(
+    connection: &mut PgConnection,
+    actor: &VerifiedActor,
+    todo_id: TodoId,
+    lock: bool,
+) -> Result<(), AppError> {
+    let project: Option<Uuid> = sqlx::query_scalar(
+        "SELECT project_id FROM commit.todos WHERE organization_id=$1 AND id=$2",
+    )
+    .bind(actor.organization_id.into_uuid())
+    .bind(todo_id.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?
+    .flatten();
+    if let Some(id) = project {
+        if lock {
+            authorize_link(connection, actor, crate::domain::ProjectId::from_uuid(id)).await?;
+        } else if !crate::infrastructure::postgres::projects::can_access(
+            connection,
+            actor,
+            crate::domain::ProjectId::from_uuid(id),
+        )
+        .await?
+        {
+            return Err(AppError::NotFound);
+        }
+    }
+    Ok(())
+}
+async fn lock_related_project(
+    connection: &mut PgConnection,
+    actor: &VerifiedActor,
+    todo_id: TodoId,
+) -> Result<(), AppError> {
+    authorize_related_project(connection, actor, todo_id, true).await
+}
+// The project row is locked by authorize_link/lock_related_project before this call.
+// Explicit assignment invites the recipient, matching assignments through tasks.
+async fn invite_assignee(
+    connection: &mut PgConnection,
+    actor: &VerifiedActor,
+    project_id: crate::domain::ProjectId,
+    assignee: &Actor,
+) -> Result<(), AppError> {
+    sqlx::query("INSERT INTO commit.project_participants(id,organization_id,project_id,silicon_principal_id,added_by_principal_id) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM commit.projects WHERE organization_id=$2 AND id=$3 AND private) AND NOT EXISTS(SELECT 1 FROM commit.project_participants WHERE organization_id=$2 AND project_id=$3 AND silicon_principal_id=$4 AND removed_at IS NULL)")
+        .bind(Uuid::now_v7()).bind(actor.organization_id.into_uuid()).bind(project_id.into_uuid()).bind(assignee.principal_id.into_uuid()).bind(actor.actor.principal_id.into_uuid()).execute(connection).await?;
+    Ok(())
+}
+
+async fn authorize_link(
+    connection: &mut PgConnection,
+    actor: &VerifiedActor,
+    project_id: crate::domain::ProjectId,
+) -> Result<(), AppError> {
+    crate::infrastructure::postgres::projects::lock_project(
+        connection,
+        actor.organization_id,
+        &crate::domain::ProjectLocator::Id(project_id),
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
+    if !crate::infrastructure::postgres::projects::can_access(connection, actor, project_id).await?
+    {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use secrecy::SecretString;
@@ -862,6 +997,7 @@ mod tests {
 
     fn todo() -> Option<Todo> {
         Some(Todo {
+            project_id: None,
             id: TodoId::new(),
             organization_id: OrganizationId::from_uuid(Uuid::from_u128(100)),
             org_id: PublicOrganizationId::new("test-org").ok()?,
