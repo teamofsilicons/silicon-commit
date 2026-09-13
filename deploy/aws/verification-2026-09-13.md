@@ -10,7 +10,7 @@ Deployed on 2026-09-13. Application source revision: `f15f888` (the later docume
 - Docs: https://docs.commit.teamofsilicons.com — Namecheap `docs.commit` A record points to the existing Commit EC2 host. Caddy serves the static docs, installer and checksum-pinned source archive over HTTPS; the backend proxy remains operational. Search and navigation were verified in Chrome.
 - Telemetry: https://spacestation.teamofsilicons.com/o/tos/tables/committelemetry — the dedicated table contains production request events, including the release trace. The worker's private durable spool recovered the events buffered during its initial TLS provider failure.
 
-Migrations 0023–0027 and the complete runtime grant script/test passed on RDS. API, worker and Caddy containers were running after rollout. Secrets Manager holds the Postmark token and table ingestion key; inspection confirmed neither credential is in the API container. Postmark server credentials were validated and use the existing verified organization sender domain. No real notification or bug-report email was sent as a smoke test.
+Migrations 0023–0027 and the complete runtime grant script/test passed on RDS. API, worker and Caddy containers were running after rollout. Secrets Manager holds the Postmark token and table ingestion key; inspection confirmed neither credential is in the API container. Postmark server credentials were validated; the worker is configured to send from `commit@teamofsilicons.com`. No real notification or bug-report email was sent as a smoke test.
 
 ## Verification
 
