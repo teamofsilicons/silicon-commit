@@ -23,6 +23,25 @@ smoke checks on each supported host. The packaging command accepts local Cargo
 outputs under `target/<triple>/release` or a gathered artifact directory with
 `<honeycomb-target>/commit` (`commit.exe` for Windows).
 
+## Cross-build all six on macOS
+
+With all six Rust targets installed, put `cargo-zigbuild`, `cargo-xwin`, Zig,
+LLVM (`clang-cl`, `llvm-lib`, `lld-link`) and Honeycomb on PATH, then run:
+
+```sh
+scripts/build-release-macos.sh
+# Or select a local packager:
+HONEYCOMB=/path/to/honeycomb scripts/build-release-macos.sh
+```
+
+This builds both macOS targets with the Apple SDK, Linux targets with a glibc
+2.28 baseline, and Windows MSVC targets with the Windows SDK managed by
+cargo-xwin. Windows builds statically link the Visual C++ runtime, so no separate
+redistributable installer is required. It gathers the executables in
+`dist/binaries/` and validates and packs `dist/commit-VERSION.tar.gz`. Set `COMMIT_BUILD_JOBS` to limit concurrency
+(default 4). Cross-compilation checks must be followed by runtime smoke checks;
+the CI workflow below runs each executable on its corresponding OS and CPU.
+
 ## Validate and pack
 
 ```sh

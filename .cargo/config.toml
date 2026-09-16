@@ -1,0 +1,6 @@
+# Honeycomb packages carry standalone CLIs without a separate VC++ installer.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
