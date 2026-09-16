@@ -72,6 +72,9 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
     version = tomllib.loads((ROOT / "cli/Cargo.toml").read_text())["package"]["version"]
+    for cargo_manifest in ("Cargo.toml", "client/Cargo.toml"):
+        if tomllib.loads((ROOT / cargo_manifest).read_text())["package"]["version"] != version:
+            raise SystemExit(f"{cargo_manifest} must use app release version {version}")
     manifest = (ROOT / "honeycomb.yaml").read_text()
     for key, expected in (("app_id", "tos>commit"), ("version", version)):
         match = re.search(rf"^{key}:\s*[\"']?([^\s\"'#]+)[\"']?\s*(?:#.*)?$", manifest, re.MULTILINE)
@@ -93,6 +96,8 @@ def main() -> None:
                 if args.binaries_dir
                 else ROOT / "target" / triple / "release" / name
             )
+            if not source.is_file():
+                raise SystemExit(f"Missing {target} binary: {source}. Build all six native targets before packaging.")
             verify_binary(source, target)
             relative = Path("targets") / target / "bin" / name
             destination = stage / relative

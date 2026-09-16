@@ -38,3 +38,11 @@ included. Publishing and deployment are separate from packaging.
 
 `docs-site/release.py` forwards to this packager for older automation. Building the
 documentation alone does not create or claim a native release.
+
+## CI packaging
+
+Run the **Build native Honeycomb package** workflow on the release commit and
+supply the reviewed published Honeycomb CLI version. It builds and smoke-tests
+all six native executables, then validates and packs a single archive. The
+workflow uploads build artifacts; it does not publish or deploy them. Runner
+labels follow [GitHub's hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).

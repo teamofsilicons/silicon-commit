@@ -1,0 +1,87 @@
+name: Build native Honeycomb package
+on:
+  workflow_dispatch:
+    inputs:
+      honeycomb_version:
+        description: Reviewed published silicon-honeycomb-cli version used to validate and pack
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+            triple: x86_64-unknown-linux-gnu
+            executable: commit
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            triple: aarch64-unknown-linux-gnu
+            executable: commit
+          - runner: windows-2025
+            target: windows-x86_64
+            triple: x86_64-pc-windows-msvc
+            executable: commit.exe
+          - runner: windows-11-arm
+            target: windows-aarch64
+            triple: aarch64-pc-windows-msvc
+            executable: commit.exe
+          - runner: macos-15-intel
+            target: macos-x86_64
+            triple: x86_64-apple-darwin
+            executable: commit
+          - runner: macos-15
+            target: macos-aarch64
+            triple: aarch64-apple-darwin
+            executable: commit
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.triple }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native CLI
+        run: cargo build --locked --release -p silicon-commit-cli --target ${{ matrix.triple }}
+      - name: Smoke test native executable
+        shell: bash
+        env:
+          COMMIT_RELEASE_BINARY: target/${{ matrix.triple }}/release/${{ matrix.executable }}
+        run: |
+          "$COMMIT_RELEASE_BINARY" --version
+          "$COMMIT_RELEASE_BINARY" --help
+          "$COMMIT_RELEASE_BINARY" daemon status
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.triple }}/release/${{ matrix.executable }}
+          if-no-files-found: error
+  package:
+    needs: native
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Install reviewed Honeycomb packager
+        env:
+          HONEYCOMB_PACKAGER_VERSION: ${{ inputs.honeycomb_version }}
+        run: cargo install --locked silicon-honeycomb-cli --version "$HONEYCOMB_PACKAGER_VERSION"
+      - run: python3 scripts/package-release.py --binaries-dir artifacts --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commit-honeycomb-package
+          path: dist/*
+          if-no-files-found: error
