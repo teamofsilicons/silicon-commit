@@ -337,8 +337,19 @@ pub(crate) async fn login(
     let mutation = mutation(&headers)?;
     super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
-    if request_context::testing_scope().is_none() && !input.slt.expose_secret().starts_with("slt_")
-    {
+    // IAM issues 32-byte, unpadded base64url authorization codes. Public actor
+    // IDs remain valid only after the request selected a verified testing plane.
+    let issued_code = input
+        .slt
+        .expose_secret()
+        .strip_prefix("oac_")
+        .is_some_and(|code| {
+            code.len() == 43
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        });
+    if request_context::testing_scope().is_none() && !issued_code {
         return Err(AppError::Unauthenticated);
     }
     client
@@ -444,13 +455,155 @@ pub(crate) fn map_error(error: silicon_iam_client::Error) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
     use super::selected_organizations;
+    use axum::{Json, extract::State, http::HeaderMap};
+    use secrecy::SecretString;
     use serde_json::json;
     use silicon_iam_client::{Client, Credential};
+    use sqlx::postgres::PgPoolOptions;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{header, method, path},
     };
+
+    fn login_state(server: &MockServer) -> anyhow::Result<super::AppState> {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://postgres:postgres@127.0.0.1:1/unused")?;
+        let mut state = crate::api::tests::test_state_with_pool(
+            Arc::new(crate::infrastructure::clients::iam::TrustedHeaderIdentityProvider::default()),
+            pool,
+        )?;
+        state.sessions = Some(Arc::new(super::SessionService::new(
+            &crate::config::IamSettings {
+                mode: crate::config::AuthenticationMode::Iam,
+                base_url: server.uri().parse()?,
+                app_id: Some("tos>commit".to_owned()),
+                app_secret: Some(SecretString::from("test-application-secret")),
+                audience: "tos>commit".to_owned(),
+                webhook_secret: None,
+                webhook_key_version: 1,
+            },
+            Duration::from_secs(2),
+        )?));
+        Ok(state)
+    }
+
+    fn login_headers() -> anyhow::Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "commit-login-regression-1".parse()?);
+        Ok(headers)
+    }
+
+    #[tokio::test]
+    async fn production_login_exchanges_current_iam_code_with_stable_retry_identity()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let code = format!("oac_{}_-", "a".repeat(41));
+        let expected = code.clone();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("idempotency-key", "commit-login-regression-1"))
+            .and(move |request: &wiremock::Request| {
+                let form = url::form_urlencoded::parse(&request.body)
+                    .into_owned()
+                    .collect::<std::collections::HashMap<_, _>>();
+                form.get("slt") == Some(&expected)
+                    && form.get("app_id").is_some_and(|id| id == "tos>commit")
+                    && !form.contains_key("refresh_token")
+                    && !request.headers.contains_key("x-testing-application")
+                    && !request.headers.contains_key("x-testing-environment-key")
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token":"oat_fixture", "refresh_token":"ort_fixture",
+                "token_type":"Bearer", "expires_in":300, "scope":"self.identity.read"
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let state = login_state(&server)?;
+        for _ in 0..2 {
+            let Json(tokens) = crate::request_context::scope(
+                "production-login".to_owned(),
+                super::login(
+                    State(state.clone()),
+                    login_headers()?,
+                    super::StrictJson(serde_json::from_value(json!({"slt":code}))?),
+                ),
+            )
+            .await?;
+            assert_eq!(tokens.access_token, "oat_fixture");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn production_login_rejects_actor_ids_and_non_authorization_credentials_locally()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let state = login_state(&server)?;
+        for invalid in [
+            "alice".to_owned(),
+            "worker:tos".to_owned(),
+            format!("slt_{}", "a".repeat(43)),
+            format!("oat_{}", "a".repeat(43)),
+            format!("ort_{}", "a".repeat(43)),
+            format!("oac_{}", "a".repeat(42)),
+            format!("oac_{}", "a".repeat(44)),
+            format!("oac_{}=", "a".repeat(42)),
+            format!("oac_{} ", "a".repeat(42)),
+        ] {
+            let result = crate::request_context::scope(
+                "invalid-login".to_owned(),
+                super::login(
+                    State(state.clone()),
+                    login_headers()?,
+                    super::StrictJson(serde_json::from_value(json!({"slt":invalid}))?),
+                ),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(crate::error::AppError::Unauthenticated)
+            ));
+        }
+        assert!(
+            server
+                .received_requests()
+                .await
+                .is_some_and(|requests| requests.is_empty())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn production_login_keeps_iam_rejection_authoritative() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error":{"code":"invalid_grant","message":"The code is expired or spent."}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = crate::request_context::scope(
+            "rejected-login".to_owned(),
+            super::login(
+                State(login_state(&server)?),
+                login_headers()?,
+                super::StrictJson(serde_json::from_value(
+                    json!({"slt":format!("oac_{}", "a".repeat(43))}),
+                )?),
+            ),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(crate::error::AppError::BadRequest { code }) if code == "iam_rejected_input")
+        );
+        Ok(())
+    }
 
     fn snapshot(org: &str, audience: &str) -> serde_json::Value {
         json!({

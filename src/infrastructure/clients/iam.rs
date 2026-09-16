@@ -840,7 +840,18 @@ struct OboVerification {
 struct OrganizationResponse {
     id: Uuid,
     org_id: String,
-    status: String,
+    // Scoped IAM organization reads omit status. Absence is metadata
+    // redaction, not an "active" claim; current member authorization is still
+    // required. Reject explicit null/malformed status and honor legacy values.
+    #[serde(default, deserialize_with = "disclosed_organization_status")]
+    status: Option<String>,
+}
+
+fn disclosed_organization_status<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 impl OrganizationResponse {
@@ -851,7 +862,9 @@ impl OrganizationResponse {
         if self.id.is_nil() || self.org_id != requested_org_id.as_str() {
             return Err(ProviderError::InvalidResponse);
         }
-        require_active_directory_status(&self.status, "disabled")?;
+        if let Some(status) = &self.status {
+            require_active_directory_status(status, "disabled")?;
+        }
         Ok(OrganizationId::from_uuid(self.id))
     }
 }
@@ -1518,7 +1531,11 @@ mod tests {
     #[tokio::test]
     async fn live_snapshot_authenticates_without_administrative_directory_access()
     -> Result<(), Box<dyn std::error::Error>> {
-        for snapshot_org in ["test-org", "another-org"] {
+        for (snapshot_org, role) in [
+            ("test-org", Some("owner")),
+            ("another-org", Some("owner")),
+            ("test-org", None),
+        ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/api/v1/oauth/introspect"))
@@ -1533,7 +1550,7 @@ mod tests {
                         "membership_id": "018f268d-715a-7b72-8f0f-41f16f9af571",
                         "organization_id": "018f268d-715a-7b72-8f0f-41f16f9af572",
                         "actor_type": "carbon", "public_id": "test-carbon",
-                        "org_id": snapshot_org, "audience": "silicon-commit", "org_role": "owner"
+                        "org_id": snapshot_org, "audience": "silicon-commit", "org_role": role
                     }
                 })))
                 .expect(1)
@@ -1547,10 +1564,119 @@ mod tests {
                     resource: None,
                 })
                 .await;
-            if snapshot_org == "test-org" {
+            if role.is_none() {
+                assert!(matches!(result, Err(ProviderError::Forbidden)));
+            } else if snapshot_org == "test-org" {
                 assert_eq!(result?.actor.id.as_str(), "test-carbon");
             } else {
                 assert!(matches!(result, Err(ProviderError::Unauthenticated)));
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scoped_directory_accepts_omitted_organization_status_but_preserves_member_checks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (organization, member_patch, expected) in [
+            (serde_json::json!({}), serde_json::json!({}), None),
+            (
+                serde_json::json!({"status":"active"}),
+                serde_json::json!({}),
+                None,
+            ),
+            (
+                serde_json::json!({"status":"disabled"}),
+                serde_json::json!({}),
+                Some(ProviderError::NotFound),
+            ),
+            (
+                serde_json::json!({"status":"unknown"}),
+                serde_json::json!({}),
+                Some(ProviderError::InvalidResponse),
+            ),
+            (
+                serde_json::json!({"status":null}),
+                serde_json::json!({}),
+                Some(ProviderError::InvalidResponse),
+            ),
+            (
+                serde_json::json!({"org_id":"another-org"}),
+                serde_json::json!({}),
+                Some(ProviderError::InvalidResponse),
+            ),
+            (
+                serde_json::json!({"id":Uuid::nil()}),
+                serde_json::json!({}),
+                Some(ProviderError::InvalidResponse),
+            ),
+            (
+                serde_json::json!({}),
+                serde_json::json!({"status":"removed"}),
+                Some(ProviderError::NotFound),
+            ),
+            (
+                serde_json::json!({}),
+                serde_json::json!({"status":null}),
+                Some(ProviderError::InvalidResponse),
+            ),
+            (
+                serde_json::json!({}),
+                serde_json::json!({"org_id":"another-org"}),
+                Some(ProviderError::InvalidResponse),
+            ),
+            (
+                serde_json::json!({}),
+                serde_json::json!({"org_role":null}),
+                Some(ProviderError::InvalidResponse),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            let mut org = serde_json::json!({
+                "id":"018f268d-715a-7b72-8f0f-41f16f9af570", "org_id":"test-org",
+                "name":"Test organization", "logo":null, "description":null, "version":1
+            });
+            for (key, value) in organization.as_object().ok_or("organization fixture")? {
+                org[key] = value.clone();
+            }
+            Mock::given(method("GET"))
+                .and(path("/api/v1/organizations/test-org"))
+                .and(header("authorization", "Bearer user-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(org))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut member = serde_json::json!({
+                "id":"018f268d-715a-7b72-8f0f-41f16f9af571", "org_id":"test-org",
+                "principal":{"principal_id":"018f268d-715a-7b72-8f0f-41f16f9af572", "type":"silicon", "public_id":"worker:test-org"},
+                "status":"active", "org_role":"member"
+            });
+            for (key, value) in member_patch.as_object().ok_or("member fixture")? {
+                member[key] = value.clone();
+            }
+            Mock::given(method("GET"))
+                .and(path("/api/v1/organizations/test-org/members"))
+                .and(header("authorization", "Bearer user-token"))
+                .and(query_param("status", "active"))
+                .and(query_param("principal_type", "silicon"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "items":[member], "page":{"next_cursor":null,"has_more":false}
+                })))
+                .mount(&server)
+                .await;
+            let result = as_user(client(&server)?.resolve_active_members(
+                &PublicOrganizationId::new("test-org")?,
+                &[ActorId::new("worker:test-org")?],
+                Some(ActorType::Silicon),
+            ))
+            .await;
+            if let Some(error) = expected {
+                assert_eq!(result, Err(error));
+            } else {
+                let members = result?;
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].actor.id.as_str(), "worker:test-org");
+                assert_eq!(members[0].org_id.as_str(), "test-org");
             }
         }
         Ok(())
@@ -1567,7 +1693,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": organization_id,
                 "org_id": "test-org",
-                "status": "active"
+                "name": "Scoped organization"
             })))
             .expect(1)
             .mount(&server)
