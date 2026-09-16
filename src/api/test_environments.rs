@@ -407,7 +407,9 @@ fn digest(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 fn crypto_key() -> Option<[u8; 32]> {
-    let secret = std::env::var("COMMIT_IAM_APP_SECRET").ok()?;
+    let secret = std::env::var("COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY")
+        .or_else(|_| std::env::var("COMMIT_IAM_APP_SECRET"))
+        .ok()?;
     if secret.len() < 32 {
         return None;
     }
