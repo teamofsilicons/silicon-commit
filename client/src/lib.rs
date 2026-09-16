@@ -549,7 +549,8 @@ impl Client {
     pub async fn list_test_environments(&self) -> Result<Value, Error> {
         self.get(&["test-environments"], &[]).await
     }
-    /// POST /api/v1/test-environments.
+    /// Legacy creation route, retained for source compatibility.
+    /// New creation returns `honeycomb_manages_testing_lifecycle`; create through Honeycomb.
     pub async fn create_test_environment<T: Serialize + ?Sized>(
         &self,
         body: &T,

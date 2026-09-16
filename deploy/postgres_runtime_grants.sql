@@ -271,4 +271,8 @@ GRANT SELECT, UPDATE, DELETE ON commit.telemetry_events TO :"worker_role";
 
 GRANT EXECUTE ON FUNCTION commit.lock_notification_access(uuid) TO :"worker_role";
 
+GRANT SELECT, INSERT, UPDATE ON commit.honeycomb_environments,commit.honeycomb_operations TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.finish_honeycomb_operation(uuid,uuid,text,boolean),commit.mark_honeycomb_activity(uuid,bigint) TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.honeycomb_activity_outbox(),commit.ack_honeycomb_activity(uuid,bigint,bigint,timestamptz) TO :"worker_role";
+GRANT EXECUTE ON FUNCTION commit.testing_delivery_allowed(uuid) TO :"worker_role";
 COMMIT;

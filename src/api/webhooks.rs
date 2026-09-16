@@ -43,14 +43,14 @@ pub(crate) async fn receive(
         .map_err(|_| AppError::Unauthenticated)?;
     // A testing envelope must be routed and verified against its IAM test key;
     // it may never fall through into the production inbox.
-    let environments: Vec<Option<Uuid>> = if delivery.is_testing() {
+    let environments: Vec<Option<(Uuid, i64)>> = if delivery.is_testing() {
         let envelope: serde_json::Value =
             serde_json::from_slice(&body).map_err(|_| AppError::BadGateway)?;
         let key = envelope
             .pointer("/test/testing_key")
             .and_then(serde_json::Value::as_str)
             .ok_or(AppError::BadGateway)?;
-        let ids = sqlx::query_scalar::<_,Uuid>("SELECT environment_id FROM commit.testing_environments WHERE iam_test_key_digest=$1 AND status='active'")
+        let ids = sqlx::query_as::<_,(Uuid,i64)>("SELECT environment_id,version FROM commit.testing_environments WHERE iam_test_key_digest=$1 AND status='active'")
             .bind(digest(key)).fetch_all(&state.pool).await.map_err(|e| AppError::Internal(e.into()))?;
         if ids.is_empty() {
             return Err(AppError::Unauthenticated);
@@ -80,9 +80,17 @@ pub(crate) async fn receive(
         .begin()
         .await
         .map_err(|e| AppError::Internal(e.into()))?;
-    for environment_id in environments {
-        if let Some(id) = environment_id {
-            let active: Option<Uuid> = sqlx::query_scalar("SELECT environment_id FROM commit.testing_environments WHERE environment_id=$1 AND status='active' FOR SHARE").bind(id).fetch_optional(&mut *tx).await.map_err(|e| AppError::Internal(e.into()))?;
+    for environment in environments {
+        let environment_id = environment.map(|(id, _)| id);
+        if let Some((id, version)) = environment {
+            let control:Option<(String,bool,Option<time::OffsetDateTime>)>=sqlx::query_as("SELECT state,require_iam_clean,cleared_at FROM commit.honeycomb_environments WHERE environment_id=$1 FOR SHARE").bind(id).fetch_optional(&mut *tx).await?;
+            if control.is_some_and(|(state, clean, before)| {
+                state != "active" || (clean && before.is_some_and(|at| event.occurred_at <= at))
+            }) {
+                return Err(AppError::Unauthenticated);
+            }
+
+            let active: Option<Uuid> = sqlx::query_scalar("SELECT environment_id FROM commit.testing_environments WHERE environment_id=$1 AND version=$2 AND status='active' AND (iam_cleaned_at IS NULL OR iam_cleaned_at<$3) FOR SHARE").bind(id).bind(version).bind(event.occurred_at).fetch_optional(&mut *tx).await.map_err(|e| AppError::Internal(e.into()))?;
             if active.is_none() {
                 return Err(AppError::Unauthenticated);
             }

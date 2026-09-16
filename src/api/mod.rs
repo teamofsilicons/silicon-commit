@@ -48,6 +48,7 @@ pub mod auth;
 mod contracts;
 mod email;
 pub mod extract;
+mod honeycomb;
 pub mod notifications;
 pub mod projects;
 pub mod sessions;
@@ -65,6 +66,7 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 pub struct AppState {
     pub(crate) pool: PgPool,
     contract_store: bool,
+    honeycomb_token: Option<secrecy::SecretString>,
     pub(crate) identity: Arc<dyn IdentityProvider>,
     pub(crate) todos: Arc<TodoService>,
     pub(crate) projects: Arc<ProjectService>,
@@ -94,6 +96,7 @@ impl AppState {
         Self {
             pool,
             contract_store: false,
+            honeycomb_token: None,
             identity,
             todos,
             projects,
@@ -175,6 +178,7 @@ impl AppState {
             )?));
         }
         state.contract_store = true;
+        state.honeycomb_token = honeycomb::configured_token();
         state.webhook_verifier = webhooks::verifier(&integrations.iam)?.map(Arc::new);
         Ok(state)
     }
@@ -381,6 +385,7 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
     let product_api = Router::new()
         .nest("/api/v1", api)
         .route("/webhook/", post(webhooks::receive))
+        .route("/internal/honeycomb/organizations/{org}/testing-environments/{id}/operations/{operation}", get(honeycomb::receipt).put(honeycomb::apply))
         .layer(DefaultBodyLimit::max(settings.max_body_bytes))
         .layer(middleware::from_fn_with_state(
             concurrency,

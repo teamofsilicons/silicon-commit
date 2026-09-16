@@ -108,7 +108,7 @@ enum Command {
         #[arg(long)]
         data: Option<String>,
     },
-    /// Create and manage isolated test environments.
+    /// Inspect legacy environments; create shared sandboxes through Honeycomb.
     TestEnvironments {
         #[command(subcommand)]
         command: TestCommand,
@@ -495,6 +495,12 @@ async fn main() -> std::process::ExitCode {
         }
     };
     if let Err(error) = &result {
+        if matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { code, .. }) if code == "honeycomb_manages_testing_lifecycle")
+        {
+            eprintln!(
+                "Manage this environment in Honeycomb, then select Commit with commit testing use '<app_secret>'. See commit docs testing."
+            );
+        }
         eprintln!(
             "commit: {error}\nSee commit docs or commit <command> --help for usage and recovery steps."
         );

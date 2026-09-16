@@ -42,13 +42,20 @@ pub(super) async fn capture(
         if !selected || scope.is_some() {
             let event = json!({"service":"silicon-commit","version":env!("CARGO_PKG_VERSION"),"source":source,"step":"http_response","progress":1,"event":"request_completed","context":{"method":method,"route":route,"status":response.status().as_u16(),"duration_ms":start.elapsed().as_millis(),"request_id":crate::request_context::current_request_id(),"testing":scope.is_some()}});
             // Diagnostics must never turn a completed product request into a failure.
-            let _ = sqlx::query(
-                "INSERT INTO commit.telemetry_events(environment_id,event) VALUES($1,$2)",
-            )
-            .bind(scope.map(|s| s.id))
-            .bind(event)
-            .execute(&state.pool)
-            .await;
+            if let Ok(mut tx) = state.pool.begin().await
+                && crate::infrastructure::postgres::testing::guard(&mut tx)
+                    .await
+                    .is_ok()
+            {
+                let _ = sqlx::query(
+                    "INSERT INTO commit.telemetry_events(environment_id,event) VALUES($1,$2)",
+                )
+                .bind(scope.map(|s| s.id))
+                .bind(event)
+                .execute(&mut *tx)
+                .await;
+                let _ = tx.commit().await;
+            }
         }
     }
     response

@@ -92,3 +92,29 @@ are not treated as Commit management capabilities.
    must perform verified step-up approval. The existing signing secret is deployed.
 
 The following release adds current IAM directory usage and automatic sandbox discovery. See [the September 13 release verification](verification-2026-09-13.md) for the deployed behavior, checks, and remaining verification boundaries. The September 8 report remains historical evidence.
+
+
+## Honeycomb lifecycle deployment
+
+Upload `testing_credentials.py` next to `bootstrap.py`. Set
+`COMMIT_HONEYCOMB_SECRET_ID`, optional `COMMIT_HONEYCOMB_REGION`, and
+`COMMIT_HONEYCOMB_URL` in Commit's deployment secret. Give the deployment role
+read/write access to the selected Honeycomb and Commit Secrets Manager records.
+Bootstrap provisions and verifies the participant token and registry entry before
+starting Commit. Redeploy Honeycomb to load its updated backend secrets too.
+Existing credentials are reused; conflicting identities, destinations or tokens
+stop provisioning instead of overwriting them. There is no user credential setup.
+
+For a separate provisioning stage:
+
+```sh
+python3 deploy/aws/testing_credentials.py --profile PROFILE \
+  --honeycomb-secret HONEYCOMB_SECRET --commit-secret COMMIT_SECRET \
+  --commit-public-base-url https://backend.commit.teamofsilicons.com
+```
+
+API and worker must share the stable sandbox encryption key. Bootstrap passes the
+worker `COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY`, preserving existing ciphertext
+compatibility without passing IAM application authentication to the worker.
+See [the participant contract](../../docs/HONEYCOMB.md). These steps configure
+future deployment; local tests do not establish live cross-service readiness.

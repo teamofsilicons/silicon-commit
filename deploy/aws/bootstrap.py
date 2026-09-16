@@ -18,6 +18,16 @@ def run(args, **kwargs):
 secret = json.loads(json.loads(subprocess.check_output([
     'aws', 'secretsmanager', 'get-secret-value', '--region', 'us-east-1',
     '--secret-id', secret_arn, '--output', 'json']))['SecretString'])
+# Shared lifecycle credentials are deployment plumbing; no per-user pairing.
+if secret.get('COMMIT_HONEYCOMB_SECRET_ID'):
+    from testing_credentials import ensure_testing_credentials
+    ensure_testing_credentials(os.environ.get('AWS_PROFILE'),
+        secret.get('COMMIT_HONEYCOMB_REGION', 'us-east-1'),
+        secret['COMMIT_HONEYCOMB_SECRET_ID'], 'us-east-1', secret_arn,
+        'https://backend.commit.teamofsilicons.com')
+    secret = json.loads(json.loads(subprocess.check_output([
+        'aws', 'secretsmanager', 'get-secret-value', '--region', 'us-east-1',
+        '--secret-id', secret_arn, '--output', 'json']))['SecretString'])
 ca = root / 'rds-ca.pem'
 ca.write_bytes(urllib.request.urlopen('https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem').read())
 ca.chmod(0o644)
@@ -42,7 +52,8 @@ api = {**base, **{k:v for k,v in secret.items() if k.startswith('COMMIT_') and k
        'COMMIT_AUTH_MODE':'iam', 'COMMIT_BIND_ADDR':'127.0.0.1:8080',
        'COMMIT_PUBLIC_BASE_URL':'https://backend.commit.teamofsilicons.com/api/v1/',
        'COMMIT_DATABASE_URL':dburl('commit_api', secret['db_api_password'])}
-worker = {**base, **{k:v for k,v in secret.items() if k in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY','COMMIT_TELEMETRY_TABLE_KEY']}, 'COMMIT_TELEMETRY_HOME':'/var/lib/commit/telemetry', 'COMMIT_DATABASE_URL':dburl('commit_worker', secret['db_worker_password'])}
+worker = {**base, **{k:v for k,v in secret.items() if k in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY','COMMIT_TELEMETRY_TABLE_KEY','COMMIT_HONEYCOMB_URL']}, 'COMMIT_TELEMETRY_HOME':'/var/lib/commit/telemetry', 'COMMIT_DATABASE_URL':dburl('commit_worker', secret['db_worker_password'])}
+worker['COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY'] = secret.get('COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY', secret['COMMIT_IAM_APP_SECRET'])
 envfile('api.env', api)
 envfile('worker.env', worker)
 envfile('migrator.env', {**base,'COMMIT_SCHEMA_OWNER':'commit_migrator',

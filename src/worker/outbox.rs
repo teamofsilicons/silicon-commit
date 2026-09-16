@@ -191,6 +191,7 @@ impl OutboxProcessor {
                 WHERE event.status = 'pending'
                   AND event.available_at <= transaction_timestamp()
                   AND event.attempt_count < $4
+                  AND EXISTS (SELECT 1 FROM commit.organization_projection o WHERE o.organization_id=event.organization_id AND commit.testing_delivery_allowed(o.environment_id))
                 ORDER BY event.available_at, event.created_at, event.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $1

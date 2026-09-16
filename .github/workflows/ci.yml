@@ -117,3 +117,13 @@ jobs:
           for guide in cli/docs/*.md; do
             cmp "$guide" "docs/$(basename "$guide")"
           done
+
+  deployment-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 deploy/aws/test_testing_credentials.py
+      - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py

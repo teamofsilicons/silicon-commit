@@ -470,3 +470,33 @@ fn legacy_updater_cannot_replace_a_honeycomb_install() {
     assert_eq!(status["update_manager"], "honeycomb");
     assert!(!home.0.join(".commit").exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_lifecycle_errors_explain_honeycomb_recovery() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/test-environments/env/clean"))
+        .respond_with(
+            ResponseTemplate::new(409)
+                .set_body_json(json!({"error":{"code":"honeycomb_manages_testing_lifecycle"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = home
+        .command()
+        .args([
+            "--api-url",
+            &server.uri(),
+            "test-environments",
+            "clean",
+            "env",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("Manage this environment in Honeycomb"));
+    assert!(error.contains("commit testing use"));
+}

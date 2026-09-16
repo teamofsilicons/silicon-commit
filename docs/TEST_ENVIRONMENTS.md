@@ -1,6 +1,6 @@
 # Test in an isolated sandbox
 
-Create an environment and import Commit's application in [Silicon IAM](https://docs.iam.teamofsilicons.com/api/testing-environments/). Use the imported application's `app_secret` to select it. Commit discovers its environment ID and name from IAM automatically. You do not enter or pair the administrative root key.
+Create a shared environment and import Commit in [Honeycomb](https://honeycomb.teamofsilicons.com). Use the imported application's `app_secret` to select it. Commit discovers its environment ID and name from IAM automatically. You do not enter or pair the administrative root key.
 
 ```sh
 commit testing use '<ask_...>'
@@ -30,7 +30,11 @@ The app secret chooses the world. The signed-in user supplies authority. Normal 
 
 ## Lifecycle and effects
 
-Manage cleaning, deletion, restore and secret rotation in IAM's administrative environment controls. Commit validates IAM context live on every selected request. A newer IAM clean timestamp atomically clears that sandbox before accepting new work; stale lifecycle versions are rejected. Discovered environments use the regular workflow without the old demo capacity or idle-expiry limits.
+Honeycomb owns preparation, key rotation, cleaning, disabling, restoration and permanent removal. Commit's authenticated participant endpoint works independently of user sessions. It records pending, completed or failed receipts for the exact operation, environment revision, cleaning generation and key version. Retried operations do not repeat completed work; reused IDs with different requests and stale revisions fail.
+
+Cleaning blocks access, erases Commit's sandbox data and queued deliveries transactionally, and preserves the lifecycle link. Restoring permits access only after IAM confirms shared readiness; it never restores cleaned content. Old in-flight writes and IAM discovery responses cannot cross the cleanup barrier. Attachment URLs are references: Commit does not delete another application's files. Discovered environments have no demo capacity limits and are never independently retired. Commit reports generation-bound activity to Honeycomb for shared retention decisions.
+
+See [participant deployment and contract](HONEYCOMB.md) for the internal integration.
 
 IAM webhooks are verified over the complete raw body. Testing envelopes route only to their matching environment; retries deduplicate and event-ID collisions with different bodies are rejected. Live IAM verification remains authoritative when events arrive out of order. Secret fields are redacted before storing verified event payloads.
 
@@ -38,4 +42,4 @@ Database identities, projects, todos, snapshots, audit records, pending jobs and
 
 ## Legacy compatibility
 
-Existing manually paired environments and 32-character Commit keys still work through `/test-environments`. These are labeled legacy administrative controls in the UI. Creation accepts the IAM root key and imported app credential; management requires production authority. Old environments retain their 10-project/100-todo caps and historical retention policy. The legacy clean endpoint refuses a discovered `ask_` secret: an application selector is not an administrative root credential. New integrations should use automatic app-secret selection above.
+Existing manually paired environments and 32-character Commit keys retain their legacy management APIs and historical limits. New creation through Commit returns `honeycomb_manages_testing_lifecycle`; create new environments through Honeycomb. Discovered or Honeycomb-managed environments cannot be cleaned, disabled, restored or re-paired through these legacy APIs. App secrets select a sandbox and never grant administrative lifecycle authority.

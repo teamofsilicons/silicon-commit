@@ -46,6 +46,9 @@ SELECT has_schema_privilege(:'api_role', 'commit', 'USAGE')
        AND has_function_privilege(:'api_role', 'commit.reset_discovered_testing_environment(uuid,bigint)', 'EXECUTE')
        AND has_function_privilege(:'api_role', 'commit.admit_contract(integer,boolean)', 'EXECUTE')
        AND NOT has_function_privilege(:'api_role', 'commit.claim_email()', 'EXECUTE')
+       AND has_table_privilege(:'api_role', 'commit.honeycomb_operations', 'SELECT, INSERT, UPDATE')
+       AND has_function_privilege(:'api_role', 'commit.finish_honeycomb_operation(uuid,uuid,text,boolean)', 'EXECUTE')
+       AND NOT has_function_privilege(:'api_role', 'commit.honeycomb_activity_outbox()', 'EXECUTE')
        AS api_grants_match
 \gset
 
@@ -125,6 +128,10 @@ SELECT has_schema_privilege(:'worker_role', 'commit', 'USAGE')
        AND has_function_privilege(:'worker_role', 'commit.lock_notification_access(uuid)', 'EXECUTE')
        AND NOT has_table_privilege(:'worker_role', 'commit.email_preferences', 'SELECT')
        AND NOT has_table_privilege(:'worker_role', 'commit.email_jobs', 'INSERT')
+       AND has_function_privilege(:'worker_role', 'commit.honeycomb_activity_outbox()', 'EXECUTE')
+       AND has_function_privilege(:'worker_role', 'commit.testing_delivery_allowed(uuid)', 'EXECUTE')
+       AND NOT has_table_privilege(:'worker_role', 'commit.honeycomb_environments', 'SELECT')
+       AND NOT has_function_privilege(:'worker_role', 'commit.finish_honeycomb_operation(uuid,uuid,text,boolean)', 'EXECUTE')
        AS worker_grants_match
 \gset
 

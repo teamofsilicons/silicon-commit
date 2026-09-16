@@ -5,21 +5,19 @@ Run `commit-migrate` once with `COMMIT_MIGRATOR_DATABASE_URL` and
 separate runtime role. Grant that role the application privileges after every
 schema migration:
 
-```sql
-GRANT USAGE ON SCHEMA commit TO silicon_commit_runtime;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA commit TO silicon_commit_runtime;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA commit TO silicon_commit_runtime;
-GRANT EXECUTE ON FUNCTION commit.run_retention_pass(integer) TO silicon_commit_runtime;
-GRANT EXECUTE ON FUNCTION commit.clean_testing_environment(uuid,text) TO silicon_commit_runtime;
-GRANT EXECUTE ON FUNCTION commit.purge_testing_environments(integer) TO silicon_commit_runtime;
-ALTER DEFAULT PRIVILEGES IN SCHEMA commit GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO silicon_commit_runtime;
-ALTER DEFAULT PRIVILEGES IN SCHEMA commit GRANT USAGE, SELECT ON SEQUENCES TO silicon_commit_runtime;
+```sh
+psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 \
+  -v database_name=silicon_commit -v schema_owner=commit_migrator \
+  -v api_role=commit_api -v worker_role=commit_worker \
+  -f deploy/postgres_runtime_grants.sql
 ```
 
-Set `COMMIT_IAM_APP_SECRET` in the API secret store. Test-environment IAm root
-keys are encrypted with a key derived from that secret; changing the
-application secret requires re-encrypting existing test-environment keys
-before starting the API.
+Use the reviewed role template; do not grant blanket table deletion or routine
+execution. Configure the [Honeycomb participant](HONEYCOMB.md) for shared sandbox
+lifecycle and activity. Test secrets are encrypted with
+`COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY`, falling back to the existing
+`COMMIT_IAM_APP_SECRET` for compatibility. Preserve that key across deployment;
+rotation requires re-encrypting retained secrets.
 
 The API uses the authenticated user bearer for IAM directory reads. Health
 and readiness endpoints are `/healthz` and `/readyz`; the product API is

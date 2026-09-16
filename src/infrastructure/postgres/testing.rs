@@ -7,6 +7,15 @@ pub async fn guard(connection: &mut PgConnection) -> Result<(), AppError> {
     let Some(scope) = request_context::testing_scope() else {
         return Ok(());
     };
+    let control: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM commit.honeycomb_environments WHERE environment_id=$1 FOR UPDATE",
+    )
+    .bind(scope.id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if control.is_some_and(|state| state != "active") {
+        return Err(AppError::Unauthenticated);
+    }
     let found: Option<uuid::Uuid> = sqlx::query_scalar("SELECT environment_id FROM commit.testing_environments WHERE environment_id=$1 AND version=$2 AND status='active' FOR UPDATE")
         .bind(scope.id).bind(scope.version).fetch_optional(connection).await?;
     if found.is_none() {

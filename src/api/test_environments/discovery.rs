@@ -2,6 +2,16 @@
 use super::*;
 use silicon_iam_client::models::ApplicationTestingContext;
 
+type ControlEnvironment = (
+    String,
+    String,
+    i64,
+    String,
+    bool,
+    Option<time::OffsetDateTime>,
+    time::OffsetDateTime,
+);
+
 type ExistingEnvironment = (
     String,
     i64,
@@ -10,7 +20,7 @@ type ExistingEnvironment = (
     String,
 );
 
-pub(super) async fn discover(state: &AppState, secret: &str) -> Result<(), AppError> {
+pub(crate) async fn discover(state: &AppState, secret: &str) -> Result<(), AppError> {
     if secret.len() != 47
         || !secret.starts_with("ask_")
         || !secret[4..]
@@ -28,6 +38,9 @@ pub(super) async fn discover(state: &AppState, secret: &str) -> Result<(), AppEr
         app_id: sessions.app_id().to_owned(),
         app_secret: SecretString::from(secret.to_owned()),
     };
+    let started: time::OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&state.pool)
+        .await?;
     let current = sessions
         .testing_client(&credentials)?
         .applications()
@@ -41,6 +54,21 @@ pub(super) async fn discover(state: &AppState, secret: &str) -> Result<(), AppEr
         .bind(id.to_string())
         .execute(&mut *tx)
         .await?;
+    // Hold the participant lock until the discovered local scope is committed.
+    let control:Option<ControlEnvironment>=sqlx::query_as("SELECT org_id,state,key_version,root_key_digest,require_iam_clean,iam_cleaned_before,updated_at FROM commit.honeycomb_environments WHERE environment_id=$1 FOR UPDATE").bind(id).fetch_optional(&mut *tx).await?;
+    if let Some((org, status, key_version, root_digest, require_clean, before, updated)) = &control
+        && (org != &meta.org_id
+            || status != "active"
+            || *key_version != meta.key_generation
+            || current.webhook_key_digest.as_ref() != Some(root_digest)
+            || *updated > started
+            || (*require_clean
+                && meta
+                    .cleaned_at
+                    .is_none_or(|cleaned| before.is_some_and(|old| cleaned <= old))))
+    {
+        return Err(AppError::Unauthenticated);
+    }
     let prior:Option<ExistingEnvironment>=sqlx::query_as("SELECT status,version,iam_control_version,iam_cleaned_at,key_digest FROM commit.testing_environments WHERE environment_id=$1 FOR UPDATE").bind(id).fetch_optional(&mut *tx).await?;
     if let Some((status, version, control, cleaned, _)) = &prior {
         if status != "active" || control.is_some_and(|v| v > meta.version) {

@@ -27,8 +27,23 @@ impl ScopedIdentity {
         let Some(scope) = request_context::testing_scope() else {
             return Ok(original);
         };
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| ProviderError::Unavailable)?;
+        crate::infrastructure::postgres::testing::guard(&mut tx)
+            .await
+            .map_err(|_| ProviderError::Unauthenticated)?;
         let id = sqlx::query_scalar::<_,Uuid>("INSERT INTO commit.testing_organizations (environment_id,iam_organization_id,storage_organization_id) SELECT environment_id,$2,$3 FROM commit.testing_environments WHERE environment_id=$1 AND status='active' AND version=$4 ON CONFLICT (environment_id,iam_organization_id) DO UPDATE SET iam_organization_id=EXCLUDED.iam_organization_id RETURNING storage_organization_id")
-            .bind(scope.id).bind(original.into_uuid()).bind(Uuid::new_v4()).bind(scope.version).fetch_optional(&self.pool).await.map_err(|_| ProviderError::Unavailable)?.ok_or(ProviderError::Unauthenticated)?;
+            .bind(scope.id).bind(original.into_uuid()).bind(Uuid::new_v4()).bind(scope.version).fetch_optional(&mut *tx).await.map_err(|_| ProviderError::Unavailable)?.ok_or(ProviderError::Unauthenticated)?;
+        sqlx::query("SELECT commit.mark_honeycomb_activity($1,$2)")
+            .bind(scope.id)
+            .bind(scope.version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| ProviderError::Unavailable)?;
+        tx.commit().await.map_err(|_| ProviderError::Unavailable)?;
         Ok(id.into())
     }
 }

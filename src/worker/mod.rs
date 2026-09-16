@@ -15,6 +15,7 @@ use crate::{
 };
 
 mod email;
+mod honeycomb;
 pub mod outbox;
 pub mod retention;
 mod telemetry;
@@ -72,6 +73,7 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
             _ = maintenance.tick(), if retention_jobs.is_empty() => {
                 let maintenance_pool = pool.clone();
                 retention_jobs.spawn(async move {
+                    let _ = honeycomb::process_once(&maintenance_pool).await?;
                     retention::run_cycle(&maintenance_pool, retention_policy).await
                 });
             }

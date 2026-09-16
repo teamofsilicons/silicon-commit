@@ -34,3 +34,5 @@ Use `commit <command> --help` to explore the command tree. Use `commit docs proj
 - [Build an integration](DEVELOPMENT.md)
 - [Rust client](CLIENT.md) and [HTTP API](API.md)
 - [Compatibility policy](CONTRACTS.md) and [telemetry settings](TELEMETRY.md)
+
+Release maintainers: [build and validate the six-target Honeycomb package](RELEASES.md).

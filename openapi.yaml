@@ -243,7 +243,9 @@ paths:
         default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Testing Environments]
-      summary: Create an isolated testing environment
+      summary: Legacy creation route; use Honeycomb
+      deprecated: true
+      description: New environments are created through Honeycomb. Valid legacy requests return honeycomb_manages_testing_lifecycle.
       operationId: createTestEnvironment
       parameters: [$ref: '#/components/parameters/OrgId', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
       requestBody:
@@ -261,7 +263,7 @@ paths:
                 iam_app_id: {type: string, minLength: 3, maxLength: 80, pattern: '^[a-z0-9_-]+>[a-z0-9_-]+$', description: Canonical application ID matching this Commit deployment.}
                 iam_app_secret: {type: string, minLength: 32, maxLength: 4096, pattern: '^[!-~]+$', writeOnly: true, description: The imported IAM testing application's secret.}
       responses:
-        '200': {description: Created environment and one-time key., content: {application/json: {schema: {$ref: '#/components/schemas/CreatedTestEnvironment'}}}}
+        '409': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
   /test-environments/{id}/iam-credentials:
     put:

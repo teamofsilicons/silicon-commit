@@ -109,6 +109,7 @@ pub(crate) async fn create(
     headers: HeaderMap,
     StrictJson(input): StrictJson<CreateInput>,
 ) -> Result<Json<Created>, AppError> {
+    require_legacy_lifecycle()?;
     require_production_control_plane(&headers)?;
     let actor = state
         .authenticate(&headers, action::TEST_ENVIRONMENTS_CREATE, None)
@@ -162,6 +163,7 @@ pub(crate) async fn pair_iam_credentials(
     Path(id): Path<Uuid>,
     StrictJson(input): StrictJson<IamCredentialsInput>,
 ) -> Result<Json<Environment>, AppError> {
+    require_unmanaged_environment(&state.pool, id).await?;
     require_production_control_plane(&headers)?;
     let actor = state
         .authenticate(
@@ -315,6 +317,7 @@ pub(crate) async fn rotate(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Created>, AppError> {
+    require_unmanaged_environment(&state.pool, id).await?;
     let actor = state
         .authenticate(
             &headers,
@@ -337,6 +340,7 @@ pub(crate) async fn delete(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Environment>, AppError> {
+    require_unmanaged_environment(&state.pool, id).await?;
     let actor = state
         .authenticate(
             &headers,
@@ -353,6 +357,7 @@ pub(crate) async fn restore(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Created>, AppError> {
+    require_unmanaged_environment(&state.pool, id).await?;
     let actor = state
         .authenticate(
             &headers,
@@ -377,6 +382,7 @@ pub(crate) async fn clean(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Environment>, AppError> {
+    require_unmanaged_environment(&state.pool, id).await?;
     resolve_context(&state, &headers).await?;
     let scope = crate::request_context::testing_scope().ok_or(AppError::BadRequest {
         code: "testing_environment_required".into(),
@@ -403,17 +409,19 @@ pub(crate) async fn clean(
 fn generate_key() -> String {
     hex::encode(rand::random::<[u8; 16]>())
 }
-fn digest(key: &str) -> String {
+pub(super) fn digest(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 fn crypto_key() -> Option<[u8; 32]> {
-    let secret = std::env::var("COMMIT_IAM_APP_SECRET").ok()?;
+    let secret = std::env::var("COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY")
+        .or_else(|_| std::env::var("COMMIT_IAM_APP_SECRET"))
+        .ok()?;
     if secret.len() < 32 {
         return None;
     }
     Some(Sha256::digest(secret.as_bytes()).into())
 }
-fn encrypt_iam_key(key: &str) -> Option<Vec<u8>> {
+pub(crate) fn encrypt_iam_key(key: &str) -> Option<Vec<u8>> {
     let cipher = ChaCha20Poly1305::new((&crypto_key()?).into());
     let mut nonce = [0u8; 12];
     rand::fill(&mut nonce);
@@ -432,6 +440,20 @@ pub(crate) fn decrypt_iam_key(data: &[u8]) -> Option<String> {
 }
 fn internal(error: impl Into<anyhow::Error>) -> AppError {
     AppError::Internal(error.into())
+}
+
+fn require_legacy_lifecycle() -> Result<(), AppError> {
+    Err(AppError::Conflict {
+        code: "honeycomb_manages_testing_lifecycle".into(),
+    })
+}
+
+async fn require_unmanaged_environment(pool: &sqlx::PgPool, id: Uuid) -> Result<(), AppError> {
+    let managed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commit.honeycomb_environments WHERE environment_id=$1) OR EXISTS(SELECT 1 FROM commit.testing_environments WHERE environment_id=$1 AND iam_environment_id IS NOT NULL)").bind(id).fetch_one(pool).await?;
+    if managed {
+        require_legacy_lifecycle()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -660,7 +682,7 @@ mod tests {
             .bind(environment).fetch_one(&pool).await?;
         assert_eq!(untouched, (1, None, None));
 
-        for (secret, count) in [(TEST_SECRET, 2), (ROTATED_SECRET, 1)] {
+        for (secret, count) in [(TEST_SECRET, 1), (ROTATED_SECRET, 1)] {
             Mock::given(method("POST"))
                 .and(path("/api/v1/oauth/introspect"))
                 .and(header("authorization", basic(secret)))
@@ -790,15 +812,9 @@ mod tests {
                 iam_app_secret: SecretString::from(TEST_SECRET),
             }),
         ))
-        .await?
-        .0;
-        let created_response = serde_json::to_string(&created)?;
-        assert!(!created_response.contains(TEST_SECRET) && !created_response.contains(IAM_KEY));
-        let created_secret: Vec<u8> = sqlx::query_scalar("SELECT iam_app_secret_ciphertext FROM commit.testing_environments WHERE environment_id=$1")
-            .bind(created.environment.environment_id).fetch_one(&pool).await?;
-        assert_eq!(
-            decrypt_iam_key(&created_secret).as_deref(),
-            Some(TEST_SECRET)
+        .await;
+        assert!(
+            matches!(created, Err(AppError::Conflict {code}) if code=="honeycomb_manages_testing_lifecycle")
         );
 
         let mut manager_headers = control_headers(organization, "admin")?;
@@ -845,7 +861,7 @@ mod tests {
         .await;
         assert!(matches!(forbidden_nested_control, Err(AppError::Forbidden)));
         sqlx::query("DELETE FROM commit.testing_environments WHERE environment_id=ANY($1)")
-            .bind(vec![environment, created.environment.environment_id])
+            .bind(vec![environment])
             .execute(&pool)
             .await?;
         pool.close().await;
