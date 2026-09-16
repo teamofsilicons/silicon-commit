@@ -117,4 +117,3 @@ jobs:
           for guide in cli/docs/*.md; do
             cmp "$guide" "docs/$(basename "$guide")"
           done
-      - run: python3 docs-site/release.py

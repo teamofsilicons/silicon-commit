@@ -1,6 +1,6 @@
 # Silicon Commit CLI
 
-Install with `cargo install --locked silicon-commit-cli`. The executable is `commit`.
+Install with `honeycomb install 'tos>commit'`. Honeycomb manages updates. The executable is `commit`.
 
 ```sh
 export COMMIT_API_URL=https://backend.commit.teamofsilicons.com

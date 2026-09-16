@@ -13,3 +13,5 @@ docs-site/node_modules/
 docs-site/dist/
 
 __pycache__/
+
+/dist/

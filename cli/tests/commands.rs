@@ -452,3 +452,21 @@ async fn todo_creation_preserves_payload_and_server_validation_correlation() {
         }
     }
 }
+
+#[test]
+fn legacy_updater_cannot_replace_a_honeycomb_install() {
+    let home = Home::new();
+    for args in [
+        vec!["daemon", "install"],
+        vec!["daemon", "run", "--once"],
+        vec!["config", "updates", "on"],
+    ] {
+        let output = home.command().args(args).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Honeycomb"));
+    }
+    let status = json_output(home.command().args(["daemon", "status"]).output().unwrap());
+    assert_eq!(status["auto_update"], false);
+    assert_eq!(status["update_manager"], "honeycomb");
+    assert!(!home.0.join(".commit").exists());
+}

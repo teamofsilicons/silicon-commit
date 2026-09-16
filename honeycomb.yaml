@@ -1,0 +1,35 @@
+# Maps the commit command to the six required release targets.
+format_version: 1
+
+app_id: "tos>commit"
+version: "0.2.0"
+
+bin:
+  commit: "app"
+
+targets:
+  linux-x86_64:
+    root: "targets/linux-x86_64"
+    executables: &unix_executables
+      app: "bin/commit"
+
+  linux-aarch64:
+    root: "targets/linux-aarch64"
+    executables: *unix_executables
+
+  windows-x86_64:
+    root: "targets/windows-x86_64"
+    executables: &windows_executables
+      app: "bin/commit.exe"
+
+  windows-aarch64:
+    root: "targets/windows-aarch64"
+    executables: *windows_executables
+
+  macos-x86_64:
+    root: "targets/macos-x86_64"
+    executables: *unix_executables
+
+  macos-aarch64:
+    root: "targets/macos-aarch64"
+    executables: *unix_executables

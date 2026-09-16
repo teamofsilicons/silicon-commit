@@ -12,7 +12,7 @@ use std::{fs, path::PathBuf};
     bin_name = "commit",
     version,
     about = "Silicon Commit work manager",
-    after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test APP_SECRET for a sandbox. Install the hourly updater with commit daemon install.\nRun commit <command> --help for arguments and subcommands."
+    after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test APP_SECRET for a sandbox. Install and update with honeycomb install 'tos>commit'.\nRun commit <command> --help for arguments and subcommands."
 )]
 struct Root {
     #[arg(
@@ -40,7 +40,7 @@ struct Root {
     #[arg(
         long,
         global = true,
-        help = "Disable the hourly crates.io update check"
+        help = "Compatibility flag; Honeycomb manages CLI updates"
     )]
     no_update: bool,
     #[command(subcommand)]
@@ -58,7 +58,7 @@ enum Command {
         #[command(subcommand)]
         command: runtime::TestingCommand,
     },
-    /// Install or control the independent hourly updater.
+    /// Inspect or remove the legacy updater; Honeycomb manages updates.
     Daemon {
         #[command(subcommand)]
         command: daemon::DaemonCommand,
@@ -121,7 +121,7 @@ enum ConfigCommand {
     Home { location: PathBuf },
     /// Inspect non-secret local configuration.
     Show,
-    /// Enable or disable automatic hourly updates.
+    /// Disable legacy self-updates; configure managed updates in Honeycomb.
     Updates {
         #[arg(value_parser=["on","off"])]
         value: String,
@@ -526,7 +526,7 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             println!(
                 "{}",
-                serde_json::json!({"home":configured_home_dir().unwrap_or_else(default_home_dir),"auto_update":daemon::updates_enabled(),"docs":"https://docs.commit.teamofsilicons.com","repository":"https://github.com/teamofsilicons/silicon-commit"})
+                serde_json::json!({"home":configured_home_dir().unwrap_or_else(default_home_dir),"auto_update":daemon::updates_enabled(),"update_manager":"honeycomb","docs":"https://docs.commit.teamofsilicons.com","repository":"https://github.com/teamofsilicons/silicon-commit"})
             );
             return Ok(());
         }

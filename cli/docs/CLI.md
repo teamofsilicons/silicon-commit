@@ -1,9 +1,9 @@
 # Use the Commit CLI
 
-Install the CLI and hourly updater:
+Install the CLI through Honeycomb:
 
 ```sh
-curl -fsSL https://docs.commit.teamofsilicons.com/install.sh | sh
+honeycomb install 'tos>commit'
 commit iam --json
 commit login '<IAM-SLT>'
 commit login status --json
@@ -46,7 +46,7 @@ commit testing exit
 
 ## Background updates
 
-`commit daemon install` registers a user LaunchAgent on macOS or a systemd user timer on Linux. It checks crates.io every hour independently of CLI use. `commit daemon status`, `commit daemon run --once`, and `commit daemon uninstall` inspect, run and remove the updater. Only newer stable semantic versions install. Updates default on; `commit config updates off` disables them. The old `--no-update` flag is accepted for compatibility; use the configuration switch to stop the independent daemon. On Linux, the user manager must remain active for updates while logged out (administrator-configured lingering if desired).
+Honeycomb owns CLI installation and updates. Commit never downloads or replaces its executable. Use `commit daemon uninstall` to remove a legacy LaunchAgent or systemd updater. `commit daemon status` reports update ownership. Legacy `daemon install`, `daemon run`, and `config updates on` commands return migration guidance; `--no-update` remains an accepted compatibility flag. The Rust client remains a normal Cargo dependency with no runtime self-update.
 
 ## Email and bug reports
 

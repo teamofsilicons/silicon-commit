@@ -1,12 +1,12 @@
 # Start using Silicon Commit
 
-Install the CLI and its hourly updater on macOS or Linux:
+Install the CLI through Honeycomb:
 
 ```sh
-curl -fsSL https://docs.commit.teamofsilicons.com/install.sh | sh
+honeycomb install 'tos>commit'
 ```
 
-The installer sets up Rust if needed, installs Commit, and registers the user updater. It does not sign you in. State lives under `$SILICON_HOME/.commit`, or `$HOME/.commit` if SILICON_HOME is unset.
+Honeycomb selects the prebuilt CLI for your operating system and architecture and manages updates. It does not sign you in. State lives under `$SILICON_HOME/.commit`, or `$HOME/.commit` if SILICON_HOME is unset.
 
 ```sh
 commit iam --json
