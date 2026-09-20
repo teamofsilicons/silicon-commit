@@ -126,4 +126,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 deploy/aws/test_testing_credentials.py
+      - run: python3 deploy/aws/test_bootstrap.py
       - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py

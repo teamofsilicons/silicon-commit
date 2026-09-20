@@ -1,5 +1,11 @@
 # Deployment
 
+Prepare release artifacts before the maintenance window. Stop both the API and
+worker and verify a recoverable database backup before applying migrations
+0029–0030. The membership UUID-to-text migration is incompatible with older
+backends; after migration begins, keep old processes stopped until the database
+is restored or the upgraded backend is running.
+
 Run `commit-migrate` once with `COMMIT_MIGRATOR_DATABASE_URL` and
 `COMMIT_SCHEMA_OWNER` set to the schema owner. Run the API and worker with a
 separate runtime role. Grant that role the application privileges after every
