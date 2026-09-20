@@ -52,6 +52,7 @@ impl SessionService {
             .timeout(timeout)
             // Backend dependencies are upgraded and tested at build time.
             .auto_update(false)
+            .telemetry(false)
             .build().map_err(|_| ClientBuildError::HttpClient)?;
         Ok(Self {
             client,
@@ -123,7 +124,12 @@ impl SessionService {
                 None,
             )
             .await
-            .map_err(map_error)?;
+            .map_err(|error| match error {
+                silicon_iam_client::Error::Api(error) if error.code == "invalid_client" => {
+                    AppError::Unauthenticated
+                }
+                error => map_error(error),
+            })?;
         Ok(())
     }
 }
@@ -224,14 +230,15 @@ async fn verified_status(
             Some(models::ApplicationAuthorizationActorType::Silicon) => {
                 crate::domain::ActorType::Silicon
             }
-            Some(models::ApplicationAuthorizationActorType::Other(_)) | None => {
+            None => return Err(AppError::Forbidden),
+            Some(models::ApplicationAuthorizationActorType::Other(_)) => {
                 return Err(AppError::BadGateway);
             }
         },
         first
             .public_id
             .as_ref()
-            .ok_or(AppError::BadGateway)?
+            .ok_or(AppError::Forbidden)?
             .parse()
             .map_err(|_| AppError::BadGateway)?,
     );
@@ -431,6 +438,12 @@ fn mutation(headers: &HeaderMap) -> Result<Mutation, AppError> {
 pub(crate) fn map_error(error: silicon_iam_client::Error) -> AppError {
     use silicon_iam_client::Error;
     match error {
+        Error::Api(error) if error.code == "invalid_client" => AppError::ProviderUnavailable,
+        Error::Api(error)
+            if matches!(error.code.as_str(), "invalid_grant" | "refresh_token_reuse") =>
+        {
+            AppError::Unauthenticated
+        }
         Error::Api(error) => match error.status {
             400 | 422 => AppError::BadRequest {
                 code: "iam_rejected_input".into(),
@@ -455,7 +468,32 @@ pub(crate) fn map_error(error: silicon_iam_client::Error) -> AppError {
 
 #[cfg(test)]
 mod tests {
+    use axum::response::IntoResponse as _;
     use std::{sync::Arc, time::Duration};
+
+    #[test]
+    fn application_authentication_failure_is_not_user_session_expiry() {
+        for (code, expected) in [
+            ("invalid_client", 503),
+            ("invalid_grant", 401),
+            ("unauthenticated", 401),
+        ] {
+            let error = silicon_iam_client::ApiError {
+                status: if code == "invalid_grant" { 400 } else { 401 },
+                code: code.to_owned(),
+                message: "redacted".to_owned(),
+                details: None,
+                request_id: None,
+            };
+            assert_eq!(
+                super::map_error(error.into())
+                    .into_response()
+                    .status()
+                    .as_u16(),
+                expected
+            );
+        }
+    }
 
     use super::selected_organizations;
     use axum::{Json, extract::State, http::HeaderMap};
@@ -599,9 +637,10 @@ mod tests {
             ),
         )
         .await;
-        assert!(
-            matches!(result, Err(crate::error::AppError::BadRequest { code }) if code == "iam_rejected_input")
-        );
+        assert!(matches!(
+            result,
+            Err(crate::error::AppError::Unauthenticated)
+        ));
         Ok(())
     }
 
@@ -611,7 +650,7 @@ mod tests {
             "actor_type": "carbon", "public_id": "person",
             "organization_id": "22222222-2222-4222-8222-222222222222",
             "org_id": org,
-            "membership_id": "33333333-3333-4333-8333-333333333333",
+            "membership_id": format!("person[{org}]"),
             "membership_version": 1, "authorization_epoch": 1,
             "audience": audience, "testing_environment_id": null,
             "scopes": [], "org_role": null, "tags": null

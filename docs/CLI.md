@@ -26,6 +26,12 @@ commit projects versions PROJECT
 
 Writes accept `--data JSON` or `--data @FILE`. Reuse an idempotency key for a retry of the same action, not a different action. Diaries and webhook preferences use `--if-match VERSION`. JSON goes to stdout; diagnostic and testing messages go to stderr. Errors include HTTP status, a stable code and request ID; transport errors do not print credential-bearing URLs. See [projects](PROJECTS.md) and the [API](API.md).
 
+## Organization selection and recovery
+
+For an unscoped login, Commit discovers the organizations authorized by IAM. If exactly one is available, ordinary commands select it and remember it for the saved session. With several organizations, use `--org-id HANDLE`; the CLI lists the available choices. Explicit `--token` calls do not inherit or modify a saved session's organization.
+
+`commit report "DETAILS"` saves a private local Markdown copy if submission fails, including when authentication or organization discovery fails. The command still exits with the original failure so automation can distinguish local saving from submission. Use `--save-only` to write a report without contacting the service.
+
 ## Sessions and configuration
 
 State is stored in `$SILICON_HOME/.commit` or `$HOME/.commit`. `commit config home DIRECTORY` selects an existing directory; the pointer remains in the original configuration root. Production uses `session.json`; every sandbox secret has a separate hashed session filename. Files are atomically saved with private permissions.
@@ -69,3 +75,5 @@ commit todos create --data '{"title":"Eat","assigned_to":"assistant:example-org"
 ```
 
 `--data @file.json` accepts the same object. Optional fields are `description`, `status`, `attachments`, and `project_id`; run `commit todos create --help` for types and values. `assignee` and `assignee_id` are not supported. The CLI rejects these fields and missing or non-string required fields before making a request. Other validation remains on the server; a 422 error retains its request ID and points to the command's schema help. Errors go to stderr with a nonzero exit status.
+
+Authenticated commands, including `login status`, automatically rotate the saved session within 60 seconds of access-token expiry. Older session files without expiry refresh once. Concurrent commands serialize rotation; retries after uncertain responses reuse the same key and retain the saved credentials until replacement tokens arrive. Refresh uses only the session's saved server and selected test environment. An explicit `--token` remains caller-managed.

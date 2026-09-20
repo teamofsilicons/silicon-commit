@@ -248,7 +248,6 @@ SELECT :'worker_todo_update_sqlstate' = '42501'
 -- queue-transition columns cannot reopen it or rewrite its stored purge
 -- deadline. The surrounding transaction keeps this contract test repeatable.
 SELECT pg_catalog.gen_random_uuid() AS terminal_fixture_organization_id,
-       pg_catalog.gen_random_uuid() AS terminal_fixture_membership_id,
        pg_catalog.gen_random_uuid() AS terminal_fixture_principal_id,
        pg_catalog.gen_random_uuid() AS terminal_fixture_todo_id,
        pg_catalog.gen_random_uuid() AS terminal_fixture_event_id
@@ -270,7 +269,7 @@ INSERT INTO commit.actor_projection (
 VALUES (
     :'terminal_fixture_organization_id'::uuid,
     :'terminal_fixture_principal_id'::uuid,
-    :'terminal_fixture_membership_id'::uuid,
+    'runtime-grants-silicon-' || :'terminal_fixture_principal_id' || '[runtime-grants-' || :'terminal_fixture_organization_id' || ']',
     'silicon'::commit.actor_type,
     'runtime-grants-silicon-' || :'terminal_fixture_principal_id'
 );

@@ -153,7 +153,7 @@ fn trusted_credential(
     }
 
     let organization_id = parse_uuid_header(headers, "x-test-organization-id")?;
-    let membership_id = parse_uuid_header(headers, "x-test-membership-id")?;
+    let membership_id = required_header(headers, "x-test-membership-id")?.to_owned();
     let principal_id = parse_uuid_header(headers, "x-test-principal-id")?;
     let actor_type = required_header(headers, "x-test-actor-type")?
         .parse::<ActorType>()
@@ -179,7 +179,10 @@ fn trusted_credential(
         .unwrap_or_default();
     let capabilities = CapabilitySet::try_from_names(capability_names)
         .map_err(|_| invalid_header("x-test-capabilities"))?;
-    if organization_id.is_nil() || membership_id.is_nil() || principal_id.is_nil() {
+    if organization_id.is_nil()
+        || principal_id.is_nil()
+        || membership_id != format!("{actor_id}[{org_id}]")
+    {
         return Err(AppError::BadRequest {
             code: "invalid_trusted_identity".into(),
         });

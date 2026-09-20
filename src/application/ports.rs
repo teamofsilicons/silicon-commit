@@ -185,8 +185,8 @@ pub struct TrustedIdentity {
     pub organization_id: OrganizationId,
     /// Requested public organization handle.
     pub org_id: PublicOrganizationId,
-    /// Stable IAM-compatible membership UUID supplied by the test harness.
-    pub membership_id: Uuid,
+    /// Canonical IAM membership ID, formatted as `actor_id[org_id]`.
+    pub membership_id: String,
     /// Carbon or Silicon identity.
     pub actor: Actor,
     /// Organization authorization tier.
@@ -215,8 +215,8 @@ pub struct VerifiedActor {
     pub organization_id: OrganizationId,
     /// Immutable public organization handle.
     pub org_id: PublicOrganizationId,
-    /// IAM's internal membership UUID.
-    pub membership_id: Uuid,
+    /// IAM's canonical `actor_id[org_id]` membership ID.
+    pub membership_id: String,
     /// Resolved Carbon or Silicon principal.
     pub actor: Actor,
     /// Current organization role.
@@ -235,7 +235,7 @@ impl VerifiedActor {
     pub fn new(
         organization_id: OrganizationId,
         org_id: PublicOrganizationId,
-        membership_id: Uuid,
+        membership_id: String,
         actor: Actor,
         organization_role: OrganizationRole,
         capabilities: CapabilitySet,
@@ -303,8 +303,8 @@ pub struct ActiveMember {
     pub organization_id: OrganizationId,
     /// Immutable public organization handle.
     pub org_id: PublicOrganizationId,
-    /// IAM's internal membership UUID.
-    pub membership_id: Uuid,
+    /// IAM's canonical `actor_id[org_id]` membership ID.
+    pub membership_id: String,
     /// Resolved Carbon or Silicon principal.
     pub actor: Actor,
 }

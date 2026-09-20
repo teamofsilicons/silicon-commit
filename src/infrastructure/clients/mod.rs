@@ -2,11 +2,8 @@
 
 use std::time::Duration;
 
-use http::{HeaderMap, StatusCode, header};
+use http::{HeaderMap, header};
 use thiserror::Error;
-use url::Url;
-
-use crate::application::ports::ProviderError;
 
 pub mod iam;
 pub mod webhook;
@@ -44,20 +41,6 @@ pub(crate) fn http_client(
         .map_err(|_| ClientBuildError::HttpClient)
 }
 
-pub(crate) fn endpoint(base: &Url, relative: &str) -> Result<Url, ClientBuildError> {
-    if !valid_http_url(base) || base.query().is_some() || base.fragment().is_some() {
-        return Err(ClientBuildError::InvalidEndpoint);
-    }
-
-    let mut normalized = base.clone();
-    if !normalized.path().ends_with('/') {
-        normalized.set_path(&format!("{}/", normalized.path()));
-    }
-    normalized
-        .join(relative)
-        .map_err(|_| ClientBuildError::InvalidEndpoint)
-}
-
 pub(crate) async fn read_bounded(
     mut response: reqwest::Response,
     maximum: usize,
@@ -84,27 +67,6 @@ pub(crate) async fn read_bounded(
     Ok(body)
 }
 
-pub(crate) fn is_json(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
-}
-
-pub(crate) fn provider_status(status: StatusCode, headers: &HeaderMap) -> ProviderError {
-    match status {
-        StatusCode::UNAUTHORIZED => ProviderError::Unauthenticated,
-        StatusCode::FORBIDDEN => ProviderError::Forbidden,
-        StatusCode::NOT_FOUND | StatusCode::GONE => ProviderError::NotFound,
-        StatusCode::CONFLICT => ProviderError::Conflict,
-        StatusCode::TOO_MANY_REQUESTS => ProviderError::RateLimited {
-            retry_after: retry_after(headers),
-        },
-        _ => ProviderError::Unavailable,
-    }
-}
-
 pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     const MAX_RETRY_AFTER_SECONDS: u64 = 86_400;
     let seconds = headers
@@ -114,14 +76,6 @@ pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
         .parse::<u64>()
         .ok()?;
     (seconds <= MAX_RETRY_AFTER_SECONDS).then(|| Duration::from_secs(seconds))
-}
-
-fn valid_http_url(url: &Url) -> bool {
-    matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some()
-        && url.password().is_none()
-        && url.username().is_empty()
-        && !url.cannot_be_a_base()
 }
 
 pub mod scoped_identity;

@@ -3,6 +3,34 @@
 Install and update with `honeycomb install 'tos>commit'`. The stateless Rust client
 is a normal Cargo dependency; it never replaces itself at runtime.
 
+## IAM 2 recovery rollout
+
+The IAM 2 adapter and migration `0029_public_membership_ids.sql` must roll out
+together. Drain the old API and worker processes before running the privileged
+`commit-migrate` binary, then start the new API and workers. The old backend
+expects UUID membership values and is incompatible with the migrated text
+column. Rolling back its binary alone is not supported.
+
+Migration 0029 backfills every production and testing membership as
+`actor_id[org_id]`, retaining the organization/principal keys, work history,
+permissions and idempotency records. Migration 0030 repairs orphaned task
+descendants and their linked todos, records the repair in project history, and
+avoids sending historical repair emails.
+
+Verify the deployed IAM application credentials and audience before reopening
+traffic. The audience defaults to `COMMIT_IAM_APP_ID` unless
+`COMMIT_IAM_AUDIENCE` is explicitly configured. An `invalid_client` response is
+a server configuration failure; asking users to log in again cannot repair it.
+Preserve the existing testing-environment encryption key during any credential
+rotation.
+
+Release the CLI alongside the backend to deliver session refresh, organization
+discovery and local report backups. After rollout, verify login, an ordinary
+command without `--org-id`, assigned todo creation, project/task creation,
+linked-todo deletion and a retained pre-upgrade record. Delegated requests can
+resolve their verified caller for self-assignment; additional assignees require
+IAM delegated-directory support and currently return 403.
+
 ## Build the native CLI
 
 Use the same release version in the root, client and CLI Cargo manifests and

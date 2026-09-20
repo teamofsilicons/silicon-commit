@@ -970,7 +970,7 @@ impl ProjectService {
                 ActiveMember {
                     organization_id: actor.organization_id,
                     org_id: actor.org_id.clone(),
-                    membership_id: actor.membership_id,
+                    membership_id: actor.membership_id.clone(),
                     actor: actor.actor.clone(),
                 }
             } else {
@@ -983,7 +983,7 @@ impl ProjectService {
                 return Err(AppError::BadGateway);
             }
             if !principal_ids.insert(member.actor.principal_id)
-                || !membership_ids.insert(member.membership_id)
+                || !membership_ids.insert(member.membership_id.clone())
             {
                 return Err(AppError::BadGateway);
             }
@@ -1005,7 +1005,8 @@ fn valid_resolved_member(
         && member.actor.actor_type == kind
         && member.actor.id == *expected_actor_id
         && !member.organization_id.as_uuid().is_nil()
-        && !member.membership_id.is_nil()
+        && member.membership_id
+            == format!("{}[{}]", member.actor.id.as_str(), member.org_id.as_str())
         && !member.actor.principal_id.as_uuid().is_nil()
 }
 
@@ -1180,8 +1181,8 @@ mod tests {
         };
         Some(VerifiedActor::new(
             OrganizationId::from_uuid(Uuid::from_u128(1)),
-            org_id,
-            Uuid::from_u128(2),
+            org_id.clone(),
+            format!("{}[{}]", actor_id.as_str(), org_id.as_str()),
             Actor::new(
                 PrincipalId::from_uuid(Uuid::from_u128(3)),
                 ActorType::Silicon,
@@ -1226,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_participants_reject_nil_provider_identifiers() {
+    fn resolved_participants_require_canonical_membership_and_non_nil_principal() {
         let Some(caller) = verified_actor(false) else {
             return;
         };
@@ -1237,7 +1238,7 @@ mod tests {
         let valid_member = ActiveMember {
             organization_id: caller.organization_id,
             org_id: caller.org_id.clone(),
-            membership_id: Uuid::from_u128(4),
+            membership_id: format!("{}[{}]", actor_id.as_str(), caller.org_id.as_str()),
             actor: Actor::new(
                 PrincipalId::from_uuid(Uuid::from_u128(5)),
                 ActorType::Silicon,
@@ -1251,16 +1252,23 @@ mod tests {
             ActorType::Silicon
         ));
 
-        let nil_membership = ActiveMember {
-            membership_id: Uuid::nil(),
-            ..valid_member.clone()
-        };
-        assert!(!valid_resolved_member(
-            &caller,
-            &actor_id,
-            &nil_membership,
-            ActorType::Silicon
-        ));
+        for membership_id in [
+            String::new(),
+            Uuid::from_u128(4).to_string(),
+            "silicon:two[another-org]".to_owned(),
+            "another-silicon[org-one]".to_owned(),
+        ] {
+            let invalid_membership = ActiveMember {
+                membership_id,
+                ..valid_member.clone()
+            };
+            assert!(!valid_resolved_member(
+                &caller,
+                &actor_id,
+                &invalid_membership,
+                ActorType::Silicon
+            ));
+        }
 
         let nil_principal = ActiveMember {
             actor: Actor::new(

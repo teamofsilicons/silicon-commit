@@ -178,11 +178,18 @@ pub fn docs(topic: &str) -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
-pub fn report(
-    message: &str,
-    pr: Option<&str>,
-    save_only: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn report(message: &str, pr: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let path = save_report(message, pr)?;
+    println!("Saved bug report: {}", path.display());
+    if pr.is_none() {
+        eprintln!(
+            "You can also reproduce, patch, and open a PR at https://github.com/teamofsilicons/silicon-commit, then attach it with --pr."
+        );
+    }
+    Ok(())
+}
+
+pub fn save_report(message: &str, pr: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if message.trim().is_empty() {
         return Err(
             "describe the bug, reproduction steps, expected result, and actual result".into(),
@@ -199,12 +206,5 @@ pub fn report(
     );
     let path = directory().join(format!("report-{}.md", Client::new_idempotency_key()));
     private_write(&path, body.as_bytes())?;
-    let _ = save_only;
-    println!("Saved bug report: {}", path.display());
-    if pr.is_none() {
-        eprintln!(
-            "You can also reproduce, patch, and open a PR at https://github.com/teamofsilicons/silicon-commit, then attach it with --pr."
-        );
-    }
-    Ok(())
+    Ok(path)
 }

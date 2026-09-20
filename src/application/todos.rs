@@ -564,7 +564,7 @@ impl TodoService {
                 ActiveMember {
                     organization_id: caller.organization_id,
                     org_id: caller.org_id.clone(),
-                    membership_id: caller.membership_id,
+                    membership_id: caller.membership_id.clone(),
                     actor: caller.actor.clone(),
                 }
             }
@@ -587,7 +587,8 @@ fn validate_resolved_assignee(
         || member.org_id != caller.org_id
         || member.actor.id != *requested_actor_id
         || member.organization_id.as_uuid().is_nil()
-        || member.membership_id.is_nil()
+        || member.membership_id
+            != format!("{}[{}]", member.actor.id.as_str(), member.org_id.as_str())
         || member.actor.principal_id.as_uuid().is_nil()
     {
         return Err(AppError::BadGateway);
@@ -987,7 +988,7 @@ mod tests {
         Some(VerifiedActor::new(
             OrganizationId::from_uuid(Uuid::from_u128(100)),
             PublicOrganizationId::new("test-org").ok()?,
-            Uuid::from_u128(principal.saturating_add(1_000)),
+            format!("{}[test-org]", actor.id.as_str()),
             actor,
             OrganizationRole::Member,
             capabilities,
@@ -1117,7 +1118,7 @@ mod tests {
         let collision = ActiveMember {
             organization_id: caller.organization_id,
             org_id: caller.org_id.clone(),
-            membership_id: Uuid::from_u128(9_999),
+            membership_id: caller.membership_id.clone(),
             actor: Actor::new(
                 PrincipalId::from_uuid(Uuid::from_u128(8_888)),
                 ActorType::Silicon,

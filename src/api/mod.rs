@@ -387,6 +387,7 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .route("/webhook/", post(webhooks::receive))
         .route("/internal/honeycomb/organizations/{org}/testing-environments/{id}/operations/{operation}", get(honeycomb::receipt).put(honeycomb::apply))
         .layer(DefaultBodyLimit::max(settings.max_body_bytes))
+        .layer(middleware::from_fn_with_state(settings.max_body_bytes, bind_obo_request))
         .layer(middleware::from_fn_with_state(
             concurrency,
             concurrency_limit,
@@ -513,6 +514,23 @@ async fn no_store(request: Request, next: Next) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+async fn bind_obo_request(State(maximum): State<usize>, request: Request, next: Next) -> Response {
+    if !request.headers().contains_key("x-iam-obo-access-proof") {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, maximum).await else {
+        return AppError::PayloadTooLarge.into_response();
+    };
+    request_context::set_obo_request_binding(silicon_iam_client::models::OboVerifyRequestBinding {
+        method: parts.method.as_str().to_owned(),
+        path: parts.uri.path().to_owned(),
+        body_sha256: silicon_iam_client::api::obo::body_sha256(&bytes),
+    });
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+        .await
 }
 
 async fn ensure_response_request_id(request: Request, next: Next) -> Response {
@@ -688,6 +706,68 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn delegated_request_binding_preserves_exact_body_and_stays_request_local()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = Router::new()
+            .route(
+                "/api/v1/todos",
+                post(|body: String| async move {
+                    Json(serde_json::json!({
+                        "body":body,
+                        "binding":request_context::current_obo_request_binding(),
+                    }))
+                }),
+            )
+            .layer(middleware::from_fn_with_state(1024_usize, bind_obo_request))
+            .layer(middleware::from_fn(request_id));
+        let body = "{ \"title\": \"Preserve these bytes\" }\n";
+        for delegated in [true, false] {
+            let mut request = HttpRequest::builder()
+                .method("POST")
+                .uri("/api/v1/todos?view=mine");
+            if delegated {
+                request = request.header("x-iam-obo-access-proof", "test-proof");
+            }
+            let response = app.clone().oneshot(request.body(Body::from(body))?).await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let output: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+            assert_eq!(output["body"], body);
+            if delegated {
+                assert_eq!(
+                    output["binding"],
+                    serde_json::json!({"method":"POST","path":"/api/v1/todos",
+                    "body_sha256":silicon_iam_client::api::obo::body_sha256(body.as_bytes())})
+                );
+            } else {
+                assert!(output["binding"].is_null());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_delegated_body_is_rejected_before_the_handler()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = Router::new()
+            .route("/todos", post(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(3_usize, bind_obo_request))
+            .layer(middleware::from_fn(request_id));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/todos")
+                    .header("x-iam-obo-access-proof", "test-proof")
+                    .body(Body::from("1234"))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().contains_key("x-request-id"));
+        Ok(())
+    }
 
     #[derive(Debug, Default)]
     struct RecordingIdentity {

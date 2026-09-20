@@ -97,7 +97,7 @@ mod tests {
         let identity = TrustedIdentity {
             organization_id,
             org_id: org_id.clone(),
-            membership_id: Uuid::from_u128(200),
+            membership_id: format!("{}[{}]", actor.id.as_str(), org_id.as_str()),
             actor: actor.clone(),
             organization_role: OrganizationRole::Member,
             capabilities: CapabilitySet::try_from_names(BTreeSet::<String>::new()).ok()?,
@@ -105,7 +105,7 @@ mod tests {
         Some(VerifiedActor::new(
             organization_id,
             org_id,
-            identity.membership_id,
+            identity.membership_id.clone(),
             actor,
             OrganizationRole::Member,
             identity.capabilities.clone(),

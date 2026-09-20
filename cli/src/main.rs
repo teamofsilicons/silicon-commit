@@ -355,6 +355,80 @@ struct Session {
     org_id: Option<String>,
     #[serde(default)]
     test_key: Option<String>,
+    #[serde(default)]
+    expires_at: u64,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn session_lock() -> Result<fs::File, Box<dyn std::error::Error>> {
+    let path = session_path();
+    Ok(
+        tokio::task::spawn_blocking(move || -> std::io::Result<fs::File> {
+            let directory = path.parent().expect("session path has a parent");
+            fs::create_dir_all(directory)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
+            }
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let file = options.open(path.with_extension("lock"))?;
+            file.lock()?;
+            Ok(file)
+        })
+        .await??,
+    )
+}
+
+async fn refresh_saved_session(api: &str) -> Result<Option<Session>, Box<dyn std::error::Error>> {
+    let _lock = session_lock().await?;
+    // Re-read after acquiring the process lock: another command may already
+    // have rotated the single-use refresh token.
+    let Some(mut session) = load_session() else {
+        return Ok(None);
+    };
+    let mut client = Client::new(api)?;
+    if client.base_url() != Client::new(&session.api_url)?.base_url() {
+        return Err("the selected API does not match the saved session; sign in for this API or supply an explicit token".into());
+    }
+    if session.test_key.as_deref() != runtime::selected_key().as_deref() {
+        return Err("saved session environment mismatch; sign in again".into());
+    }
+    if session.expires_at > now().saturating_add(60) || session.refresh_token.is_empty() {
+        return Ok(Some(session));
+    }
+    if let Some(key) = &session.test_key {
+        client = client.with_test_key(key)?;
+    }
+    use sha2::{Digest as _, Sha256};
+    // Retrying after a lost response must replay the same rotation, not mark
+    // this refresh family compromised by consuming its old token twice.
+    let key = format!(
+        "commit-refresh-{:x}",
+        Sha256::digest(session.refresh_token.as_bytes())
+    );
+    let tokens = client
+        .with_mutation(Mutation::with_key(key)?)
+        .refresh_session(&session.refresh_token)
+        .await?;
+    session.access_token = tokens.access_token;
+    session.refresh_token = tokens.refresh_token;
+    session.org_id = tokens.org_id.or(session.org_id);
+    session.expires_at = now().saturating_add(tokens.expires_in.max(0) as u64);
+    save_session(&session)?;
+    Ok(Some(session))
 }
 fn parse_data(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let text = input
@@ -440,6 +514,37 @@ fn load_session() -> Option<Session> {
 fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
     runtime::private_write(&session_path(), &serde_json::to_vec_pretty(s)?)
 }
+async fn remember_organization(token: &str, org: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let _lock = session_lock().await?;
+    if let Some(mut session) = load_session()
+        && session.access_token == token
+    {
+        session.org_id = Some(org.to_owned());
+        save_session(&session)?;
+    }
+    Ok(())
+}
+
+fn organization_from_status(status: &Value) -> Result<String, Box<dyn std::error::Error>> {
+    if status["authenticated"] != true {
+        return Err(
+            "Your Commit session expired or was revoked. Run commit login <slt> to sign in again."
+                .into(),
+        );
+    }
+    if let Some(org) = status["org_id"].as_str().filter(|s| !s.is_empty()) {
+        return Ok(org.to_owned());
+    }
+    let organizations = status["organizations"]
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    match organizations.as_slice() {
+        [org] => Ok((*org).to_owned()),
+        [] => Err("Your session has no accessible organization. Check IAM organization access and sign in again.".into()),
+        _ => Err(format!("Choose an organization with --org-id. Available organizations: {}", organizations.join(", ")).into()),
+    }
+}
 async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
     let directory = match fs::read_to_string(home_dir_config_path()) {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
@@ -448,6 +553,10 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     };
     let path = directory.join(".commit").join(runtime::session_file());
+    if !path.exists() {
+        return Ok(());
+    }
+    let _lock = session_lock().await?;
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -485,7 +594,27 @@ async fn main() -> std::process::ExitCode {
     let result = match Root::try_parse() {
         Ok(mut args) => {
             args.test = runtime::selected_key();
-            run(args).await
+            let report = match &args.command {
+                Command::Report {
+                    message,
+                    pr,
+                    save_only: false,
+                } => Some((message.clone(), pr.clone())),
+                _ => None,
+            };
+            let result = run(args).await;
+            if result.is_err()
+                && let Some((message, pr)) = report
+            {
+                match runtime::save_report(&message, pr.as_deref()) {
+                    Ok(path) => eprintln!(
+                        "Report could not be submitted. Saved locally: {}",
+                        path.display()
+                    ),
+                    Err(error) => eprintln!("Could not save the report locally: {error}"),
+                }
+            }
+            result
         }
         Err(error) => {
             let code = error.exit_code();
@@ -495,6 +624,12 @@ async fn main() -> std::process::ExitCode {
         }
     };
     if let Err(error) = &result {
+        if matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { status, .. }) if status.as_u16() == 401)
+        {
+            eprintln!(
+                "Your Commit session expired or was revoked. Run commit login <slt> to sign in again."
+            );
+        }
         if matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { code, .. }) if code == "honeycomb_manages_testing_lifecycle")
         {
             eprintln!(
@@ -513,6 +648,12 @@ async fn main() -> std::process::ExitCode {
     }
 }
 async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
+    if let Command::Todos {
+        command: TodoCommand::Create(data),
+    } = &a.command
+    {
+        parse_todo_create(&data.data)?;
+    }
     match &a.command {
         Command::Config {
             command: ConfigCommand::Telemetry { value },
@@ -523,6 +664,11 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Docs { topic } => return runtime::docs(topic),
+        Command::Report {
+            message,
+            pr,
+            save_only: true,
+        } => return runtime::report(message, pr.as_deref()),
         Command::Testing { command } => {
             return runtime::testing(command, a.api_url.as_deref()).await;
         }
@@ -552,7 +698,7 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::json!({"removed": true}));
         return Ok(());
     }
-    let saved = load_session();
+    let mut saved = load_session();
     if saved
         .as_ref()
         .is_some_and(|s| s.test_key.as_deref() != runtime::selected_key().as_deref())
@@ -564,14 +710,51 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .or_else(|| saved.as_ref().map(|s| s.api_url.clone()))
         .unwrap_or_else(|| "https://backend.commit.teamofsilicons.com".to_owned());
-    let token = a
-        .token
-        .clone()
-        .or_else(|| saved.as_ref().map(|s| s.access_token.clone()));
-    let org = a
-        .org_id
-        .clone()
-        .or_else(|| saved.as_ref().and_then(|s| s.org_id.clone()));
+    let uses_saved_session = a.token.is_none()
+        && saved.is_some()
+        && !matches!(
+            a.command,
+            Command::Login(Login { command: None, .. })
+                | Command::Iam(_)
+                | Command::Health
+                | Command::Ready
+                | Command::Version
+                | Command::Report {
+                    save_only: true,
+                    ..
+                }
+        );
+    if uses_saved_session {
+        saved = match refresh_saved_session(&api).await {
+            Ok(saved) => saved,
+            Err(error)
+                if matches!(
+                    &a.command,
+                    Command::Login(Login {
+                        command: Some(LoginCommand::Status(_)),
+                        ..
+                    })
+                ) && matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { status, .. }) if status.as_u16() == 401) =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    let token = a.token.clone().or_else(|| {
+        if uses_saved_session {
+            saved.as_ref().map(|s| s.access_token.clone())
+        } else {
+            None
+        }
+    });
+    let org = a.org_id.clone().or_else(|| {
+        if uses_saved_session {
+            saved.as_ref().and_then(|s| s.org_id.clone())
+        } else {
+            None
+        }
+    });
     let mut c = Client::new(&api)?
         .with_source("cli")?
         .with_telemetry(runtime::telemetry_enabled())
@@ -586,32 +769,57 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
             }
             m
         });
-    if let Some(t) = token {
-        c = c.with_bearer(t);
+    if let Some(t) = &token {
+        c = c.with_bearer(t.clone());
     }
-    if let Some(o) = org {
-        c = c.with_org_id(o);
+    if let Some(o) = &org {
+        c = c.with_org_id(o.clone());
     }
     if let Some(k) = a.test {
         c = c.with_test_key(k)?;
+    }
+    let needs_organization = !matches!(
+        &a.command,
+        Command::Login(_)
+            | Command::Iam(_)
+            | Command::Health
+            | Command::Ready
+            | Command::Version
+            | Command::Report {
+                save_only: true,
+                ..
+            }
+            | Command::TestEnvironments {
+                command: TestCommand::Create(_)
+                    | TestCommand::Rotate { .. }
+                    | TestCommand::Restore { .. }
+                    | TestCommand::Clean { .. }
+                    | TestCommand::Delete { .. }
+            }
+    );
+    if needs_organization && org.is_none() {
+        let selected = organization_from_status(&c.login_status().await?)?;
+        if uses_saved_session && let Some(token) = &token {
+            remember_organization(token, &selected).await?;
+        }
+        c = c.with_org_id(selected);
     }
     let output = match a.command {
         Command::Docs { .. }
         | Command::Testing { .. }
         | Command::Daemon { .. }
         | Command::Config { .. }
-        | Command::Logout(_) => {
+        | Command::Logout(_)
+        | Command::Report {
+            save_only: true, ..
+        } => {
             unreachable!("local session commands return before API setup")
         }
         Command::Report {
             message,
             pr,
-            save_only,
+            save_only: false,
         } => {
-            if save_only {
-                runtime::report(&message, pr.as_deref(), true)?;
-                return Ok(());
-            }
             let result = c
                 .report(&serde_json::json!({"message":message,"pr":pr}))
                 .await?;
@@ -635,6 +843,11 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
             ..
         }) => c.login_status().await?,
         Command::Login(x) => {
+            let _lock = if x.no_save {
+                None
+            } else {
+                Some(session_lock().await?)
+            };
             let slt = x.slt.as_deref().ok_or("a short-lived token is required")?;
             let s = c.login_with_slt(slt).await?;
             if !x.no_save {
@@ -644,6 +857,7 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
                     api_url: api,
                     org_id: s.org_id.clone(),
                     test_key: runtime::selected_key(),
+                    expires_at: now().saturating_add(s.expires_in.max(0) as u64),
                 })?;
             }
             if runtime::selected_key().is_some() {

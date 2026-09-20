@@ -497,7 +497,10 @@ mod tests {
         for (key, value) in [
             ("x-org-id", format!("pairing-{organization}")),
             ("x-test-organization-id", organization.to_string()),
-            ("x-test-membership-id", Uuid::new_v4().to_string()),
+            (
+                "x-test-membership-id",
+                format!("pairing-operator[pairing-{organization}]"),
+            ),
             ("x-test-principal-id", Uuid::new_v4().to_string()),
             ("x-test-actor-type", "carbon".to_owned()),
             ("x-test-actor-id", "pairing-operator".to_owned()),
@@ -732,7 +735,7 @@ mod tests {
             .expect(2)
             .mount(&server)
             .await;
-        let snapshot = json!({"principal_id":principal,"actor_type":"silicon","public_id":"smoke:paired-org","organization_id":Uuid::new_v4(),"org_id":"paired-org","membership_id":Uuid::new_v4(),"membership_version":1,"authorization_epoch":1,"audience":"tos>commit","testing_environment_id":Uuid::new_v4(),"scopes":[],"org_role":"owner","tags":[]});
+        let snapshot = json!({"principal_id":principal,"actor_type":"silicon","public_id":"smoke:paired-org","organization_id":Uuid::new_v4(),"org_id":"paired-org","membership_id":"smoke:paired-org[paired-org]","membership_version":1,"authorization_epoch":1,"audience":"tos>commit","testing_environment_id":Uuid::new_v4(),"scopes":[],"org_role":"owner","tags":[]});
         Mock::given(method("POST"))
             .and(path("/api/v1/oauth/introspect"))
             .and(header("authorization", basic(TEST_SECRET)))

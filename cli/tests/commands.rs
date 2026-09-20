@@ -10,7 +10,253 @@ use wiremock::{
     matchers::{body_json, header, method, path},
 };
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unscoped_session_discovers_and_remembers_its_only_organization() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    fs::create_dir_all(home.0.join(".commit")).unwrap();
+    let session = home.0.join(".commit/session.json");
+    fs::write(
+        &session,
+        json!({"access_token":"oat_saved","refresh_token":"ort_saved",
+        "expires_at":4102444800_u64,"api_url":server.uri(),"org_id":null})
+        .to_string(),
+    )
+    .unwrap();
+    Mock::given(method("GET")).and(path("/api/v1/auth/status"))
+        .and(header("authorization", "Bearer oat_saved"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,
+            "actor":{"type":"silicon","id":"chef:bricks"},"org_id":"bricks","organizations":["bricks"]})))
+        .expect(1).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/todos"))
+        .and(header("authorization", "Bearer oat_saved"))
+        .and(header("x-org-id", "bricks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[]})))
+        .expect(2)
+        .mount(&server)
+        .await;
+    for _ in 0..2 {
+        assert_eq!(
+            json_output(home.command().args(["todos", "list"]).output().unwrap()),
+            json!({"items":[]})
+        );
+    }
+    let saved: Value = serde_json::from_slice(&fs::read(session).unwrap()).unwrap();
+    assert_eq!(saved["org_id"], "bricks");
+    assert_eq!(saved["refresh_token"], "ort_saved");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ambiguous_organizations_require_selection_and_explicit_tokens_do_not_change_saved_state() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    fs::create_dir_all(home.0.join(".commit")).unwrap();
+    let session = home.0.join(".commit/session.json");
+    let saved = json!({"access_token":"oat_saved","refresh_token":"ort_saved",
+        "expires_at":4102444800_u64,"api_url":server.uri(),"org_id":"private-saved-org"})
+    .to_string();
+    fs::write(&session, &saved).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/status"))
+        .and(header("authorization", "Bearer oat_explicit"))
+        .and(|r: &wiremock::Request| !r.headers.contains_key("x-org-id"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,
+            "org_id":null,"organizations":["bricks","tos"]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = home
+        .command()
+        .args(["--token", "oat_explicit", "projects", "list"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("--org-id") && error.contains("bricks, tos"),
+        "{error}"
+    );
+    Mock::given(method("GET"))
+        .and(path("/api/v1/projects"))
+        .and(header("authorization", "Bearer oat_explicit"))
+        .and(header("x-org-id", "bricks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    json_output(
+        home.command()
+            .args([
+                "--token",
+                "oat_explicit",
+                "--org-id",
+                "bricks",
+                "projects",
+                "list",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fs::read_to_string(session).unwrap(), saved);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_report_is_saved_locally_without_hiding_provider_error() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/reports"))
+        .respond_with(
+            ResponseTemplate::new(502)
+                .set_body_json(json!({"error":{"code":"invalid_provider_response"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = home
+        .command()
+        .args([
+            "--api-url",
+            &server.uri(),
+            "--token",
+            "oat_saved",
+            "--org-id",
+            "bricks",
+            "report",
+            "Todos cannot be read.",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Saved locally:") && error.contains("invalid_provider_response"),
+        "{error}"
+    );
+    let reports = fs::read_dir(home.0.join(".commit"))
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1);
+    assert!(
+        fs::read_to_string(&reports[0])
+            .unwrap()
+            .contains("Todos cannot be read.")
+    );
+}
+
 struct Home(PathBuf);
+
+#[test]
+fn offline_report_does_not_require_valid_api_or_session_configuration() {
+    let home = Home::new();
+    fs::create_dir_all(home.0.join(".commit")).unwrap();
+    fs::write(home.0.join(".commit/session.json"), "invalid session").unwrap();
+    let output = home
+        .command()
+        .env("COMMIT_API_URL", "invalid-url")
+        .args(["report", "Offline report recovery", "--save-only"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reports = fs::read_dir(home.0.join(".commit"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1);
+    assert!(
+        fs::read_to_string(&reports[0])
+            .unwrap()
+            .contains("Offline report recovery")
+    );
+    assert_eq!(
+        fs::read_to_string(home.0.join(".commit/session.json")).unwrap(),
+        "invalid session"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn login_status_distinguishes_expired_sessions_from_refresh_permission_errors() {
+    for (status, code) in [(401, "unauthenticated"), (403, "forbidden")] {
+        let home = Home::new();
+        let server = MockServer::start().await;
+        let session = home.0.join(".commit/session.json");
+        fs::create_dir_all(session.parent().unwrap()).unwrap();
+        let saved = json!({"access_token":"oat_old", "refresh_token":"ort_old",
+            "api_url":server.uri(), "org_id":"tos", "expires_at":1})
+        .to_string();
+        fs::write(&session, &saved).unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(json!({"error":{"code":code}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let output = home
+            .command()
+            .args(["login", "status", "--json"])
+            .output()
+            .unwrap();
+        if status == 401 {
+            assert_eq!(json_output(output)["authenticated"], false);
+        } else {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains(code));
+        }
+        assert_eq!(fs::read_to_string(session).unwrap(), saved);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn login_to_another_server_does_not_send_the_old_session() {
+    let home = Home::new();
+    let original = MockServer::start().await;
+    let destination = MockServer::start().await;
+    fs::create_dir_all(home.0.join(".commit")).unwrap();
+    fs::write(
+        home.0.join(".commit/session.json"),
+        json!({"access_token":"oat_original",
+        "refresh_token":"ort_original","api_url":original.uri(),"org_id":"old-org"})
+        .to_string(),
+    )
+    .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .and(body_json(json!({"slt":"oac_destination"})))
+        .and(|r: &wiremock::Request| {
+            !r.headers.contains_key("authorization") && !r.headers.contains_key("x-org-id")
+        })
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new",
+            "refresh_token":"ort_new","expires_in":1800,"token_type":"Bearer","scope":"",
+            "actor":{"type":"carbon","id":"person"},"org_id":null})),
+        )
+        .expect(1)
+        .mount(&destination)
+        .await;
+    assert_eq!(
+        json_output(
+            home.command()
+                .args(["--api-url", &destination.uri(), "login", "oac_destination"])
+                .output()
+                .unwrap()
+        )["authenticated"],
+        true
+    );
+    assert!(original.received_requests().await.unwrap().is_empty());
+}
 impl Home {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -499,4 +745,119 @@ async fn shared_lifecycle_errors_explain_honeycomb_recovery() {
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("Manage this environment in Honeycomb"));
     assert!(error.contains("commit testing use"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_and_legacy_sessions_refresh_once_across_concurrent_commands() {
+    for test_key in [None, Some("abcdefghijklmnopqrstuvwxyz123456")] {
+        let home = Home::new();
+        let server = MockServer::start().await;
+        let state = home.0.join(".commit");
+        fs::create_dir_all(&state).unwrap();
+        let session = state.join(test_key.map_or_else(
+            || "session.json".to_owned(),
+            |key| {
+                use sha2::{Digest as _, Sha256};
+                format!("test-{:x}.json", Sha256::digest(key.as_bytes()))
+            },
+        ));
+        // Existing installations did not save expiry. Treat them as needing
+        // rotation once, then persist the returned deadline.
+        fs::write(
+            &session,
+            serde_json::to_vec(&json!({
+                "access_token":"oat_expired", "refresh_token":"ort_saved",
+                "api_url":server.uri(), "org_id":"tos", "test_key":test_key
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
+            .and(body_json(json!({"refresh_token":"ort_saved"})))
+            .and(move |r: &wiremock::Request| {
+                !r.headers.contains_key("authorization") && r.headers.contains_key("idempotency-key")
+                    && r.headers.get("x-testing-environment-key").and_then(|v| v.to_str().ok()) == test_key
+            })
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(100))
+                .set_body_json(json!({"access_token":"oat_new", "refresh_token":"ort_new", "expires_in":1800,
+                    "token_type":"Bearer", "scope":"self.identity.read", "actor":{"type":"carbon","id":"person"}, "org_id":"tos"})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/auth/status"))
+            .and(header("authorization", "Bearer oat_new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true})))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut commands = Vec::new();
+        for _ in 0..2 {
+            let mut command = home.command();
+            command.args(["login", "status", "--json"]);
+            if let Some(key) = test_key {
+                command.env("COMMIT_TEST_KEY", key);
+            }
+            commands.push(tokio::task::spawn_blocking(move || {
+                command.output().unwrap()
+            }));
+        }
+        for command in commands {
+            assert_eq!(json_output(command.await.unwrap())["authenticated"], true);
+        }
+        let saved: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
+        assert_eq!(saved["refresh_token"], "ort_new");
+        assert!(
+            saved["expires_at"].as_u64().unwrap()
+                > std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+        );
+        if test_key.is_some() {
+            assert!(!state.join("session.json").exists());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uncertain_refresh_retains_credentials_and_reuses_key_without_sending_to_another_api() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    let other = MockServer::start().await;
+    let session = home.0.join(".commit/session.json");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    let saved = serde_json::to_vec(&json!({"access_token":"oat_old", "refresh_token":"ort_old", "api_url":server.uri(), "org_id":"tos", "expires_at":1})).unwrap();
+    fs::write(&session, &saved).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/refresh"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .set_body_json(json!({"error":{"code":"upstream_unavailable"}})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    for _ in 0..2 {
+        let result = home
+            .command()
+            .args(["login", "status", "--json"])
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert_eq!(fs::read(&session).unwrap(), saved);
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].headers["idempotency-key"],
+        requests[1].headers["idempotency-key"]
+    );
+    assert!(
+        !home
+            .command()
+            .args(["--api-url", &other.uri(), "login", "status", "--json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(other.received_requests().await.unwrap().is_empty());
 }

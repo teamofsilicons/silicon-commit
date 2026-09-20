@@ -13,6 +13,8 @@ Core resources are `/todos`, `/projects`, notification settings, attachments, `/
 
 `GET /api/v1/auth/status` accepts a bearer token, optional `X-Org-ID`, and optional `X-Testing-Environment-Key`. It verifies current authorization using the official IAM SDK. Success returns `authenticated: true`, `app_id`, `actor: {type, id}`, `org_id`, and `organizations`. An explicit organization must match the live grant. Without one, status checks all selected active organizations; `org_id` is null if multiple are available. Missing/rejected credentials or no active organization grant return 401. IAM/network failures retain their error status. The response contains neither tokens nor internal principal IDs, and test requests use the linked IAM environment. The client and CLI map 401 to a JSON `authenticated: false` result.
 
+OBO requests use `X-App-ID` and `X-IAM-OBO-Access-Proof`; IAM verifies the actual HTTP method, path, and raw request body before Commit uses the represented member's authorization. With IAM SDK 2.0, the verified snapshot supports assignment to that represented member. Assignments or project participant changes requiring other directory members return 403 because a consumed OBO proof does not provide directory-read credentials. Standard bearer sessions support assignments to other active organization members with the required IAM directory scopes.
+
 IAM deliveries arrive at `/webhook/`. Commit verifies `X-Silicon-IAM-Event-Id`, `X-Silicon-IAM-Timestamp`, `X-Silicon-IAM-Key-Version`, and `X-Silicon-IAM-Signature` over `timestamp.body` before parsing or storing anything. Duplicate event IDs are idempotent; reuse with different bytes is rejected.
 
 ## Collaboration and history

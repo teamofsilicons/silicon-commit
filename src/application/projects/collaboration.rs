@@ -69,7 +69,7 @@ impl ProjectService {
             return Ok(Some(ActiveMember {
                 organization_id: actor.organization_id,
                 org_id: actor.org_id.clone(),
-                membership_id: actor.membership_id,
+                membership_id: actor.membership_id.clone(),
                 actor: actor.actor.clone(),
             }));
         }
@@ -238,7 +238,9 @@ impl ProjectService {
             .await?
             .id;
         postgres::upsert_verified_actor(&mut tx, actor).await?;
-        let tasks:Vec<(Uuid,Option<Uuid>)>=sqlx::query_as("WITH RECURSIVE subtree AS (SELECT id,todo_id FROM commit.project_tasks WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND deleted_at IS NULL UNION ALL SELECT t.id,t.todo_id FROM commit.project_tasks t JOIN subtree s ON t.parent_task_id=s.id WHERE t.organization_id=$1 AND t.project_id=$2 AND t.deleted_at IS NULL) SELECT id,todo_id FROM subtree")
+        // Delete children before parents so the mirrored todo-deletion cascade
+        // never removes a child that this operation still needs to process.
+        let tasks:Vec<(Uuid,Option<Uuid>)>=sqlx::query_as("WITH RECURSIVE subtree AS (SELECT id,todo_id,0 AS depth FROM commit.project_tasks WHERE organization_id=$1 AND project_id=$2 AND id=$3 AND deleted_at IS NULL UNION ALL SELECT t.id,t.todo_id,s.depth+1 FROM commit.project_tasks t JOIN subtree s ON t.parent_task_id=s.id WHERE t.organization_id=$1 AND t.project_id=$2 AND t.deleted_at IS NULL) SELECT id,todo_id FROM subtree ORDER BY depth DESC,id")
             .bind(actor.organization_id.into_uuid()).bind(project_id.into_uuid()).bind(task_id.into_uuid()).fetch_all(&mut *tx).await?;
         if tasks.is_empty() {
             return Err(AppError::NotFound);

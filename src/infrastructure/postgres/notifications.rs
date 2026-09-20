@@ -109,7 +109,7 @@ pub(crate) async fn upsert_verified_actor(
         connection,
         actor.organization_id,
         &actor.org_id,
-        actor.membership_id,
+        &actor.membership_id,
         &actor.actor,
     )
     .await

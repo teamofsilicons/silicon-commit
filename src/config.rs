@@ -347,7 +347,9 @@ fn load_integrations(
             )?,
             app_id: optional("COMMIT_IAM_APP_ID"),
             app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
-            audience: value_or("COMMIT_IAM_AUDIENCE", "silicon-commit"),
+            audience: optional("COMMIT_IAM_AUDIENCE")
+                .or_else(|| optional("COMMIT_IAM_APP_ID"))
+                .unwrap_or_else(|| "silicon-commit".to_owned()),
             webhook_secret: optional_secret("COMMIT_WEBHOOK_SIGNING_SECRET"),
             webhook_key_version: parse_or("COMMIT_WEBHOOK_KEY_VERSION", "1")?,
         },

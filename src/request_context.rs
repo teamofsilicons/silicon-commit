@@ -10,6 +10,8 @@ struct Context {
     iam_testing_credentials: RefCell<Option<IamTestingCredentials>>,
     iam_bearer_token: RefCell<Option<SecretString>>,
     testing_scope: RefCell<Option<TestingScope>>,
+    obo_request_binding: RefCell<Option<silicon_iam_client::models::OboVerifyRequestBinding>>,
+    verified_iam_member: RefCell<Option<crate::application::ports::ActiveMember>>,
 }
 
 tokio::task_local! {
@@ -26,11 +28,41 @@ pub async fn scope<T>(request_id: String, future: impl Future<Output = T>) -> T 
                 iam_testing_credentials: RefCell::new(None),
                 iam_bearer_token: RefCell::new(None),
                 testing_scope: RefCell::new(None),
+                obo_request_binding: RefCell::new(None),
+                verified_iam_member: RefCell::new(None),
             },
             future,
         )
         .await
 }
+/// Records the actual HTTP request for single-use IAM delegated verification.
+pub fn set_obo_request_binding(binding: silicon_iam_client::models::OboVerifyRequestBinding) {
+    let _ = REQUEST.try_with(|c| *c.obo_request_binding.borrow_mut() = Some(binding));
+}
+
+/// Returns the method, path and digest observed at the HTTP boundary.
+#[must_use]
+pub fn current_obo_request_binding() -> Option<silicon_iam_client::models::OboVerifyRequestBinding>
+{
+    REQUEST
+        .try_with(|c| c.obo_request_binding.borrow().clone())
+        .ok()
+        .flatten()
+}
+/// Keeps the verified caller membership available inside this request only.
+pub fn set_verified_iam_member(member: crate::application::ports::ActiveMember) {
+    let _ = REQUEST.try_with(|c| *c.verified_iam_member.borrow_mut() = Some(member));
+}
+
+/// Returns the membership already verified by IAM for this request.
+#[must_use]
+pub fn current_verified_iam_member() -> Option<crate::application::ports::ActiveMember> {
+    REQUEST
+        .try_with(|c| c.verified_iam_member.borrow().clone())
+        .ok()
+        .flatten()
+}
+
 /// Installs the authenticated IAM bearer for request-scoped directory reads.
 pub fn set_iam_bearer_token(token: Option<SecretString>) {
     let _ = REQUEST.try_with(|c| *c.iam_bearer_token.borrow_mut() = token);

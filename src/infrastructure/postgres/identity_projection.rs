@@ -1,7 +1,6 @@
 //! Insert-once IAM identity projection persistence.
 
 use sqlx::{PgConnection, PgPool};
-use uuid::Uuid;
 
 use crate::{
     application::ports::VerifiedActor,
@@ -58,7 +57,7 @@ pub(super) async fn assert_consistent(
     .bind(actor.organization_id.into_uuid())
     .bind(actor.org_id.as_str())
     .bind(actor.actor.principal_id.into_uuid())
-    .bind(actor.membership_id)
+    .bind(&actor.membership_id)
     .bind(actor.actor.actor_type)
     .bind(actor.actor.id.as_str())
     .bind(crate::request_context::testing_scope().map(|s| s.id))
@@ -77,9 +76,12 @@ pub(super) async fn persist_identity(
     connection: &mut PgConnection,
     organization_id: OrganizationId,
     org_id: &PublicOrganizationId,
-    membership_id: Uuid,
+    membership_id: &str,
     actor: &Actor,
 ) -> Result<(), AppError> {
+    if membership_id != format!("{}[{}]", actor.id.as_str(), org_id.as_str()) {
+        return Err(AppError::BadGateway);
+    }
     let existing_org_id = sqlx::query_scalar::<_, String>(
         r#"
         SELECT org_id
@@ -131,7 +133,7 @@ pub(super) async fn persist_identity(
         }
     }
 
-    let existing_actor = sqlx::query_as::<_, (Uuid, ActorType, String)>(
+    let existing_actor = sqlx::query_as::<_, (String, ActorType, String)>(
         r#"
         SELECT membership_id, actor_type, actor_id
         FROM commit.actor_projection

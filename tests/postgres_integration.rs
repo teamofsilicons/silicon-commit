@@ -74,11 +74,11 @@ impl TestOrganization {
             ActorId::new(format!("{label}-{suffix}"))?,
         );
         let capabilities = CapabilitySet::default();
-        let membership_id = Uuid::new_v4();
+        let membership_id = format!("{}[{}]", actor.id.as_str(), self.public_id.as_str());
         let identity = TrustedIdentity {
             organization_id: self.id,
             org_id: self.public_id.clone(),
-            membership_id,
+            membership_id: membership_id.clone(),
             actor: actor.clone(),
             organization_role: role,
             capabilities: capabilities.clone(),
@@ -365,7 +365,7 @@ async fn migrations_establish_the_complete_schema() -> anyhow::Result<()> {
     )
     .bind(organization_id)
     .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
+    .bind(format!("{unicode_public_id}[{unicode_public_id}]"))
     .bind(&unicode_public_id)
     .execute(&mut *transaction)
     .await?;
@@ -643,7 +643,7 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     let remapped_identity = TrustedIdentity {
         organization_id: assignee.organization_id,
         org_id: assignee.org_id.clone(),
-        membership_id: assignee.membership_id,
+        membership_id: assignee.membership_id.clone(),
         actor: remapped_actor.clone(),
         organization_role: assignee.organization_role,
         capabilities: assignee.capabilities.clone(),
@@ -651,7 +651,7 @@ async fn todo_lifecycle_enforces_replay_tenant_and_actor_boundaries() -> anyhow:
     let remapped_assignee = VerifiedActor::new(
         assignee.organization_id,
         assignee.org_id.clone(),
-        assignee.membership_id,
+        assignee.membership_id.clone(),
         remapped_actor,
         assignee.organization_role,
         assignee.capabilities.clone(),
@@ -2524,7 +2524,7 @@ fn active_member(actor: &VerifiedActor) -> ActiveMember {
     ActiveMember {
         organization_id: actor.organization_id,
         org_id: actor.org_id.clone(),
-        membership_id: actor.membership_id,
+        membership_id: actor.membership_id.clone(),
         actor: actor.actor.clone(),
     }
 }
@@ -2611,7 +2611,7 @@ async fn seed_identity(pool: &PgPool, actor: &VerifiedActor) -> anyhow::Result<(
     )
     .bind(actor.organization_id.into_uuid())
     .bind(actor.actor.principal_id.into_uuid())
-    .bind(actor.membership_id)
+    .bind(&actor.membership_id)
     .bind(actor.actor.actor_type)
     .bind(actor.actor.id.as_str())
     .execute(&mut *transaction)
@@ -2631,7 +2631,7 @@ async fn seed_identity(pool: &PgPool, actor: &VerifiedActor) -> anyhow::Result<(
     )
     .bind(actor.organization_id.into_uuid())
     .bind(actor.actor.principal_id.into_uuid())
-    .bind(actor.membership_id)
+    .bind(&actor.membership_id)
     .bind(actor.actor.actor_type)
     .bind(actor.actor.id.as_str())
     .fetch_one(&mut *transaction)

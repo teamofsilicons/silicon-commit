@@ -388,7 +388,7 @@ pub(crate) async fn upsert_verified_actor(
         connection,
         actor.organization_id,
         &actor.org_id,
-        actor.membership_id,
+        &actor.membership_id,
         &actor.actor,
     )
     .await
@@ -403,7 +403,7 @@ pub(crate) async fn upsert_active_member(
         connection,
         member.organization_id,
         &member.org_id,
-        member.membership_id,
+        &member.membership_id,
         &member.actor,
     )
     .await
@@ -413,7 +413,7 @@ async fn upsert_actor_projection(
     connection: &mut PgConnection,
     organization_id: OrganizationId,
     org_id: &PublicOrganizationId,
-    membership_id: Uuid,
+    membership_id: &str,
     actor: &Actor,
 ) -> Result<(), AppError> {
     super::identity_projection::persist_identity(
@@ -1064,8 +1064,8 @@ mod tests {
         let grant = InboundCredential::Bearer(SecretString::from("test-token".to_owned()));
         Some(VerifiedActor::new(
             OrganizationId::from_uuid(Uuid::from_u128(1)),
-            org_id,
-            Uuid::from_u128(2),
+            org_id.clone(),
+            format!("{}[{}]", actor.id.as_str(), org_id.as_str()),
             actor,
             OrganizationRole::Member,
             CapabilitySet::default(),
