@@ -51,12 +51,24 @@ Use SSM to copy these files to the root-owned `/opt/commit` directory:
 
 Run `python3 /opt/commit/bootstrap.py SECRET_ARN DATABASE_HOST IMAGE_DIGEST` as
 root through SSM. Pass the immutable ECR `repository@sha256:...` image reference.
-The script retrieves secrets on the server, creates dedicated database roles if
-absent, migrates, applies and tests runtime permissions, and replaces the API,
-worker, and Caddy containers. Do not run deployments concurrently. Runtime files
+The script retrieves secrets on the server, pulls images, prepares environment
+files and grant scripts, and creates dedicated database roles if absent. It then
+stops both old API and worker processes before migrating, applies and tests runtime
+permissions, and starts their replacements. A failure while stopping services
+restores only those that were previously running. Once migration starts, a failure
+leaves old services stopped because earlier migrations may already have committed.
+Do not run deployments concurrently. Runtime files
 are root-readable only; temporary migration and administrator environment files
 are removed even when database setup fails. The test role checks intentionally
 exercise denied writes inside rolled-back transactions.
+
+For migrations 0029–0030, prepare the release first, stop API and worker, and take
+and verify a recoverable database backup before invoking bootstrap. Bootstrap does
+not create backups. Migration 0029 changes retained membership IDs from UUIDs to
+canonical text, so an old backend image cannot run against the upgraded schema.
+Recovery requires either the upgraded backend or restoration of the database
+backup before starting an older image. Migration 0030 also repairs existing orphaned
+task descendants and retains an audit record of those repairs.
 
 The deployment secret contains the confirmed IAM application and webhook secrets,
 the IAM backend URL, and generated database passwords. Do not place its values in
@@ -96,22 +108,33 @@ The following release adds current IAM directory usage and automatic sandbox dis
 
 ## Honeycomb lifecycle deployment
 
-Upload `testing_credentials.py` next to `bootstrap.py`. Set
-`COMMIT_HONEYCOMB_SECRET_ID`, optional `COMMIT_HONEYCOMB_REGION`, and
-`COMMIT_HONEYCOMB_URL` in Commit's deployment secret. Give the deployment role
-read/write access to the selected Honeycomb and Commit Secrets Manager records.
-Bootstrap provisions and verifies the participant token and registry entry before
-starting Commit. Redeploy Honeycomb to load its updated backend secrets too.
-Existing credentials are reused; conflicting identities, destinations or tokens
-stop provisioning instead of overwriting them. There is no user credential setup.
-
-For a separate provisioning stage:
+Provision the participant token and registry entry with the deployment operator's
+credentials. The helper reuses existing credentials and rejects conflicting
+identities, destinations or tokens instead of overwriting them:
 
 ```sh
 python3 deploy/aws/testing_credentials.py --profile PROFILE \
-  --honeycomb-secret HONEYCOMB_SECRET --commit-secret COMMIT_SECRET \
+  --honeycomb-region us-east-2 \
+  --honeycomb-secret silicon-honeycomb/production/runtime \
+  --commit-region us-east-1 --commit-secret silicon-commit/production \
   --commit-public-base-url https://backend.commit.teamofsilicons.com
 ```
+
+The current production deployment uses this separate stage with the deployment
+operator's credentials. Its Commit runtime secret contains
+`COMMIT_HONEYCOMB_URL=https://backend.honeycomb.teamofsilicons.com` and the paired
+service token; `COMMIT_HONEYCOMB_SECRET_ID` stays unset. The runtime instance does
+not need write access to Honeycomb's deployment secret. After provisioning,
+reload the Commit API and worker configuration, and add only the Commit token
+and participant entry to Honeycomb's live backend environment. Preserve its
+existing participants, environment, image and container settings during that
+reload; do not activate unrelated staged configuration.
+
+Bootstrap can alternatively perform provisioning when `testing_credentials.py` is
+uploaded next to it and `COMMIT_HONEYCOMB_SECRET_ID`, optional
+`COMMIT_HONEYCOMB_REGION`, and `COMMIT_HONEYCOMB_URL` are configured. That mode
+requires the bootstrap execution role to read and write both deployment secrets.
+The current runtime instance is intentionally not configured for that mode.
 
 API and worker must share the stable sandbox encryption key. Bootstrap passes the
 worker `COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY`, preserving existing ciphertext
