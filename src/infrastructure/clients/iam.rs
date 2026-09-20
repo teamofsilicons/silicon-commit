@@ -797,7 +797,10 @@ mod tests {
             .and(header("x-org-id", "test-org"))
             .and(header(
                 "user-agent",
-                "silicon-iam-client/2.0.0 silicon-commit/0.2.0",
+                concat!(
+                    "silicon-iam-client/2.0.0 silicon-commit/",
+                    env!("CARGO_PKG_VERSION")
+                ),
             ))
             .and(header(
                 "authorization",
