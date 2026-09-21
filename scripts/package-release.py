@@ -17,6 +17,8 @@ import tarfile
 import tempfile
 import tomllib
 
+from check_linux_abi import verify_glibc_requirements
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {
@@ -58,6 +60,11 @@ def verify_binary(path: Path, target: str) -> None:
             )
     if not valid:
         raise SystemExit(f"Wrong native binary format or architecture for {target}: {path}")
+    if target.startswith("linux-"):
+        try:
+            verify_glibc_requirements(data)
+        except ValueError as error:
+            raise SystemExit(f"Unsupported Linux ABI for {target}: {path}: {error}") from error
 
 
 def run(*command: str) -> None:

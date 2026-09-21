@@ -127,4 +127,5 @@ jobs:
           python-version: '3.12'
       - run: python3 deploy/aws/test_testing_credentials.py
       - run: python3 deploy/aws/test_bootstrap.py
-      - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py
+      - run: python3 scripts/test_linux_abi.py
+      - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py scripts/check_linux_abi.py scripts/test_linux_abi.py

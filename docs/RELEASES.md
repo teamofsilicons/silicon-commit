@@ -34,8 +34,17 @@ IAM delegated-directory support and currently return 403.
 ## Build the native CLI
 
 Use the same release version in the root, client and CLI Cargo manifests and
-`honeycomb.yaml`. Build `silicon-commit-cli` with `cargo build --locked --release
--p silicon-commit-cli --target TARGET` for all six targets:
+`honeycomb.yaml`. Build Windows and macOS with `cargo build --locked --release
+-p silicon-commit-cli --target TARGET`. Linux releases support glibc 2.28 and
+newer; use cargo-zigbuild 0.23.4 with Zig 0.15.2 and an explicit baseline:
+
+```sh
+cargo zigbuild --locked --release -p silicon-commit-cli \
+  --target x86_64-unknown-linux-gnu.2.28 \
+  --target aarch64-unknown-linux-gnu.2.28
+```
+
+The six release targets are:
 
 | Honeycomb target | Rust target |
 | --- | --- |
@@ -76,8 +85,10 @@ the CI workflow below runs each executable on its corresponding OS and CPU.
 python3 scripts/package-release.py --binaries-dir artifacts --output-dir dist
 ```
 
-The script checks each executable's OS and architecture, checks the manifest
-version, stages exactly the six binaries and root `honeycomb.yaml`, runs
+The script checks each executable's OS and architecture and reads Linux ELF
+version requirements to reject any glibc dependency above 2.28. Missing or invalid
+version metadata also fails validation. It checks the manifest version, stages
+exactly the six binaries and root `honeycomb.yaml`, runs
 `honeycomb validate`, then `honeycomb pack`, then validates the archive. Missing
 or wrong-target binaries fail the release. It produces `commit-VERSION.tar.gz`
 and SHA-256 checksums. No credentials, source checkout, or local sessions are
@@ -90,6 +101,10 @@ documentation alone does not create or claim a native release.
 
 Run the **Build native Honeycomb package** workflow on the release commit and
 supply the reviewed published Honeycomb CLI version. It builds and smoke-tests
-all six native executables, then validates and packs a single archive. The
+all six native executables. Linux uses the pinned Zig toolchain and explicit
+glibc 2.28 targets; each Linux binary must pass ELF validation and execute
+`--version`, `--help`, and `daemon status` in the pinned Debian 10 image with
+glibc 2.28 on its native CPU. These containers run only in remote CI. The workflow
+then validates and packs a single archive. The
 workflow uploads build artifacts; it does not publish or deploy them. Runner
 labels follow [GitHub's hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).

@@ -46,8 +46,42 @@ jobs:
           toolchain: 1.98.0
           targets: ${{ matrix.triple }}
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Install pinned Linux baseline toolchain
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install 'cargo-zigbuild==0.23.4' 'ziglang==0.15.2'
+          python3 -c 'from pathlib import Path; import ziglang; print("CARGO_ZIGBUILD_ZIG_PATH=" + str(Path(ziglang.__file__).with_name("zig")))' >> "$GITHUB_ENV"
+          cargo-zigbuild --version
+          python3 -m ziglang version
+      - name: Build Linux CLI for glibc 2.28
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --locked --release -p silicon-commit-cli --target ${{ matrix.triple }}.2.28
       - name: Build native CLI
+        if: runner.os != 'Linux'
         run: cargo build --locked --release -p silicon-commit-cli --target ${{ matrix.triple }}
+      - name: Verify Linux ABI requirements
+        if: runner.os == 'Linux'
+        run: |
+          python3 scripts/test_linux_abi.py
+          python3 scripts/check_linux_abi.py target/${{ matrix.triple }}/release/commit
+      - name: Smoke test Linux executable on glibc 2.28
+        if: runner.os == 'Linux'
+        env:
+          COMMIT_RELEASE_BINARY: target/${{ matrix.triple }}/release/commit
+        run: |
+          docker run --rm --network none \
+            --volume "$PWD/$COMMIT_RELEASE_BINARY:/usr/local/bin/commit:ro" \
+            --env SILICON_HOME=/tmp/commit-smoke --env COMMIT_TELEMETRY=off \
+            debian:buster-slim@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4f06043b604726dc sh -eu -c '
+              test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+              commit --version
+              commit --help
+              commit daemon status
+            '
       - name: Smoke test native executable
         shell: bash
         env:
@@ -79,6 +113,7 @@ jobs:
         env:
           HONEYCOMB_PACKAGER_VERSION: ${{ inputs.honeycomb_version }}
         run: cargo install --locked silicon-honeycomb-cli --version "$HONEYCOMB_PACKAGER_VERSION"
+      - run: python3 scripts/test_linux_abi.py
       - run: python3 scripts/package-release.py --binaries-dir artifacts --output-dir dist
       - uses: actions/upload-artifact@v4
         with:
