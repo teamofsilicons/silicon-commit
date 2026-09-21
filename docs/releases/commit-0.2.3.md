@@ -120,7 +120,6 @@ check may require reauthentication without changing retained CLI sessions.
 The documentation site serves version 0.2.3. All 28 public files were compared
 against the generated site and matched byte-for-byte.
 
-
 ## Verification after the IAM 3 cutover
 
 IAM 3.0.0 went live at source
@@ -151,7 +150,6 @@ was unchanged by refresh. Maharaj's actual managed 0.2.3 binary and existing
 production `chef:bricks` session also passed authentication, organization selection,
 and todo/project reads without a new login or real-work mutations.
 
-
 Browser checks also passed against canonical IAM 3. The test selection/session
 had expired, so the same Carbon identity authenticated again in the same retained
 environment. This is a reauthentication check, not old-cookie continuity proof.
@@ -160,10 +158,33 @@ standalone self todo was created, edited, moved to In progress, reloaded to veri
 persistence, and deleted; the original baseline todo remained. All retained CLI
 session and replay continuity checks preceded these independent UI operations.
 
+## Test-environment cleanup
 
-Post-cutover cleanup exposed a separate Honeycomb control-plane compatibility gap:
-application-owned environment reads rejected the canonical IAM application
-identity, and retained application ownership needs compatible resolution. No
-cleanup mutation was attempted through an alternate authority. The environment
-and its private credentials remain held until the Honeycomb fix is live, after
-which deletion and participant completion/credential-denial checks will run.
+Cleanup exposed a Honeycomb compatibility gap in canonical application identity
+validation and retained environment ownership. Honeycomb source
+`3a6351dad128366491854df73e90f4b28d29111b`, schema 23, repaired that boundary.
+The unchanged production application Basic credentials then read the retained
+environment and its root key successfully. Replaying the original create body
+with its original key returned the same environment and operation; changing the
+body with that key returned 409. The environment inventory, generation, and
+revision stayed unchanged by those checks.
+
+The owning application then performed normal recoverable deletion of only
+`036b5c48-0aaf-4bdf-83ca-8f1928b88d55`. Operation
+`ac0ea930-ba96-4bdb-b315-3c84893eda7c` completed at revision 3 with no pending
+operation. Commit, IAM, and Honeycomb all returned successful participant receipts
+for that operation, and Commit's persisted completion receipt was independently
+verified.
+
+All seven old test-context requests returned 401: the IAM root key, IAM and
+Commit application-secret requests, and all four actors' saved bearer requests
+with their test selector. These checks establish denial of the deleted test
+context; they do not claim independent bearer-token revocation outside that
+context. The dedicated private credential/workflow folder and its marker were
+removed and independently confirmed absent. Sanitized reports and screenshots
+remain available. Maharaj's production session and resource reads still passed
+after cleanup.
+
+
+The verification browser exited testing mode and showed the signed-out production
+view after a full reload. Only its dedicated verification tab was closed.
