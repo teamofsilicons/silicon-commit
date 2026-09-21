@@ -95,24 +95,36 @@ const sessionHeader = (s: Session, c: Config, scope: string) =>
   `${cookieName(c, scope)}=${seal(s, c, scope)}; Max-Age=${Math.max(0, Math.floor((s.deadline - Date.now()) / 1000))}${options(c)}`;
 const clearHeader = (c: Config, scope: string) =>
   `${cookieName(c, scope)}=; Max-Age=0${options(c)}`;
+// IAM keeps secret-bearing token responses replayable for at most ten minutes.
+// Commit's backend forwards expires_in without the replay marker or original issue
+// time. Subtract that bound so another gateway cannot extend a replayed credential.
+const tokenReplayWindow = 600000;
+class SessionExpired extends Error {}
 function fromTokens(
   t: any,
+  startedAt: number,
   environmentKey?: string,
   previous?: Session,
 ): Session {
   if (
-    typeof t.access_token !== "string" ||
+    typeof t?.access_token !== "string" ||
+    !t.access_token ||
     typeof t.refresh_token !== "string" ||
+    !t.refresh_token ||
     !["carbon", "silicon"].includes(t.actor?.type) ||
     typeof t.actor?.public_id !== "string" ||
-    !Number.isFinite(t.expires_in)
+    !Number.isSafeInteger(t.expires_in) ||
+    t.expires_in <= 0 ||
+    !Number.isSafeInteger(startedAt + t.expires_in * 1000)
   )
     throw new Error("Invalid login response");
   return {
     access: t.access_token,
     refresh: t.refresh_token,
-    expires: Date.now() + t.expires_in * 1000,
-    deadline: previous?.deadline ?? Date.now() + 7 * 86400000,
+    expires: startedAt + Math.max(0, t.expires_in * 1000 - tokenReplayWindow),
+    deadline: previous?.selectionOnly
+      ? Date.now() + 7 * 86400000
+      : (previous?.deadline ?? Date.now() + 7 * 86400000),
     actor: t.actor,
     org: validOrg(t.org_id) ? t.org_id : (previous?.org ?? ""),
     environmentKey,
@@ -183,16 +195,41 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         "idempotency-key": "frontend-refresh-" + id,
       };
       if (s.environmentKey) h["x-testing-environment-key"] = s.environmentKey;
+      const startedAt = Date.now();
       const r = await upstream("/auth/refresh", {
         method: "POST",
         headers: h,
         body: JSON.stringify({ refresh_token: s.refresh }),
       });
-      if (!r.ok) throw new Error("Session expired");
-      return fromTokens(await r.json(), s.environmentKey, s);
+      if (!r.ok) {
+        const body = await r.json().catch(() => undefined);
+        if (
+          (r.status === 401 &&
+            [
+              "unauthenticated",
+              "invalid_grant",
+              "refresh_token_reuse",
+            ].includes(body?.error?.code)) ||
+          (r.status === 400 &&
+            ["invalid_grant", "refresh_token_reuse"].includes(
+              body?.error?.code,
+            ))
+        )
+          throw new SessionExpired(
+            "The saved refresh family is no longer valid",
+          );
+        throw new Error("Commit could not renew the session. Please retry.");
+      }
+      return fromTokens(await r.json(), startedAt, s.environmentKey, s);
     })();
     refreshes.set(id, { until: Date.now() + 120000, promise });
-    return promise;
+    try {
+      return await promise;
+    } catch (error) {
+      // A failed transport attempt is retryable immediately with the same stable key.
+      if (refreshes.get(id)?.promise === promise) refreshes.delete(id);
+      throw error;
+    }
   }
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url),
@@ -242,6 +279,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             400,
             "Login expired. Return to Commit and sign in again.",
           );
+        const startedAt = Date.now();
         const r = await upstream("/auth/login", {
           method: "POST",
           headers: {
@@ -255,7 +293,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             status: 303,
             headers: { location: "/#/login?error=login_failed" },
           });
-        const s = fromTokens(await r.json());
+        const s = fromTokens(await r.json(), startedAt);
         const h = new Headers({ location: "/#/todos" });
         h.append("set-cookie", sessionHeader(s, c, "production"));
         h.append("set-cookie", `commit_login=; Max-Age=0${options(c)}`);
@@ -328,6 +366,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         };
         if (scope !== "production")
           h["x-testing-environment-key"] = selectedSecret;
+        const startedAt = Date.now();
         const r = await upstream("/auth/login", {
           method: "POST",
           headers: h,
@@ -336,6 +375,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         if (!r.ok) return r;
         session = fromTokens(
           await r.json(),
+          startedAt,
           scope === "production" ? undefined : selectedSecret,
           session || undefined,
         );
@@ -349,14 +389,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           !session.selectionOnly &&
           session.expires < Date.now() + 30000
         )
-          try {
-            session = await refresh(session);
-          } catch {
-            return Response.json(
-              { authenticated: false },
-              { headers: { "set-cookie": clearHeader(c, scope) } },
-            );
-          }
+          session = await refresh(session);
         return Response.json(summary(session), {
           headers: session
             ? { "set-cookie": sessionHeader(session, c, scope) }
@@ -378,7 +411,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             headers: h,
             body: JSON.stringify({ token: session.refresh }),
           });
-          if (!r.ok && r.status !== 401) return r;
+          if (!r.ok) return r;
         }
         return new Response(null, {
           status: 204,
@@ -408,16 +441,8 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           !session.selectionOnly &&
           session.expires < Date.now() + 30000
         ) {
-          try {
-            session = await refresh(session);
-            rotated = true;
-          } catch {
-            return failure(
-              401,
-              "Your session expired. Sign in again.",
-              "unauthenticated",
-            );
-          }
+          session = await refresh(session);
+          rotated = true;
         }
         const h = new Headers();
         h.set("x-commit-client", "browser");
@@ -448,13 +473,22 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             return failure(400, "Invalid test key.");
           h.set("x-testing-environment-key", cleanKey);
         }
-        const r = await upstream(target + url.search, {
-          method,
-          headers: h,
-          body: ["GET", "HEAD"].includes(method)
-            ? undefined
-            : await request.text(),
-        });
+        const body = ["GET", "HEAD"].includes(method)
+          ? undefined
+          : await request.text();
+        // Authentication is rejected before mutation. Keep the same body and mutation
+        // key for exactly one replay after renewing the access credential.
+        if (body !== undefined && !h.has("idempotency-key"))
+          h.set("idempotency-key", crypto.randomUUID());
+        const send = () =>
+          upstream(target + url.search, { method, headers: h, body });
+        let r = await send();
+        if (r.status === 401 && session && !session.selectionOnly && !rotated) {
+          session = await refresh(session);
+          rotated = true;
+          h.set("authorization", "Bearer " + session.access);
+          r = await send();
+        }
         const out = new Headers();
         for (const k of [
           "content-type",
@@ -466,13 +500,24 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           const v = r.headers.get(k);
           if (v) out.set(k, v);
         }
-        if (r.status === 401) out.set("set-cookie", clearHeader(c, scope));
-        else if (rotated && session)
+        if (rotated && session)
           out.set("set-cookie", sessionHeader(session, c, scope));
         return new Response(r.body, { status: r.status, headers: out });
       }
       return failure(404, "Not found.");
-    } catch {
+    } catch (error) {
+      if (error instanceof SessionExpired) {
+        const response =
+          path === "/auth/session"
+            ? Response.json({ authenticated: false })
+            : failure(
+                401,
+                "Your session expired. Sign in again.",
+                "unauthenticated",
+              );
+        response.headers.set("set-cookie", clearHeader(c, scope));
+        return response;
+      }
       return failure(
         502,
         "Commit could not reach its backend. Try again; your draft is still here.",

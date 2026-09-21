@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createGateway, seal, type Config } from "../server/gateway.ts";
+import { createGateway, seal, open, type Config } from "../server/gateway.ts";
 const config: Config = {
   upstream: "https://backend.example.com",
   origin: "https://commit.example.com",
@@ -183,9 +183,12 @@ test("concurrent refresh uses one exchange and stable idempotency across gateway
   );
   assert.equal(keys[0], keys[1]);
 });
-test("upstream rejection clears cookie to prevent repeated authentication loops", async () => {
+test("a rejected refresh family clears the cookie after one renewal attempt", async () => {
   const r = await gateway(() =>
-    Response.json({ error: { message: "revoked" } }, { status: 401 }),
+    Response.json(
+      { error: { code: "unauthenticated", message: "revoked" } },
+      { status: 401 },
+    ),
   )(req("/api/todos", "GET", undefined, { cookie: cookie() }));
   assert.equal(r.status, 401);
   assert.match(r.headers.get("set-cookie")!, /Max-Age=0/);
@@ -370,4 +373,208 @@ test("automatic sandbox selection encrypts its secret and never replaces product
     }),
   );
   assert.equal((await prod.json()).authenticated, true);
+});
+
+test("refresh outages preserve sessions and can be retried immediately on both routes", async () => {
+  for (const path of ["/auth/session", "/api/todos"]) {
+    for (const status of [400, 401, 403, 429, 503]) {
+      let attempts = 0;
+      const keys: string[] = [];
+      const g = gateway((url, init) => {
+        if (url.pathname.endsWith("/auth/refresh")) {
+          keys.push(new Headers(init.headers).get("idempotency-key")!);
+          attempts++;
+          if (attempts === 1)
+            return Response.json(
+              { error: { code: "provider_unavailable" } },
+              { status },
+            );
+          return Response.json({
+            ...tokens,
+            access_token: "new",
+            refresh_token: "new-refresh",
+          });
+        }
+        return Response.json({ items: [] });
+      });
+      const headers = { cookie: cookie(session(Date.now() - 1000)) };
+      const failed = await g(req(path, "GET", undefined, headers));
+      assert.equal(failed.status, 502);
+      assert.equal(failed.headers.has("set-cookie"), false);
+      const recovered = await g(req(path, "GET", undefined, headers));
+      assert.equal(recovered.status, 200);
+      assert.equal(attempts, 2);
+      assert.equal(keys[0], keys[1]);
+      assert.ok(recovered.headers.get("set-cookie"));
+    }
+  }
+});
+
+test("lost refresh responses recover with the same operation after a gateway restart", async () => {
+  let attempts = 0;
+  const keys: string[] = [];
+  const transport = (url: URL, init: RequestInit) => {
+    assert.ok(url.pathname.endsWith("/auth/refresh"));
+    keys.push(new Headers(init.headers).get("idempotency-key")!);
+    if (++attempts === 1) throw new Error("response lost after IAM rotated");
+    return Response.json({
+      ...tokens,
+      expires_in: 1800,
+      access_token: "successor",
+      refresh_token: "successor-refresh",
+    });
+  };
+  const headers = { cookie: cookie(session(Date.now() - 1000)) };
+  const failed = await gateway(transport)(
+    req("/auth/session", "GET", undefined, headers),
+  );
+  assert.equal(failed.status, 502);
+  assert.equal(failed.headers.has("set-cookie"), false);
+  const recovered = await gateway(transport)(
+    req("/auth/session", "GET", undefined, headers),
+  );
+  assert.equal(recovered.status, 200);
+  assert.equal(keys[0], keys[1]);
+  const value = recovered.headers
+    .get("set-cookie")!
+    .split(";")[0]
+    .split("=")[1];
+  const saved = open(value, config, "production")!;
+  assert.equal(saved.refresh, "successor-refresh");
+  // A response replayed near the end of IAM's ten-minute window must not gain
+  // another full access lifetime just because a new gateway received it now.
+  assert.ok(saved.expires <= Date.now() + 1200000);
+  assert.ok(saved.expires >= Date.now() + 1190000);
+});
+
+test("an early access rejection renews once and retries the exact scoped mutation", async () => {
+  const requests: { body: BodyInit | null | undefined; key: string | null }[] =
+    [];
+  let renewals = 0;
+  const g = gateway((url, init) => {
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("x-testing-environment-key"), "a".repeat(32));
+    if (url.pathname.endsWith("/auth/refresh")) {
+      renewals++;
+      return Response.json({
+        ...tokens,
+        access_token: "renewed",
+        refresh_token: "rotated-refresh",
+      });
+    }
+    requests.push({ body: init.body, key: headers.get("idempotency-key") });
+    assert.equal(headers.get("if-match"), '"8"');
+    assert.equal(headers.get("x-org-id"), "test-team");
+    return headers.get("authorization") === "Bearer renewed"
+      ? Response.json({ version: 9 })
+      : Response.json({ error: { code: "unauthenticated" } }, { status: 401 });
+  });
+  const result = await g(
+    req(
+      "/api/projects/p/diary",
+      "PUT",
+      { markdown: "retain this draft" },
+      {
+        cookie: cookie(session(undefined, "a".repeat(32)), scope),
+        "x-commit-environment": scope,
+        "idempotency-key": "original-mutation-key",
+        "if-match": '"8"',
+      },
+    ),
+  );
+  assert.equal(result.status, 200);
+  assert.equal(renewals, 1);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.equal(requests[0].key, "original-mutation-key");
+  assert.ok(
+    result.headers
+      .get("set-cookie")
+      ?.startsWith("__Host-commit_" + scope + "="),
+  );
+});
+
+test("persistent API rejection does not loop or erase a successfully rotated session", async () => {
+  let renewals = 0,
+    calls = 0;
+  const g = gateway((url) => {
+    if (url.pathname.endsWith("/auth/refresh")) {
+      renewals++;
+      return Response.json({
+        ...tokens,
+        access_token: "renewed",
+        refresh_token: "rotated-refresh",
+      });
+    }
+    calls++;
+    return Response.json(
+      { error: { code: "request_rejected" } },
+      { status: 401 },
+    );
+  });
+  const response = await g(
+    req("/api/todos", "GET", undefined, { cookie: cookie() }),
+  );
+  assert.equal(response.status, 401);
+  assert.equal(renewals, 1);
+  assert.equal(calls, 2);
+  assert.ok(response.headers.get("set-cookie"));
+  assert.doesNotMatch(response.headers.get("set-cookie")!, /Max-Age=0/);
+});
+
+test("malformed refresh replies retain the cookie and permit an immediate retry", async () => {
+  let calls = 0;
+  const g = gateway(() =>
+    ++calls === 1
+      ? Response.json({ ...tokens, refresh_token: "" })
+      : Response.json(tokens),
+  );
+  const headers = { cookie: cookie(session(Date.now() - 1000)) };
+  const bad = await g(req("/auth/session", "GET", undefined, headers));
+  assert.equal(bad.status, 502);
+  assert.equal(bad.headers.has("set-cookie"), false);
+  assert.equal(
+    (await g(req("/auth/session", "GET", undefined, headers))).status,
+    200,
+  );
+  assert.equal(calls, 2);
+});
+
+test("failed signout retains the cookie so revocation can be retried", async () => {
+  const g = gateway(() =>
+    Response.json({ error: { code: "provider_unavailable" } }, { status: 503 }),
+  );
+  const result = await g(req("/auth/logout", "POST", {}, { cookie: cookie() }));
+  assert.equal(result.status, 503);
+  assert.equal(result.headers.has("set-cookie"), false);
+});
+
+test("test login replaces the short selection deadline with the full session deadline", async () => {
+  const secret = "a".repeat(32);
+  const g = gateway((url) =>
+    url.pathname.endsWith("/testing-context")
+      ? Response.json({ environment_id: scope })
+      : Response.json(tokens),
+  );
+  const selection = {
+    ...session(Date.now() + 900000, secret),
+    deadline: Date.now() + 900000,
+    selectionOnly: true,
+  };
+  const result = await g(
+    req(
+      "/auth/login",
+      "POST",
+      { slt: "fixture" },
+      {
+        cookie: cookie(selection, scope),
+        "x-commit-environment": scope,
+      },
+    ),
+  );
+  assert.equal(result.status, 200);
+  const value = result.headers.get("set-cookie")!.split(";")[0].split("=")[1];
+  const saved = open(value, config, scope)!;
+  assert.ok(saved.deadline > Date.now() + 6 * 86400000);
+  assert.equal(saved.environmentKey, secret);
 });
