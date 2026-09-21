@@ -357,6 +357,8 @@ struct Session {
     test_key: Option<String>,
     #[serde(default)]
     expires_at: u64,
+    #[serde(default)]
+    refresh_started_at: Option<u64>,
 }
 
 fn now() -> u64 {
@@ -406,7 +408,9 @@ async fn refresh_saved_session(api: &str) -> Result<Option<Session>, Box<dyn std
     if session.test_key.as_deref() != runtime::selected_key().as_deref() {
         return Err("saved session environment mismatch; sign in again".into());
     }
-    if session.expires_at > now().saturating_add(60) || session.refresh_token.is_empty() {
+    if (session.expires_at > now().saturating_add(60) && session.refresh_started_at.is_none())
+        || session.refresh_token.is_empty()
+    {
         return Ok(Some(session));
     }
     if let Some(key) = &session.test_key {
@@ -415,20 +419,29 @@ async fn refresh_saved_session(api: &str) -> Result<Option<Session>, Box<dyn std
     use sha2::{Digest as _, Sha256};
     // Retrying after a lost response must replay the same rotation, not mark
     // this refresh family compromised by consuming its old token twice.
-    let key = format!(
-        "commit-refresh-{:x}",
-        Sha256::digest(session.refresh_token.as_bytes())
-    );
-    let tokens = client
-        .with_mutation(Mutation::with_key(key)?)
-        .refresh_session(&session.refresh_token)
-        .await?;
-    session.access_token = tokens.access_token;
-    session.refresh_token = tokens.refresh_token;
-    session.org_id = tokens.org_id.or(session.org_id);
-    session.expires_at = now().saturating_add(tokens.expires_in.max(0) as u64);
-    save_session(&session)?;
-    Ok(Some(session))
+    for _ in 0..2 {
+        let started_at = *session.refresh_started_at.get_or_insert_with(now);
+        save_session(&session)?;
+        let key = format!(
+            "commit-refresh-{:x}",
+            Sha256::digest(session.refresh_token.as_bytes())
+        );
+        let tokens = client
+            .clone()
+            .with_mutation(Mutation::with_key(key)?)
+            .refresh_session(&session.refresh_token)
+            .await?;
+        session.access_token = tokens.access_token;
+        session.refresh_token = tokens.refresh_token;
+        session.org_id = tokens.org_id.or(session.org_id);
+        session.expires_at = started_at.saturating_add(tokens.expires_in.max(0) as u64);
+        session.refresh_started_at = None;
+        save_session(&session)?;
+        if session.expires_at > now().saturating_add(60) {
+            return Ok(Some(session));
+        }
+    }
+    Err("refreshed access token has no usable lifetime; retry the command".into())
 }
 fn parse_data(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
     let text = input
@@ -858,6 +871,7 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
                     org_id: s.org_id.clone(),
                     test_key: runtime::selected_key(),
                     expires_at: now().saturating_add(s.expires_in.max(0) as u64),
+                    refresh_started_at: None,
                 })?;
             }
             if runtime::selected_key().is_some() {
