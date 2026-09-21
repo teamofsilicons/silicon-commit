@@ -96,8 +96,8 @@ session passed login status, organization selection, todo listing, and project
 listing without modifying real work.
 
 A dedicated application-owned environment
-`036b5c48-0aaf-4bdf-83ca-8f1928b88d55` reached ready with Commit 0.2.3. Against
-current IAM 2, three fresh Carbon/Silicon actors authenticated through the exact
+`036b5c48-0aaf-4bdf-83ca-8f1928b88d55` reached ready with Commit 0.2.3. Before the IAM cutover, against
+IAM 2, three fresh Carbon/Silicon actors authenticated through the exact
 published CLI and the SDK 3 directory returned canonical memberships. Live tests
 passed Carbon-to-Silicon and Silicon-to-Carbon assignments, standalone and self
 todos, linked-todo updates, diary, and history. Private project owner and assignee
@@ -109,7 +109,7 @@ responses and `Idempotency-Replayed: true`, without adding history entries.
 The same environment, saved sessions, resources, version snapshot, and idempotency
 keys were retained for verification across IAM's canonical cutover.
 
-Browser E2E also passed on the deployed frontend/backend against current IAM 2:
+Before the IAM cutover, browser E2E also passed against IAM 2:
 sandbox selection, Carbon login, standalone self-todo creation, title/description
 editing, status change to In progress, persistence after a full page reload, and
 deletion of that separate UI fixture. The retained project, tasks, history,
@@ -118,6 +118,52 @@ its testing-context cookie has the existing 15-minute deadline, so a later brows
 check may require reauthentication without changing retained CLI sessions.
 
 The documentation site serves version 0.2.3. All 28 public files were compared
-against the generated site and matched byte-for-byte. IAM's canonical cutover was
-still held by its own cross-service deployment gates when these checks completed;
-post-cutover continuity and cleanup remain pending its explicit live signal.
+against the generated site and matched byte-for-byte.
+
+
+## Verification after the IAM 3 cutover
+
+IAM 3.0.0 went live at source
+`deea75e3d8f9b331bf9ef25e5d39c6546ed5a9fd`, image
+`sha256:f799c1172e16be44c1959159f599bc312e5cfcbbf9e45e9ced75132117b2fd7a`.
+Before the pause, the three retained Commit token families and the IAM management
+family were refreshed normally, without logging in again. Immediately after the
+cutover, all three exact pre-pause Commit sessions authenticated with unchanged
+tokens and no automatic refresh or replacement login.
+
+The canonical directory passed. Owner and assignee project, task, linked todo,
+diary, history, and version-6 snapshot responses exactly matched the pre-cutover
+baseline. All six outsider reads remained 404 and the private project stayed
+absent from its list. All three original idempotency keys and bodies replayed with
+identical responses and replay headers, without adding history. New writes by
+the original owner and worker succeeded; the old snapshot remained unchanged.
+
+A new canonical Silicon was created after the cutover with its job description.
+It authenticated, received an assignment from the original owner, gained access
+to the existing private project, updated its linked todo, and created a self todo.
+The retained IAM management session refreshed successfully as part of this test.
+
+Finally, only the worker CLI's local expiry hint was set to zero to exercise its
+actual refresh path. Its existing family rotated both access and refresh tokens,
+persisted them and the new expiry, retained API, organization, and test-environment
+bindings, and passed both CLI and direct authorized reads. The project response
+was unchanged by refresh. Maharaj's actual managed 0.2.3 binary and existing
+production `chef:bricks` session also passed authentication, organization selection,
+and todo/project reads without a new login or real-work mutations.
+
+
+Browser checks also passed against canonical IAM 3. The test selection/session
+had expired, so the same Carbon identity authenticated again in the same retained
+environment. This is a reauthentication check, not old-cookie continuity proof.
+The retained todo and private project remained visible after reload. A separate
+standalone self todo was created, edited, moved to In progress, reloaded to verify
+persistence, and deleted; the original baseline todo remained. All retained CLI
+session and replay continuity checks preceded these independent UI operations.
+
+
+Post-cutover cleanup exposed a separate Honeycomb control-plane compatibility gap:
+application-owned environment reads rejected the canonical IAM application
+identity, and retained application ownership needs compatible resolution. No
+cleanup mutation was attempted through an alternate authority. The environment
+and its private credentials remain held until the Honeycomb fix is live, after
+which deletion and participant completion/credential-denial checks will run.
