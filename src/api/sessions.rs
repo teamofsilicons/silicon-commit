@@ -215,7 +215,6 @@ async fn verified_status(
     if snapshots.iter().any(|snapshot| {
         snapshot.audience != app_id
             || !snapshot_environment_matches(snapshot.testing_environment_id)
-            || snapshot.principal_id != first.principal_id
             || snapshot.public_id != first.public_id
             || snapshot.actor_type != first.actor_type
             || org_id.is_some_and(|org| snapshot.org_id != org.as_str())

@@ -60,11 +60,11 @@ pub(crate) async fn receive(
         vec![None]
     };
     let event = delivery.event();
-    let aggregate_id: Uuid = event
+    let aggregate_id = event
         .aggregate
         .get("id")
         .and_then(serde_json::Value::as_str)
-        .and_then(|id| id.parse().ok())
+        .filter(|id| !id.is_empty() && id.len() <= 255 && !id.chars().any(char::is_control))
         .ok_or(AppError::BadGateway)?;
     let aggregate_version = event
         .aggregate

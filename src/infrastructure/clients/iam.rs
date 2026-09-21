@@ -193,7 +193,11 @@ impl IamClient {
         let snapshot = introspection
             .authorization
             .ok_or(ProviderError::InvalidResponse)?;
-        if introspection.principal_id != Some(snapshot.principal_id)
+        if introspection
+            .public_id
+            .as_ref()
+            .zip(snapshot.public_id.as_ref())
+            .is_some_and(|(a, b)| a != b)
             || introspection.membership_id.as_deref() != Some(snapshot.membership_id.as_str())
         {
             return Err(ProviderError::Unauthenticated);
@@ -229,7 +233,7 @@ impl IamClient {
         {
             return Err(ProviderError::Unauthenticated);
         }
-        if snapshot.principal_id.is_nil() || snapshot.organization_id.is_nil() {
+        if snapshot.organization_id.is_nil() {
             return Err(ProviderError::InvalidResponse);
         }
         let actor_type = match snapshot.actor_type {
@@ -251,11 +255,7 @@ impl IamClient {
             OrganizationId::from_uuid(snapshot.organization_id),
             request.org_id.clone(),
             snapshot.membership_id,
-            Actor::new(
-                PrincipalId::from_uuid(snapshot.principal_id),
-                actor_type,
-                actor_id,
-            ),
+            Actor::new(PrincipalId::from_uuid(Uuid::now_v7()), actor_type, actor_id),
             role,
             CapabilitySet::default(),
             request.credential.clone(),
@@ -315,10 +315,7 @@ impl IamClient {
             models::ActorRefType::Silicon => ActorType::Silicon,
             _ => return Err(ProviderError::InvalidResponse),
         };
-        if represented.principal_id != *actor.actor.principal_id.as_uuid()
-            || represented.public_id != actor.actor.id.as_str()
-            || kind != actor.actor.actor_type
-        {
+        if represented.public_id != actor.actor.id.as_str() || kind != actor.actor.actor_type {
             return Err(ProviderError::Unauthenticated);
         }
         request_context::set_verified_iam_member(ActiveMember {
@@ -499,7 +496,6 @@ struct MembershipResponse {
 
 #[derive(Debug, Deserialize)]
 struct DirectoryActor {
-    principal_id: Uuid,
     #[serde(rename = "type")]
     actor_type: String,
     public_id: String,
@@ -519,9 +515,6 @@ impl MembershipResponse {
             "removed",
         )?;
         let principal = self.principal.ok_or(ProviderError::Forbidden)?;
-        if principal.principal_id.is_nil() {
-            return Err(ProviderError::InvalidResponse);
-        }
         let actor_type = principal
             .actor_type
             .parse()
@@ -533,11 +526,7 @@ impl MembershipResponse {
             organization_id,
             org_id: org_id.clone(),
             membership_id: self.id,
-            actor: Actor::new(
-                PrincipalId::from_uuid(principal.principal_id),
-                actor_type,
-                actor_id,
-            ),
+            actor: Actor::new(PrincipalId::from_uuid(Uuid::now_v7()), actor_type, actor_id),
         })
     }
 }
@@ -787,7 +776,7 @@ mod tests {
             "scopes":["self.identity.read","self.membership.read"],"org_role":"owner","tags":null})
     }
     fn introspection() -> Value {
-        json!({"active":true,"principal_id":PRINCIPAL,"membership_id":"test-carbon[test-org]",
+        json!({"active":true,"public_id":"test-carbon","principal_id":PRINCIPAL,"membership_id":"test-carbon[test-org]",
             "actor_type":"carbon","org_id":"test-org","audience":"tos>commit",
             "expires_at":OffsetDateTime::now_utc().unix_timestamp()+300,"authorization":snapshot()})
     }
@@ -798,7 +787,7 @@ mod tests {
             .and(header(
                 "user-agent",
                 concat!(
-                    "silicon-iam-client/2.0.0 silicon-commit/",
+                    "silicon-iam-client/3.0.0 silicon-commit/",
                     env!("CARGO_PKG_VERSION")
                 ),
             ))
@@ -880,8 +869,8 @@ mod tests {
                 ProviderError::Unauthenticated,
             ),
             (
-                "/principal_id",
-                json!(ORGANIZATION),
+                "/public_id",
+                json!("different-carbon"),
                 ProviderError::Unauthenticated,
             ),
             (
@@ -907,7 +896,7 @@ mod tests {
             (
                 "/authorization/public_id",
                 json!("another"),
-                ProviderError::InvalidResponse,
+                ProviderError::Unauthenticated,
             ),
             (
                 "/authorization/organization_id",
@@ -994,6 +983,7 @@ mod tests {
         let mut body = introspection();
         body["membership_id"] = json!("helper:test-org[test-org]");
         body["actor_type"] = json!("silicon");
+        body["public_id"] = json!("helper:test-org");
         body["authorization"]["membership_id"] = body["membership_id"].clone();
         body["authorization"]["actor_type"] = json!("silicon");
         body["authorization"]["public_id"] = json!("helper:test-org");
@@ -1091,11 +1081,6 @@ mod tests {
             ),
             ("/org_id", Value::Null, ProviderError::Forbidden),
             ("/principal", Value::Null, ProviderError::Forbidden),
-            (
-                "/principal/principal_id",
-                json!(Uuid::nil()),
-                ProviderError::InvalidResponse,
-            ),
             (
                 "/principal/public_id",
                 json!("impostor"),
@@ -1487,11 +1472,6 @@ mod tests {
             (
                 "/actor/public_id",
                 json!("impostor"),
-                ProviderError::Unauthenticated,
-            ),
-            (
-                "/actor/principal_id",
-                json!(ORGANIZATION),
                 ProviderError::Unauthenticated,
             ),
             (

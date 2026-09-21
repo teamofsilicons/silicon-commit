@@ -202,3 +202,55 @@ pub(super) async fn persist_identity(
 
     Ok(())
 }
+
+/// Resolves an online-verified canonical IAM actor to a private Commit row key.
+/// The retained mapping is attribution only; it never grants membership or access.
+pub(crate) async fn resolve_actor_storage_key(
+    pool: &PgPool,
+    organization_id: OrganizationId,
+    org_id: &PublicOrganizationId,
+    membership_id: &str,
+    actor: &Actor,
+) -> Result<crate::domain::PrincipalId, AppError> {
+    let mut tx = pool.begin().await?;
+    super::testing::guard(&mut tx).await?;
+    let lookup = "SELECT principal_id FROM commit.actor_projection WHERE organization_id=$1 AND actor_type=$2 AND actor_id=$3";
+    let mut existing = sqlx::query_scalar::<_, uuid::Uuid>(lookup)
+        .bind(organization_id.into_uuid())
+        .bind(actor.actor_type)
+        .bind(actor.id.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+    if existing.is_none() {
+        // First-use authentication can race with another request or directory
+        // lookup. Reserve exactly one local key for the canonical identity.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 312))")
+            .bind(format!(
+                "{organization_id}/{}/{id}",
+                actor.actor_type,
+                id = actor.id.as_str()
+            ))
+            .execute(&mut *tx)
+            .await?;
+        existing = sqlx::query_scalar::<_, uuid::Uuid>(lookup)
+            .bind(organization_id.into_uuid())
+            .bind(actor.actor_type)
+            .bind(actor.id.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+    }
+    let mut stored_actor = actor.clone();
+    if let Some(key) = existing {
+        stored_actor.principal_id = key.into();
+    }
+    persist_identity(
+        &mut tx,
+        organization_id,
+        org_id,
+        membership_id,
+        &stored_actor,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(stored_actor.principal_id)
+}

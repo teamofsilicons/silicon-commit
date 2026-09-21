@@ -73,11 +73,11 @@ impl ActorRef {
 
 /// Resolved actor identity used for authorization and persistence.
 ///
-/// Relationships use `principal_id`, while `id` is a public snapshot used in
-/// response documents and durable event payloads.
+/// Relationships use a private Commit row key, while `id` is the immutable
+/// canonical IAM identity used for authentication and public responses.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub struct Actor {
-    /// Internal IAM relationship key. It is never exposed in v1 JSON.
+    /// Private Commit relationship key. It is never exposed in v1 JSON.
     #[serde(skip_serializing)]
     pub principal_id: PrincipalId,
     /// Principal kind.

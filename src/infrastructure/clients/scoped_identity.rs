@@ -13,7 +13,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Keeps provider identities unchanged on the wire and namespaces storage UUIDs.
+/// Resolves canonical IAM identities to private Commit row keys.
+/// Existing row keys and their history survive IAM identity-key changes.
 pub struct ScopedIdentity {
     inner: Arc<dyn IdentityProvider>,
     pool: PgPool,
@@ -55,6 +56,15 @@ impl IdentityProvider for ScopedIdentity {
     ) -> Result<VerifiedActor, ProviderError> {
         let mut actor = self.inner.authenticate(request).await?;
         actor.organization_id = self.storage_id(actor.organization_id).await?;
+        actor.actor.principal_id = crate::infrastructure::postgres::resolve_actor_storage_key(
+            &self.pool,
+            actor.organization_id,
+            &actor.org_id,
+            &actor.membership_id,
+            &actor.actor,
+        )
+        .await
+        .map_err(|_| ProviderError::InvalidResponse)?;
         Ok(actor)
     }
     async fn resolve_active_members(
@@ -66,6 +76,15 @@ impl IdentityProvider for ScopedIdentity {
         let mut members = self.inner.resolve_active_members(org, ids, kind).await?;
         for member in &mut members {
             member.organization_id = self.storage_id(member.organization_id).await?;
+            member.actor.principal_id = crate::infrastructure::postgres::resolve_actor_storage_key(
+                &self.pool,
+                member.organization_id,
+                &member.org_id,
+                &member.membership_id,
+                &member.actor,
+            )
+            .await
+            .map_err(|_| ProviderError::InvalidResponse)?;
         }
         Ok(members)
     }

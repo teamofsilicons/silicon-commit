@@ -48,8 +48,18 @@ async fn iam_two_authentication_drives_todos_projects_and_linked_tasks() -> anyh
     let org = format!("iam-workflow-{}", Uuid::new_v4().simple());
     let creator = format!("chef:{org}");
     let worker = format!("helper:{org}");
+    // Existing attribution must survive the IAM cutover without rewriting todos.
+    sqlx::query("INSERT INTO commit.organization_projection(organization_id,org_id) VALUES($1,$2)")
+        .bind(organization_id)
+        .bind(&org)
+        .execute(&pool)
+        .await?;
+    for (key, id) in [(creator_principal, &creator), (worker_principal, &worker)] {
+        sqlx::query("INSERT INTO commit.actor_projection(organization_id,principal_id,membership_id,actor_type,actor_id) VALUES($1,$2,$3,'silicon',$4)")
+            .bind(organization_id).bind(key).bind(format!("{id}[{org}]")).bind(id).execute(&pool).await?;
+    }
     let snapshot = json!({
-        "principal_id":creator_principal,"organization_id":organization_id,
+        "organization_id":organization_id,
         "membership_id":format!("{creator}[{org}]"),"actor_type":"silicon","public_id":creator,
         "org_id":org,"audience":"tos>commit","membership_version":1,"authorization_epoch":1,
         "testing_environment_id":null,"org_role":"member","tags":null,
@@ -58,16 +68,29 @@ async fn iam_two_authentication_drives_todos_projects_and_linked_tasks() -> anyh
     Mock::given(method("POST"))
         .and(path("/api/v1/oauth/introspect"))
         .and(header("x-org-id", org.as_str()))
-        .and(header("authorization", format!("Basic {}", STANDARD.encode(format!("tos>commit:{APP_SECRET}")))))
-        .and(header("user-agent", format!("silicon-iam-client/2.0.0 silicon-commit/{}", env!("CARGO_PKG_VERSION"))))
+        .and(header(
+            "authorization",
+            format!(
+                "Basic {}",
+                STANDARD.encode(format!("tos>commit:{APP_SECRET}"))
+            ),
+        ))
+        .and(header(
+            "user-agent",
+            format!(
+                "silicon-iam-client/3.0.0 silicon-commit/{}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        ))
         .and(body_string(format!("token={TOKEN}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "active":true,"principal_id":creator_principal,"membership_id":format!("{creator}[{org}]"),
+            "active":true,"public_id":creator,"membership_id":format!("{creator}[{org}]"),
             "actor_type":"silicon","org_id":org,"audience":"tos>commit",
             "expires_at":time::OffsetDateTime::now_utc().unix_timestamp()+300,
             "authorization":snapshot
         })))
-        .mount(&iam).await;
+        .mount(&iam)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("/api/v1/organizations/{org}")))
         .and(header("authorization", format!("Bearer {TOKEN}")))
@@ -83,10 +106,11 @@ async fn iam_two_authentication_drives_todos_projects_and_linked_tasks() -> anyh
         .and(header("authorization", format!("Bearer {TOKEN}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items":[{"id":format!("{worker}[{org}]"),"org_id":org,"status":"active",
-                      "principal":{"principal_id":worker_principal,"type":"silicon","public_id":worker}}],
+                      "principal":{"type":"silicon","public_id":worker}}],
             "page":{"has_more":false,"next_cursor":null}
         })))
-        .mount(&iam).await;
+        .mount(&iam)
+        .await;
     let app = router(pool.clone(), &iam)?;
     let todo_input = json!({"title":"Plan a meal","assigned_to":worker});
     let (status, _, todo) = request(

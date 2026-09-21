@@ -110,7 +110,7 @@ uuid_id!(
 );
 uuid_id!(
     PrincipalId,
-    "Internal IAM identifier for an authenticated Carbon or Silicon principal."
+    "Private Commit row key for an authenticated Carbon or Silicon."
 );
 uuid_id!(
     OrganizationId,
@@ -143,8 +143,8 @@ new_commit_id!(ProjectEntryId);
 
 /// Public IAM actor ID exposed by the v1 API.
 ///
-/// The internal [`PrincipalId`] remains the authorization and relationship key;
-/// this value is retained as a display/API snapshot.
+/// This canonical IAM identity is resolved to a private [`PrincipalId`] row key
+/// for local relationships; IAM no longer supplies that row key.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, sqlx::Type)]
 #[serde(transparent)]
 #[sqlx(transparent)]

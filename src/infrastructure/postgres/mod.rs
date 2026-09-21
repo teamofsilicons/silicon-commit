@@ -12,6 +12,7 @@ use sqlx::{
 use crate::config::DatabaseSettings;
 
 mod identity_projection;
+pub(crate) use identity_projection::resolve_actor_storage_key;
 pub mod notifications;
 pub mod projects;
 pub mod todos;
