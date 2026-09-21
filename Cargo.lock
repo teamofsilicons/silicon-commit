@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-commit"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-commit-cli"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "clap",
  "serde",
@@ -2238,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "silicon-commit-client"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "reqwest",
  "secrecy",

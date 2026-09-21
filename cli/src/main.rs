@@ -6,7 +6,7 @@ use serde_json::Value;
 use silicon_commit_client::{Client, Mutation};
 use std::{fs, path::PathBuf};
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(
     name = "commit",
     bin_name = "commit",
@@ -46,7 +46,7 @@ struct Root {
     #[command(subcommand)]
     command: Command,
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Command {
     /// Browse bundled usage and development guides without network access.
     Docs {
@@ -114,7 +114,7 @@ enum Command {
         command: TestCommand,
     },
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum ConfigCommand {
     /// Set the home directory used for Commit's local state.
     #[command(name = "home", visible_alias = "set_home_dir")]
@@ -132,7 +132,7 @@ enum ConfigCommand {
         value: String,
     },
 }
-#[derive(Args)]
+#[derive(Args, Clone)]
 #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct Login {
     #[arg(
@@ -145,12 +145,12 @@ struct Login {
     #[command(subcommand)]
     command: Option<LoginCommand>,
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum LoginCommand {
     /// Verify the current token and show the authenticated Carbon or Silicon.
     Status(JsonOutput),
 }
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct JsonOutput {
     #[arg(
         long,
@@ -158,7 +158,7 @@ struct JsonOutput {
     )]
     json: bool,
 }
-#[derive(Args, Default)]
+#[derive(Args, Default, Clone)]
 struct TodoList {
     #[arg(long, help = "assigned_to_me, delegated_by_me, or all")]
     view: Option<String>,
@@ -186,7 +186,7 @@ struct PageArgs {
     cursor: Option<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum TodoCommand {
     /// List resources in the current organization.
     List(TodoList),
@@ -226,7 +226,7 @@ enum TodoCommand {
         data: Data,
     },
 }
-#[derive(Args, Default)]
+#[derive(Args, Default, Clone)]
 struct ProjectList {
     #[arg(long)]
     status: Option<String>,
@@ -238,7 +238,7 @@ struct ProjectList {
     cursor: Option<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum ProjectCommand {
     /// Atomically take an unassigned project task or subtask.
     Claim { project: String, task: String },
@@ -316,7 +316,7 @@ enum ProjectCommand {
         data: Data,
     },
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum TestCommand {
     List,
     /// Create a resource using --data JSON or @FILE.
@@ -342,7 +342,7 @@ enum TestCommand {
         id: String,
     },
 }
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct Data {
     #[arg(long, help = "JSON object or @path/to/file")]
     data: String,
@@ -394,7 +394,10 @@ async fn session_lock() -> Result<fs::File, Box<dyn std::error::Error>> {
     )
 }
 
-async fn refresh_saved_session(api: &str) -> Result<Option<Session>, Box<dyn std::error::Error>> {
+async fn refresh_saved_session(
+    api: &str,
+    rejected_access: Option<&str>,
+) -> Result<Option<Session>, Box<dyn std::error::Error>> {
     let _lock = session_lock().await?;
     // Re-read after acquiring the process lock: another command may already
     // have rotated the single-use refresh token.
@@ -408,7 +411,10 @@ async fn refresh_saved_session(api: &str) -> Result<Option<Session>, Box<dyn std
     if session.test_key.as_deref() != runtime::selected_key().as_deref() {
         return Err("saved session environment mismatch; sign in again".into());
     }
-    if (session.expires_at > now().saturating_add(60) && session.refresh_started_at.is_none())
+    let force = rejected_access.is_some_and(|token| token == session.access_token);
+    if (!force
+        && session.expires_at > now().saturating_add(60)
+        && session.refresh_started_at.is_none())
         || session.refresh_token.is_empty()
     {
         return Ok(Some(session));
@@ -615,7 +621,7 @@ async fn main() -> std::process::ExitCode {
                 } => Some((message.clone(), pr.clone())),
                 _ => None,
             };
-            let result = run(args).await;
+            let result = run_with_session_recovery(args).await;
             if result.is_err()
                 && let Some((message, pr)) = report
             {
@@ -660,7 +666,103 @@ async fn main() -> std::process::ExitCode {
         std::process::ExitCode::FAILURE
     }
 }
-async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
+fn inactive_access() -> Box<dyn std::error::Error> {
+    silicon_commit_client::Error::Api {
+        status: 401_u16.try_into().expect("valid HTTP status"),
+        code: "inactive_access_token".into(),
+        request_id: None,
+    }
+    .into()
+}
+
+fn access_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<silicon_commit_client::Error>()
+        .is_some_and(silicon_commit_client::Error::is_unauthenticated)
+}
+
+// Freeze file-backed JSON before the first request. A retry must use the same
+// payload even if the source file is replaced while refresh is in flight.
+fn freeze_command_data(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
+    let input = match command {
+        Command::Todos {
+            command:
+                TodoCommand::Create(data)
+                | TodoCommand::Update { data, .. }
+                | TodoCommand::AddNote { data, .. }
+                | TodoCommand::SetSubscription { data, .. },
+        } => Some(&mut data.data),
+        Command::Projects {
+            command:
+                ProjectCommand::Create(data)
+                | ProjectCommand::Update { data, .. }
+                | ProjectCommand::SetDiary { data, .. }
+                | ProjectCommand::CreateTask { data, .. }
+                | ProjectCommand::UpdateTask { data, .. }
+                | ProjectCommand::Blocker { data, .. }
+                | ProjectCommand::CreateUpdate { data, .. }
+                | ProjectCommand::Complete { data, .. },
+        } => Some(&mut data.data),
+        Command::TestEnvironments {
+            command: TestCommand::Create(data),
+        } => Some(&mut data.data),
+        Command::Email { data } | Command::Notifications { data } => data.as_mut(),
+        _ => None,
+    };
+    if let Some(input) = input {
+        *input = serde_json::to_string(&parse_data(input)?)?;
+    }
+    Ok(())
+}
+
+async fn run_with_session_recovery(mut args: Root) -> Result<(), Box<dyn std::error::Error>> {
+    freeze_command_data(&mut args.command)?;
+    args.idempotency_key
+        .get_or_insert_with(Client::new_idempotency_key);
+    let is_status = matches!(
+        args.command,
+        Command::Login(Login {
+            command: Some(LoginCommand::Status(_)),
+            ..
+        })
+    );
+    let mut used_access = None;
+    let first = run(args.clone(), &mut used_access, true).await;
+    if let Err(error) = first {
+        let Some((api, rejected)) = used_access.filter(|_| access_rejected(error.as_ref())) else {
+            return Err(error);
+        };
+        // Reload under the same process lock used for proactive refresh. Adopt
+        // another command's replacement instead of rotating a newer generation.
+        match refresh_saved_session(&api, Some(&rejected)).await {
+            Ok(Some(_)) => run(args, &mut None, false).await,
+            Ok(None) => Err(error),
+            Err(refresh_error) if is_status && access_rejected(refresh_error.as_ref()) => {
+                println!(
+                    "{}",
+                    serde_json::json!({"authenticated":false,"actor":null,"org_id":null})
+                );
+                Ok(())
+            }
+            Err(refresh_error) => Err(refresh_error),
+        }
+    } else {
+        first
+    }
+}
+
+async fn run(
+    a: Root,
+    rejected_access: &mut Option<(String, String)>,
+    retry_inactive_status: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let login_status = matches!(
+        a.command,
+        Command::Login(Login {
+            command: Some(LoginCommand::Status(_)),
+            ..
+        })
+    );
     if let Command::Todos {
         command: TodoCommand::Create(data),
     } = &a.command
@@ -738,7 +840,7 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
                 }
         );
     if uses_saved_session {
-        saved = match refresh_saved_session(&api).await {
+        saved = match refresh_saved_session(&api, None).await {
             Ok(saved) => saved,
             Err(error)
                 if matches!(
@@ -761,6 +863,9 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     });
+    if uses_saved_session {
+        *rejected_access = token.clone().map(|token| (api.clone(), token));
+    }
     let org = a.org_id.clone().or_else(|| {
         if uses_saved_session {
             saved.as_ref().and_then(|s| s.org_id.clone())
@@ -811,7 +916,11 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
             }
     );
     if needs_organization && org.is_none() {
-        let selected = organization_from_status(&c.login_status().await?)?;
+        let status = c.login_status().await?;
+        if uses_saved_session && retry_inactive_status && status["authenticated"] == false {
+            return Err(inactive_access());
+        }
+        let selected = organization_from_status(&status)?;
         if uses_saved_session && let Some(token) = &token {
             remember_organization(token, &selected).await?;
         }
@@ -1042,6 +1151,14 @@ async fn run(a: Root) -> Result<(), Box<dyn std::error::Error>> {
             TestCommand::Delete { id } => c.delete_test_environment(&id).await?,
         },
     };
+    if uses_saved_session
+        && token.is_some()
+        && login_status
+        && retry_inactive_status
+        && output["authenticated"] == false
+    {
+        return Err(inactive_access());
+    }
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())
