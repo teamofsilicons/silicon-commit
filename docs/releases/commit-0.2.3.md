@@ -108,3 +108,16 @@ responses and `Idempotency-Replayed: true`, without adding history entries.
 
 The same environment, saved sessions, resources, version snapshot, and idempotency
 keys were retained for verification across IAM's canonical cutover.
+
+Browser E2E also passed on the deployed frontend/backend against current IAM 2:
+sandbox selection, Carbon login, standalone self-todo creation, title/description
+editing, status change to In progress, persistence after a full page reload, and
+deletion of that separate UI fixture. The retained project, tasks, history,
+sessions, and original todos were unchanged. The signed-in browser was retained;
+its testing-context cookie has the existing 15-minute deadline, so a later browser
+check may require reauthentication without changing retained CLI sessions.
+
+The documentation site serves version 0.2.3. All 28 public files were compared
+against the generated site and matched byte-for-byte. IAM's canonical cutover was
+still held by its own cross-service deployment gates when these checks completed;
+post-cutover continuity and cleanup remain pending its explicit live signal.
