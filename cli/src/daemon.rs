@@ -1,7 +1,7 @@
 //! Compatibility commands for retiring the old updater. Honeycomb owns updates.
 use super::*;
 use std::process::Command as Process;
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum DaemonCommand {
     /// Explain how to install Commit through Honeycomb.
     Install,

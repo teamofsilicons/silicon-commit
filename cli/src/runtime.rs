@@ -3,7 +3,7 @@ use super::*;
 use sha2::{Digest as _, Sha256};
 use std::sync::{OnceLock, RwLock};
 static SELECTOR: OnceLock<RwLock<Option<String>>> = OnceLock::new();
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum TestingCommand {
     /// Validate and select an imported IAM application's test secret.
     Use { app_secret: String },

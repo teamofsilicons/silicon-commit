@@ -143,7 +143,8 @@ async fn rejected_upgrade(
     ))
     .execute(&mut *transaction)
     .await
-    .expect_err("unsafe upgrade must fail");
+    .err()
+    .context("unsafe upgrade must fail")?;
     ensure!(
         error.to_string().contains(expected),
         "unexpected upgrade failure: {error}"
