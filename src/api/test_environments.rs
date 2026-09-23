@@ -234,19 +234,13 @@ async fn verify_pair(
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
     if credentials.app_id != service.app_id()
+        || !(1..=80).contains(&credentials.app_id.len())
         || !credentials
             .app_id
-            .split_once('>')
-            .is_some_and(|(org, app)| {
-                [org, app].into_iter().all(|part| {
-                    !part.is_empty()
-                        && part.bytes().all(|byte| {
-                            byte.is_ascii_lowercase()
-                                || byte.is_ascii_digit()
-                                || matches!(byte, b'-' | b'_')
-                        })
-                })
-            })
+            .starts_with(|c: char| c.is_ascii_lowercase())
+        || !credentials.app_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
     {
         return Err(AppError::Validation {
             details: serde_json::json!({"fields":[{"field":"iam_app_id","message":"must match this deployment's canonical IAM application ID"}]}),
