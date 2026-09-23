@@ -39,7 +39,7 @@
     "src/honeycomb/contracts.rs": "2374b3f5c0df6f7496cff70fe6183a3fd0ea3cc58217c82562131eb63af32a8e",
     "src/honeycomb.rs": "0df98c97ded4ef0a8fe2dce0b3524d485f62756161965da680dea28f09856e06",
     "src/lib.rs": "3dc274bcb6f24d871b39f2c6f6d74e56f3d250b6a9ead38b2aae4446848d1963",
-    "src/models.rs": "cf0bab82e07ffd206ed78c29df2222bc475dbd49240544ab31c06ebc049362fd",
+    "src/models.rs": "07e18b70fbc566230e43bf6990d02455fa289332750e0f1b4dc39fc229142225",
     "src/models_manual.rs": "5dcb6e7f8631040812d3c1685f73aa18c53227c5b6fa427b1e2bd2a3a54368a7",
     "src/request.rs": "02fd1654392df0823f0db891080d75e6baf11939786f7d26f688ba6ce0bebfa0",
     "src/support.rs": "a5c8b6bf7b94ec7d138244a3303dc2bbab9503b1277c9fef679cd5ce61dd22a6",
@@ -50,5 +50,12 @@
     "tests/application_contracts.rs": "a0b5a044b7e9bf2608ea2fa5c282e0bfb11d3c0c18e19a28c1dc63cb4b7462ce",
     "tests/canonical_cutover.rs": "975e05adee3271aebefa55a21e9ec7470397793d7cb1cbf76d6ebd34cb8fd6f1",
     "tests/live.rs": "81106801cfcc91eac739b108169f479c2a741712985473aff91bfa773abfc58a"
-  }
+  },
+  "local_patches": [
+    {
+      "source": "silicon-iam@05f9e36",
+      "file": "src/models.rs",
+      "change": "Escape Membership example brackets in generated rustdoc only"
+    }
+  ]
 }
