@@ -522,9 +522,8 @@ async fn discovery_and_status_are_clean_json_and_use_current_credentials() {
                 && !r.headers.contains_key("x-org-id")
         })
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(
-                json!({"app_id":"tos>commit","iam_url":"https://iam.example/api/v1/"}),
-            ),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"app_id":"commit","iam_url":"https://iam.example/api/v1/"})),
         )
         .expect(1)
         .mount(&server)
@@ -555,7 +554,7 @@ async fn discovery_and_status_are_clean_json_and_use_current_credentials() {
                 .unwrap(),
         )
     };
-    assert_eq!(run(&["iam", "--json"])["app_id"], "tos>commit");
+    assert_eq!(run(&["iam", "--json"])["app_id"], "commit");
     let status = run(&["login", "status", "--json"]);
     assert_eq!(status["authenticated"], true);
     assert_eq!(status["actor"]["type"], "silicon");

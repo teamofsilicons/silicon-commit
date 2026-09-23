@@ -749,9 +749,9 @@ mod tests {
                     .uri()
                     .parse()
                     .map_err(|_| ClientBuildError::InvalidEndpoint)?,
-                app_id: Some("tos>commit".into()),
+                app_id: Some("commit".into()),
                 app_secret: Some("application-secret".into()),
-                audience: "tos>commit".into(),
+                audience: "commit".into(),
                 webhook_secret: None,
                 webhook_key_version: 1,
             },
@@ -770,14 +770,14 @@ mod tests {
     }
     fn snapshot() -> Value {
         json!({"principal_id": PRINCIPAL, "organization_id": ORGANIZATION,
-            "membership_id":"test-carbon[test-org]", "actor_type":"carbon", "public_id":"test-carbon",
-            "org_id":"test-org", "audience":"tos>commit", "membership_version":1,
+            "membership_id":"c:test-carbon[test-org]", "actor_type":"carbon", "public_id":"c:test-carbon",
+            "org_id":"test-org", "audience":"commit", "membership_version":1,
             "authorization_epoch":1, "testing_environment_id":null,
             "scopes":["self.identity.read","self.membership.read"],"org_role":"owner","tags":null})
     }
     fn introspection() -> Value {
-        json!({"active":true,"public_id":"test-carbon","principal_id":PRINCIPAL,"membership_id":"test-carbon[test-org]",
-            "actor_type":"carbon","org_id":"test-org","audience":"tos>commit",
+        json!({"active":true,"public_id":"c:test-carbon","principal_id":PRINCIPAL,"membership_id":"c:test-carbon[test-org]",
+            "actor_type":"carbon","org_id":"test-org","audience":"commit",
             "expires_at":OffsetDateTime::now_utc().unix_timestamp()+300,"authorization":snapshot()})
     }
     async fn introspect_mock(server: &MockServer, body: Value) {
@@ -787,13 +787,13 @@ mod tests {
             .and(header(
                 "user-agent",
                 concat!(
-                    "silicon-iam-client/3.0.0 silicon-commit/",
+                    "silicon-iam-client/4.0.0 silicon-commit/",
                     env!("CARGO_PKG_VERSION")
                 ),
             ))
             .and(header(
                 "authorization",
-                format!("Basic {}", STANDARD.encode("tos>commit:application-secret")),
+                format!("Basic {}", STANDARD.encode("commit:application-secret")),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .expect(1)
@@ -843,8 +843,8 @@ mod tests {
         let server = MockServer::start().await;
         introspect_mock(&server, introspection()).await;
         let actor = client(&server)?.authenticate(&request()?).await?;
-        assert_eq!(actor.membership_id, "test-carbon[test-org]");
-        assert_eq!(actor.actor.id.as_str(), "test-carbon");
+        assert_eq!(actor.membership_id, "c:test-carbon[test-org]");
+        assert_eq!(actor.actor.id.as_str(), "c:test-carbon");
         assert_eq!(actor.organization_role, OrganizationRole::Owner);
         assert_eq!(
             server.received_requests().await.ok_or("no requests")?.len(),
@@ -863,11 +863,7 @@ mod tests {
                 json!("other-org"),
                 ProviderError::Unauthenticated,
             ),
-            (
-                "/audience",
-                json!("tos>other"),
-                ProviderError::Unauthenticated,
-            ),
+            ("/audience", json!("other"), ProviderError::Unauthenticated),
             (
                 "/public_id",
                 json!("different-carbon"),
@@ -890,7 +886,7 @@ mod tests {
             ),
             (
                 "/authorization/audience",
-                json!("tos>other"),
+                json!("other"),
                 ProviderError::Unauthenticated,
             ),
             (
@@ -981,12 +977,12 @@ mod tests {
     async fn canonical_silicon_identity_preserves_full_org_qualified_id() -> TestResult {
         let server = MockServer::start().await;
         let mut body = introspection();
-        body["membership_id"] = json!("helper:test-org[test-org]");
+        body["membership_id"] = json!("si:helper[test-org]");
         body["actor_type"] = json!("silicon");
-        body["public_id"] = json!("helper:test-org");
+        body["public_id"] = json!("si:helper");
         body["authorization"]["membership_id"] = body["membership_id"].clone();
         body["authorization"]["actor_type"] = json!("silicon");
-        body["authorization"]["public_id"] = json!("helper:test-org");
+        body["authorization"]["public_id"] = json!("si:helper");
         body["authorization"]["org_role"] = json!("member");
         introspect_mock(&server, body).await;
         assert_eq!(
@@ -994,7 +990,7 @@ mod tests {
                 .authenticate(&request()?)
                 .await?
                 .membership_id,
-            "helper:test-org[test-org]"
+            "si:helper[test-org]"
         );
         Ok(())
     }
@@ -1096,13 +1092,13 @@ mod tests {
             ("/status", json!("removed"), ProviderError::NotFound),
         ] {
             let server = MockServer::start().await;
-            let mut m = member("test-carbon");
+            let mut m = member("c:test-carbon");
             *m.pointer_mut(pointer).ok_or("missing field")? = replacement;
             organization_mock(&server, organization()).await;
             members_mock(&server, page(vec![m], None)).await;
             let actual = as_user(client(&server)?.resolve_active_members(
                 &"test-org".parse()?,
-                &["test-carbon".parse()?],
+                &["c:test-carbon".parse()?],
                 None,
             ))
             .await;
@@ -1112,14 +1108,14 @@ mod tests {
             );
         }
         let server = MockServer::start().await;
-        let mut m = member("test-carbon");
+        let mut m = member("c:test-carbon");
         m.as_object_mut().ok_or("not object")?.remove("status");
         organization_mock(&server, organization()).await;
         members_mock(&server, page(vec![m], None)).await;
         assert!(matches!(
             as_user(client(&server)?.resolve_active_members(
                 &"test-org".parse()?,
-                &["test-carbon".parse()?],
+                &["c:test-carbon".parse()?],
                 None
             ))
             .await,
@@ -1142,7 +1138,7 @@ mod tests {
             org[field] = value;
             organization_mock(&server, org).await;
             assert!(
-                matches!(as_user(client(&server)?.resolve_active_members(&"test-org".parse()?,&["test-carbon".parse()?],None)).await,Err(error) if error==expected)
+                matches!(as_user(client(&server)?.resolve_active_members(&"test-org".parse()?,&["c:test-carbon".parse()?],None)).await,Err(error) if error==expected)
             );
         }
         Ok(())
@@ -1158,13 +1154,13 @@ mod tests {
                 .and(query_param_is_missing("cursor"))
                 .respond_with(
                     ResponseTemplate::new(200)
-                        .set_body_json(page(vec![member("test-carbon")], Some("next"))),
+                        .set_body_json(page(vec![member("c:test-carbon")], Some("next"))),
                 )
                 .expect(1)
                 .mount(&server)
                 .await;
             let second = if duplicate {
-                vec![member("test-carbon")]
+                vec![member("c:test-carbon")]
             } else {
                 vec![member("unrelated")]
             };
@@ -1177,7 +1173,7 @@ mod tests {
                 .await;
             let result = as_user(client(&server)?.resolve_active_members(
                 &"test-org".parse()?,
-                &["test-carbon".parse()?],
+                &["c:test-carbon".parse()?],
                 None,
             ))
             .await;
@@ -1245,7 +1241,7 @@ mod tests {
 
     fn testing_credentials(root: bool) -> IamTestingCredentials {
         IamTestingCredentials {
-            app_id: "tos>commit".into(),
+            app_id: "commit".into(),
             app_secret: format!("ask_{}", "a".repeat(43)).into(),
             environment_key: if root {
                 "a".repeat(32).into()
@@ -1266,10 +1262,7 @@ mod tests {
             body["authorization"]["testing_environment_id"] = json!(environment);
             let auth = format!(
                 "Basic {}",
-                STANDARD.encode(format!(
-                    "tos>commit:{}",
-                    credentials.app_secret.expose_secret()
-                ))
+                STANDARD.encode(format!("commit:{}", credentials.app_secret.expose_secret()))
             );
             let selector = if root {
                 credentials.environment_key.expose_secret().to_owned()
@@ -1303,7 +1296,7 @@ mod tests {
                 .and(header(selector_name, selector))
                 .respond_with(
                     ResponseTemplate::new(200)
-                        .set_body_json(page(vec![member("test-carbon")], None)),
+                        .set_body_json(page(vec![member("c:test-carbon")], None)),
                 )
                 .expect(1)
                 .mount(&server)
@@ -1318,11 +1311,11 @@ mod tests {
                 let req = request()?;
                 assert_eq!(
                     adapter.authenticate(&req).await?.membership_id,
-                    "test-carbon[test-org]"
+                    "c:test-carbon[test-org]"
                 );
                 assert_eq!(
                     adapter
-                        .resolve_active_members(&req.org_id, &["test-carbon".parse()?], None)
+                        .resolve_active_members(&req.org_id, &["c:test-carbon".parse()?], None)
                         .await?
                         .len(),
                     1
@@ -1347,7 +1340,7 @@ mod tests {
                 }));
                 if wrong_app {
                     let mut credentials = testing_credentials(false);
-                    credentials.app_id = "tos>other".into();
+                    credentials.app_id = "other".into();
                     request_context::set_iam_testing_credentials(Some(credentials));
                 }
                 adapter.authenticate(&req).await
@@ -1375,15 +1368,15 @@ mod tests {
     fn obo_request() -> Result<AuthenticationRequest, Box<dyn std::error::Error>> {
         let mut req = request()?;
         req.credential = InboundCredential::Obo {
-            app_id: "tos>interface".into(),
+            app_id: "interface".into(),
             proof: "obo_test".into(),
         };
         Ok(req)
     }
     fn verification() -> Result<Value, Box<dyn std::error::Error>> {
         Ok(
-            json!({"valid":true,"proof_id":ORGANIZATION,"issuer_app_id":"tos>interface","audience":"tos>commit",
-            "org_id":"test-org","actor":{"principal_id":PRINCIPAL,"type":"carbon","public_id":"test-carbon"},
+            json!({"valid":true,"proof_id":ORGANIZATION,"issuer_app_id":"interface","audience":"commit",
+            "org_id":"test-org","actor":{"principal_id":PRINCIPAL,"type":"carbon","public_id":"c:test-carbon"},
             "authorization":snapshot(),"endpoint":{"endpoint_id":"todos-list","path":"/api/v1/todos"},
             "metadata":{},"expires_at":(OffsetDateTime::now_utc()+time::Duration::seconds(45)).format(&Rfc3339)?,
             "consumed_at":OffsetDateTime::now_utc().format(&Rfc3339)?}),
@@ -1414,7 +1407,7 @@ mod tests {
             as_obo(client(&server)?.authenticate(&obo_request()?))
                 .await?
                 .membership_id,
-            "test-carbon[test-org]"
+            "c:test-carbon[test-org]"
         );
         assert_eq!(
             server
@@ -1456,14 +1449,10 @@ mod tests {
         for (pointer, value, expected) in [
             (
                 "/issuer_app_id",
-                json!("tos>other"),
+                json!("other"),
                 ProviderError::Unauthenticated,
             ),
-            (
-                "/audience",
-                json!("tos>other"),
-                ProviderError::Unauthenticated,
-            ),
+            ("/audience", json!("other"), ProviderError::Unauthenticated),
             (
                 "/org_id",
                 json!("other-org"),
@@ -1551,7 +1540,7 @@ mod tests {
             assert!(matches!(
                 as_user(client(&server)?.resolve_active_members(
                     &"test-org".parse()?,
-                    &["test-carbon".parse()?],
+                    &["c:test-carbon".parse()?],
                     None
                 ))
                 .await,
@@ -1578,7 +1567,7 @@ mod tests {
         assert!(matches!(
             as_user(client(&server)?.resolve_active_members(
                 &"test-org".parse()?,
-                &["test-carbon".parse()?],
+                &["c:test-carbon".parse()?],
                 None
             ))
             .await,
@@ -1586,11 +1575,11 @@ mod tests {
         ));
         let server = MockServer::start().await;
         organization_mock(&server, organization()).await;
-        members_mock(&server, page(vec![member("test-carbon")], None)).await;
+        members_mock(&server, page(vec![member("c:test-carbon")], None)).await;
         assert!(matches!(
             as_user(client(&server)?.resolve_active_members(
                 &"test-org".parse()?,
-                &["test-carbon".parse()?],
+                &["c:test-carbon".parse()?],
                 Some(ActorType::Silicon)
             ))
             .await,
@@ -1657,7 +1646,7 @@ mod tests {
             let adapter = client(&server)?;
             let req = obo_request()?;
             adapter.authenticate(&req).await?;
-            let self_id: ActorId = "test-carbon".parse()?;
+            let self_id: ActorId = "c:test-carbon".parse()?;
             let self_members = adapter
                 .resolve_active_members(
                     &req.org_id,
@@ -1666,7 +1655,7 @@ mod tests {
                 )
                 .await?;
             assert_eq!(self_members.len(), 1);
-            assert_eq!(self_members[0].membership_id, "test-carbon[test-org]");
+            assert_eq!(self_members[0].membership_id, "c:test-carbon[test-org]");
             for (org, ids, kind) in [
                 (req.org_id.clone(), vec!["another".parse()?], None),
                 (

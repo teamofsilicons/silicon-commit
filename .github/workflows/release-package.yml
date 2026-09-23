@@ -4,7 +4,11 @@ on:
     inputs:
       honeycomb_version:
         description: Reviewed published silicon-honeycomb-cli version used to validate and pack
-        required: true
+        required: false
+        type: string
+      honeycomb_revision:
+        description: Exact reviewed Honeycomb source commit for an unpublished coordinated release
+        required: false
         type: string
 permissions:
   contents: read
@@ -112,7 +116,16 @@ jobs:
       - name: Install reviewed Honeycomb packager
         env:
           HONEYCOMB_PACKAGER_VERSION: ${{ inputs.honeycomb_version }}
-        run: cargo install --locked silicon-honeycomb-cli --version "$HONEYCOMB_PACKAGER_VERSION"
+          HONEYCOMB_PACKAGER_REVISION: ${{ inputs.honeycomb_revision }}
+        run: |
+          if [ -n "$HONEYCOMB_PACKAGER_REVISION" ]; then
+            test -z "$HONEYCOMB_PACKAGER_VERSION"
+            [[ "$HONEYCOMB_PACKAGER_REVISION" =~ ^[a-f0-9]{40}$ ]]
+            cargo install --locked --git https://github.com/teamofsilicons/silicon-honeycomb.git --rev "$HONEYCOMB_PACKAGER_REVISION" silicon-honeycomb-cli
+          else
+            test -n "$HONEYCOMB_PACKAGER_VERSION"
+            cargo install --locked silicon-honeycomb-cli --version "$HONEYCOMB_PACKAGER_VERSION"
+          fi
       - run: python3 scripts/test_linux_abi.py
       - run: python3 scripts/package-release.py --binaries-dir artifacts --output-dir dist
       - uses: actions/upload-artifact@v4

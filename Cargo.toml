@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "silicon-commit"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.98"
 publish = false
@@ -50,7 +50,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 subtle = "2.6.1"
-silicon-iam-client = "3.0.0"
+silicon-iam-client = { version = "4.0.0", path = "vendor/silicon-iam-client" }
 slug = "0.1.6"
 sqlx = { version = "0.9.0", default-features = false, features = [
   "json",

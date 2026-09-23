@@ -1,0 +1,27 @@
+name: Build pinned ARM64 backend image
+on:
+  workflow_dispatch:
+  push:
+    branches: ['release/**']
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exact source
+        run: docker build --build-arg GIT_COMMIT_SHA="$GITHUB_SHA" --label org.opencontainers.image.revision="$GITHUB_SHA" --tag silicon-commit:candidate .
+      - name: Export candidate
+        run: |
+          mkdir -p release
+          docker save silicon-commit:candidate | gzip -1 > release/commit-arm64-image.tar.gz
+          sha256sum release/commit-arm64-image.tar.gz > release/SHA256SUMS
+          printf '%s\n' "$GITHUB_SHA" > release/SOURCE_REVISION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commit-arm64-backend-image
+          path: release/*
+          compression-level: 0
+          if-no-files-found: error

@@ -1,6 +1,6 @@
 # Package a Commit release
 
-Install and update with `honeycomb install 'tos>commit'`. The stateless Rust client
+Install and update with `honeycomb install 'commit'`. The stateless Rust client
 is a normal Cargo dependency; it never replaces itself at runtime.
 
 ## IAM 2 recovery rollout

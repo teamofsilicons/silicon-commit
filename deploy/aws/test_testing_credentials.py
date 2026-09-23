@@ -6,8 +6,8 @@ from testing_credentials import desired_credentials, TOKEN, REGISTRY
 
 class Provisioning(unittest.TestCase):
     def fixture(self):
-        return ({"backend": {REGISTRY:json.dumps([{"app_id":"tos>other","base_url":"https://other.example","token_env":"OTHER_SERVICE_TOKEN"}])}},
-                {"COMMIT_IAM_APP_ID":"tos>commit","COMMIT_HONEYCOMB_URL":"https://honeycomb.example","COMMIT_PUBLIC_BASE_URL":"https://commit.example/api/v1/"})
+        return ({"backend": {REGISTRY:json.dumps([{"app_id":"other","base_url":"https://other.example","token_env":"OTHER_SERVICE_TOKEN"}])}},
+                {"COMMIT_IAM_APP_ID":"commit","COMMIT_HONEYCOMB_URL":"https://honeycomb.example","COMMIT_PUBLIC_BASE_URL":"https://commit.example/api/v1/"})
     def test_retry_preserves_token_other_participants_and_input(self):
         honeycomb, commit = self.fixture()
         before = copy.deepcopy((honeycomb, commit))
@@ -25,7 +25,7 @@ class Provisioning(unittest.TestCase):
         commit["COMMIT_PUBLIC_BASE_URL"]="https://user:secret@commit.example"
         with self.assertRaises(ValueError): desired_credentials(honeycomb,commit)
         honeycomb,commit=self.fixture()
-        honeycomb["backend"][REGISTRY]=json.dumps([{"app_id":"tos>other","base_url":"https://other.example","token_env":TOKEN}])
+        honeycomb["backend"][REGISTRY]=json.dumps([{"app_id":"other","base_url":"https://other.example","token_env":TOKEN}])
         with self.assertRaises(ValueError): desired_credentials(honeycomb,commit)
 
 if __name__ == "__main__": unittest.main()

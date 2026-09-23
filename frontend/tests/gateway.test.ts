@@ -5,7 +5,7 @@ const config: Config = {
   upstream: "https://backend.example.com",
   origin: "https://commit.example.com",
   iam: "https://iam.example.com",
-  appId: "tos>commit",
+  appId: "commit",
   key: Buffer.alloc(32, 7).toString("base64url"),
 };
 const actor = { type: "silicon", public_id: "atlas:test-team" };
@@ -206,7 +206,7 @@ test("unscoped IAM redirect binds callback to a browser state and fixed origin",
   const r = await g(req("/auth/start"));
   const target = new URL(r.headers.get("location")!);
   assert.equal(target.origin, config.iam);
-  assert.equal(target.searchParams.get("app_id"), "tos>commit");
+  assert.equal(target.searchParams.get("app_id"), "commit");
   assert.equal(target.searchParams.has("org_id"), false);
   const legacy = await g(req("/auth/start?org=test-team"));
   assert.equal(

@@ -1300,9 +1300,9 @@ mod tests {
             &crate::config::IamSettings {
                 mode: AuthenticationMode::Iam,
                 base_url: Url::parse(&server.uri())?,
-                app_id: Some("tos>commit".to_owned()),
+                app_id: Some("commit".to_owned()),
                 app_secret: Some(secrecy::SecretString::from("never-public")),
-                audience: "tos>commit".to_owned(),
+                audience: "commit".to_owned(),
                 webhook_secret: None,
                 webhook_key_version: 1,
             },
@@ -1321,7 +1321,7 @@ mod tests {
         let value = response_json(response).await?;
         assert_eq!(
             value,
-            serde_json::json!({"app_id":"tos>commit","iam_url":format!("{}/",server.uri())})
+            serde_json::json!({"app_id":"commit","iam_url":format!("{}/",server.uri())})
         );
         for token in [None, Some("Bearer oat_invalid")] {
             let mut request = HttpRequest::builder().uri("/api/v1/auth/status");

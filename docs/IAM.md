@@ -12,7 +12,7 @@ IAM's application-scoped organization response deliberately omits `status`. Comm
 
 ## Required read grants
 
-For the complete Carbon/Silicon assignment and project workflow, request and approve the following IAM scopes for `tos>commit`, then obtain fresh user consent. Keep the existing `self.identity.read` and `self.profile.read` grants. These are read disclosures, not Commit management permissions or IAM administration access.
+For the complete Carbon/Silicon assignment and project workflow, request and approve the following IAM scopes for `commit`, then obtain fresh user consent. Keep the existing `self.identity.read` and `self.profile.read` grants. These are read disclosures, not Commit management permissions or IAM administration access.
 
 | Additional scope | Why Commit needs it |
 | --- | --- |
