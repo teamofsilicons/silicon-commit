@@ -3,7 +3,7 @@
 Install the CLI through Honeycomb:
 
 ```sh
-honeycomb install 'tos>commit'
+honeycomb install 'commit'
 commit iam --json
 commit login '<IAM-SLT>'
 commit login status --json

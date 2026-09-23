@@ -479,7 +479,7 @@ pub(crate) async fn find_project_id(
                 SELECT id
                   FROM commit.projects
                  WHERE organization_id = $1
-                   AND uid = $2
+                   AND (uid = $2 OR legacy_uid = $2)
                 ",
             )
             .bind(organization_id.into_uuid())
@@ -520,7 +520,7 @@ pub(crate) async fn lock_project(
                 SELECT id, status, created_by_principal_id
                   FROM commit.projects
                  WHERE organization_id = $1
-                   AND uid = $2
+                   AND (uid = $2 OR legacy_uid = $2)
                  FOR UPDATE
                 ",
             )

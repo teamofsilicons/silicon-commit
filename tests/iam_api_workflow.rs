@@ -61,7 +61,7 @@ async fn iam_two_authentication_drives_todos_projects_and_linked_tasks() -> anyh
     let snapshot = json!({
         "organization_id":organization_id,
         "membership_id":format!("{creator}[{org}]"),"actor_type":"silicon","public_id":creator,
-        "org_id":org,"audience":"tos>commit","membership_version":1,"authorization_epoch":1,
+        "org_id":org,"audience":"commit","membership_version":1,"authorization_epoch":1,
         "testing_environment_id":null,"org_role":"member","tags":null,
         "scopes":["self.identity.read","self.membership.read","directory.memberships.read","directory.silicons.read"]
     });
@@ -70,22 +70,19 @@ async fn iam_two_authentication_drives_todos_projects_and_linked_tasks() -> anyh
         .and(header("x-org-id", org.as_str()))
         .and(header(
             "authorization",
-            format!(
-                "Basic {}",
-                STANDARD.encode(format!("tos>commit:{APP_SECRET}"))
-            ),
+            format!("Basic {}", STANDARD.encode(format!("commit:{APP_SECRET}"))),
         ))
         .and(header(
             "user-agent",
             format!(
-                "silicon-iam-client/3.0.0 silicon-commit/{}",
+                "silicon-iam-client/4.0.0 silicon-commit/{}",
                 env!("CARGO_PKG_VERSION")
             ),
         ))
         .and(body_string(format!("token={TOKEN}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "active":true,"public_id":creator,"membership_id":format!("{creator}[{org}]"),
-            "actor_type":"silicon","org_id":org,"audience":"tos>commit",
+            "actor_type":"silicon","org_id":org,"audience":"commit",
             "expires_at":time::OffsetDateTime::now_utc().unix_timestamp()+300,
             "authorization":snapshot
         })))
@@ -262,9 +259,9 @@ fn router(pool: PgPool, iam: &MockServer) -> anyhow::Result<Router> {
         &IamSettings {
             mode: AuthenticationMode::Iam,
             base_url: iam.uri().parse()?,
-            app_id: Some("tos>commit".into()),
+            app_id: Some("commit".into()),
             app_secret: Some(APP_SECRET.into()),
-            audience: "tos>commit".into(),
+            audience: "commit".into(),
             webhook_secret: None,
             webhook_key_version: 1,
         },

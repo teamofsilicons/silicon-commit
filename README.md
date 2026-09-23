@@ -3,7 +3,7 @@
 [Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md)
 
 ```sh
-honeycomb install 'tos>commit'
+honeycomb install 'commit'
 commit iam --json
 commit login "<IAM-SLT>"
 ```

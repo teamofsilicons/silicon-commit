@@ -1,8 +1,8 @@
 # Maps the commit command to the six required release targets.
 format_version: 1
 
-app_id: "tos>commit"
-version: "0.2.5"
+app_id: "commit"
+version: "0.3.0"
 
 bin:
   commit: "app"

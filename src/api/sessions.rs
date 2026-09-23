@@ -516,9 +516,9 @@ mod tests {
             &crate::config::IamSettings {
                 mode: crate::config::AuthenticationMode::Iam,
                 base_url: server.uri().parse()?,
-                app_id: Some("tos>commit".to_owned()),
+                app_id: Some("commit".to_owned()),
                 app_secret: Some(SecretString::from("test-application-secret")),
-                audience: "tos>commit".to_owned(),
+                audience: "commit".to_owned(),
                 webhook_secret: None,
                 webhook_key_version: 1,
             },
@@ -547,7 +547,7 @@ mod tests {
                     .into_owned()
                     .collect::<std::collections::HashMap<_, _>>();
                 form.get("slt") == Some(&expected)
-                    && form.get("app_id").is_some_and(|id| id == "tos>commit")
+                    && form.get("app_id").is_some_and(|id| id == "commit")
                     && !form.contains_key("refresh_token")
                     && !request.headers.contains_key("x-testing-application")
                     && !request.headers.contains_key("x-testing-environment-key")
@@ -662,7 +662,7 @@ mod tests {
         for kind in ["carbon", "silicon"] {
             for scoped in [false, true] {
                 let server = MockServer::start().await;
-                let mut grant = snapshot("tos", "tos>commit");
+                let mut grant = snapshot("tos", "commit");
                 grant["actor_type"] = json!(kind);
                 let response = if scoped {
                     json!({"active":true,"authorization":grant})
@@ -679,17 +679,13 @@ mod tests {
                     .mount(&server)
                     .await;
                 let client = Client::builder(&server.uri())?
-                    .credential(Credential::application("tos>commit", "test-secret"))
+                    .credential(Credential::application("commit", "test-secret"))
                     .auto_update(false)
                     .build()?;
                 let org = "tos".parse()?;
-                let output = super::verified_status(
-                    &client,
-                    "tos>commit",
-                    "oat_test",
-                    scoped.then_some(&org),
-                )
-                .await?;
+                let output =
+                    super::verified_status(&client, "commit", "oat_test", scoped.then_some(&org))
+                        .await?;
                 assert_eq!(output["authenticated"], true);
                 assert_eq!(output["actor"], json!({"type":kind,"id":"person"}));
                 assert_eq!(output["org_id"], "tos");
@@ -703,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn login_status_rejects_inactive_wrong_audience_and_inconsistent_grants()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut other_actor = snapshot("second", "tos>commit");
+        let mut other_actor = snapshot("second", "commit");
         other_actor["public_id"] = json!("somebody-else");
         let cases = [
             (json!({"active":false}), None),
@@ -713,11 +709,11 @@ mod tests {
                 None,
             ),
             (
-                json!({"active":true,"authorizations":[snapshot("tos", "tos>commit"),other_actor]}),
+                json!({"active":true,"authorizations":[snapshot("tos", "commit"),other_actor]}),
                 None,
             ),
             (
-                json!({"active":true,"authorization":snapshot("wrong-org", "tos>commit")}),
+                json!({"active":true,"authorization":snapshot("wrong-org", "commit")}),
                 Some("tos"),
             ),
             (json!({"active":true}), None),
@@ -731,12 +727,12 @@ mod tests {
                 .mount(&server)
                 .await;
             let client = Client::builder(&server.uri())?
-                .credential(Credential::application("tos>commit", "test-secret"))
+                .credential(Credential::application("commit", "test-secret"))
                 .auto_update(false)
                 .build()?;
             let org = org.map(str::parse).transpose()?;
             assert!(
-                super::verified_status(&client, "tos>commit", "oat_test", org.as_ref())
+                super::verified_status(&client, "commit", "oat_test", org.as_ref())
                     .await
                     .is_err()
             );
@@ -749,7 +745,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let responses = [
             (
-                json!({"active": true, "authorizations": [snapshot("z-team", "tos>commit"), snapshot("a-team", "tos>commit")]}),
+                json!({"active": true, "authorizations": [snapshot("z-team", "commit"), snapshot("a-team", "commit")]}),
                 Some(vec!["a-team", "z-team"]),
             ),
             (json!({"active": true, "authorizations": []}), Some(vec![])),
@@ -770,10 +766,10 @@ mod tests {
                 .mount(&server)
                 .await;
             let client = Client::builder(&server.uri())?
-                .credential(Credential::application("tos>commit", "test-secret"))
+                .credential(Credential::application("commit", "test-secret"))
                 .auto_update(false)
                 .build()?;
-            let result = selected_organizations(&client, "tos>commit", "oat_test").await;
+            let result = selected_organizations(&client, "commit", "oat_test").await;
             if let Some(expected) = expected {
                 let actual = result?;
                 assert_eq!(

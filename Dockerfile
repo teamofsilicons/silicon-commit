@@ -6,6 +6,7 @@ ARG GIT_COMMIT_SHA=unknown
 ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY migrations ./migrations
 COPY src ./src
 COPY client ./client
