@@ -75,7 +75,7 @@ async fn iam_two_authentication_drives_todos_projects_and_linked_tasks() -> anyh
         .and(header(
             "user-agent",
             format!(
-                "silicon-iam-client/4.0.0 silicon-commit/{}",
+                "silicon-iam-client/5.0.0 silicon-commit/{}",
                 env!("CARGO_PKG_VERSION")
             ),
         ))

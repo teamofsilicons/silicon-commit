@@ -790,7 +790,7 @@ mod tests {
             .and(header(
                 "user-agent",
                 concat!(
-                    "silicon-iam-client/4.1.0 silicon-commit/",
+                    "silicon-iam-client/5.0.0 silicon-commit/",
                     env!("CARGO_PKG_VERSION")
                 ),
             ))
