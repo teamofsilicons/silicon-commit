@@ -1264,8 +1264,8 @@ paths:
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer, bearerFormat: IAM access token}
-    oboAccess: {type: apiKey, in: header, name: X-IAM-OBO-Access-Proof, description: 'Short-lived, single-use IAM OBO Access proof.'}
-    oboAppId: {type: apiKey, in: header, name: X-App-ID, description: Issuer application ID paired with the OBO proof.}
+    oboAccess: {type: apiKey, in: header, name: X-IAM-OBO-Access-Token, description: 'Reusable IAM OBO access token, verified online for the requested Commit endpoint on every operation.'}
+    oboAppId: {type: apiKey, in: header, name: X-App-ID, description: Immediate caller application ID paired with the OBO access token.}
   parameters:
     OrgId: {name: X-Org-ID, in: header, required: true, description: Public organization context which must match current IAM authority., schema: {$ref: '#/components/schemas/OrganizationId'}}
     RequestId: {name: X-Request-ID, in: header, required: false, description: Optional visible-ASCII correlation identifier which is returned unchanged when valid., schema: {type: string, minLength: 1, maxLength: 128,

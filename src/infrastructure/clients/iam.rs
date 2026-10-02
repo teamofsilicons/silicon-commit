@@ -279,32 +279,35 @@ impl IamClient {
         let binding =
             request_context::current_obo_request_binding().ok_or(ProviderError::Unauthenticated)?;
         let client = self.request_client()?;
-        // IAM consumes verification strictly once. SDK verify intentionally sends no
-        // retry/idempotency key and checks the actual method, path and raw-body digest.
+        // IAM verifies the shared graph token for this receiving application and
+        // the action selected by our handler. Reuse never widens resource ACLs.
         let verification = self.bounded(
             client
                 .obo()
-                .verify(&models::OboVerifyRequest {
-                    access_proof: proof.expose_secret().to_owned(),
+                .verify(&models::OboTokenVerificationRequest {
+                    access_token: proof.expose_secret().to_owned(),
+                    endpoint_id: request.action.clone(),
                     request: binding.clone(),
                 })
                 .await
                 .map_err(map_sdk_error)
                 .map_err(map_obo_provider_error)?,
         )?;
-        let now = OffsetDateTime::now_utc();
-        if verification.proof_id.is_nil()
-            || verification.expires_at > now + time::Duration::seconds(60)
-            || verification.consumed_at > now + time::Duration::seconds(1)
-        {
+        if verification.token_id.is_nil() || verification.grant_id.is_nil() {
             return Err(ProviderError::InvalidResponse);
         }
-        if verification.valid != serde_json::Value::Bool(true)
-            || verification.expires_at <= now
+        if !verification.active
+            || verification.expires_at <= OffsetDateTime::now_utc()
             || verification.issuer_app_id != issuer_app_id
-            || verification.audience != self.audience
+            || verification.endpoint.app_id != self.audience
             || verification.org_id != request.org_id.as_str()
+            || verification.endpoint.endpoint_id != request.action
             || verification.endpoint.path != binding.path
+            || !verification
+                .authorization
+                .scopes
+                .iter()
+                .any(|scope| scope == &format!("obo:{}:{}", self.audience, request.action))
         {
             return Err(ProviderError::Unauthenticated);
         }
@@ -351,7 +354,7 @@ impl IamClient {
             {
                 return Ok(vec![member]);
             }
-            // A consumed OBO proof discloses its represented member, not a
+            // An OBO grant discloses its represented member, not a
             // reusable directory credential. Never elevate it to application
             // or administrative authority to resolve additional assignees.
             if request_context::current_iam_bearer_token().is_none() {
@@ -787,7 +790,7 @@ mod tests {
             .and(header(
                 "user-agent",
                 concat!(
-                    "silicon-iam-client/4.0.0 silicon-commit/",
+                    "silicon-iam-client/4.1.0 silicon-commit/",
                     env!("CARGO_PKG_VERSION")
                 ),
             ))
@@ -1358,30 +1361,38 @@ mod tests {
         Ok(())
     }
 
-    fn binding() -> models::OboVerifyRequestBinding {
-        models::OboVerifyRequestBinding {
+    fn binding() -> models::OboTokenRequestBinding {
+        models::OboTokenRequestBinding {
             method: "GET".into(),
             path: "/api/v1/todos".into(),
-            body_sha256: silicon_iam_client::api::obo::body_sha256(b""),
         }
     }
     fn obo_request() -> Result<AuthenticationRequest, Box<dyn std::error::Error>> {
         let mut req = request()?;
         req.credential = InboundCredential::Obo {
             app_id: "interface".into(),
-            proof: "obo_test".into(),
+            proof: "oba_test".into(),
         };
         Ok(req)
     }
     fn verification() -> Result<Value, Box<dyn std::error::Error>> {
+        let mut authority = snapshot();
+        authority["scopes"] = json!([
+            "self.identity.read",
+            "self.membership.read",
+            "obo:commit:commit.todos.list"
+        ]);
         Ok(
-            json!({"valid":true,"proof_id":ORGANIZATION,"issuer_app_id":"interface","audience":"commit",
-            "org_id":"test-org","actor":{"principal_id":PRINCIPAL,"type":"carbon","public_id":"c:test-carbon"},
-            "authorization":snapshot(),"endpoint":{"endpoint_id":"todos-list","path":"/api/v1/todos"},
-            "metadata":{},"expires_at":(OffsetDateTime::now_utc()+time::Duration::seconds(45)).format(&Rfc3339)?,
-            "consumed_at":OffsetDateTime::now_utc().format(&Rfc3339)?}),
+            json!({"active":true,"token_id":ORGANIZATION,"grant_id":ORGANIZATION,
+            "issuer_app_id":"interface","originating_app_id":"interface",
+            "org_id":"test-org","actor":{"type":"carbon","public_id":"c:test-carbon"},
+            "authorization":authority,
+            "endpoint":{"app_id":"commit","endpoint_id":"commit.todos.list","path":"/api/v1/todos"},
+            "chain":[{"app_id":"interface","audience":"commit","endpoint_id":"commit.todos.list"}],
+            "expires_at":(OffsetDateTime::now_utc()+time::Duration::minutes(30)).format(&Rfc3339)?}),
         )
     }
+
     async fn as_obo<T>(future: impl Future<Output = T>) -> T {
         request_context::scope("obo".into(), async {
             request_context::set_obo_request_binding(binding());
@@ -1394,9 +1405,9 @@ mod tests {
     async fn obo_uses_exact_observed_request_and_snapshot_without_directory_reads() -> TestResult {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/obo-access/verify"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .and(body_json(
-                json!({"access_proof":"obo_test","request":binding()}),
+                json!({"access_token":"oba_test","endpoint_id":"commit.todos.list","request":binding()}),
             ))
             .and(|req: &wiremock::Request| !req.headers.contains_key("idempotency-key"))
             .respond_with(ResponseTemplate::new(200).set_body_json(verification()?))
@@ -1421,7 +1432,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn obo_refuses_missing_actual_binding_and_replayed_proof() -> TestResult {
+    async fn obo_reuses_tokens_and_rejects_revoked_authority() -> TestResult {
         let server = MockServer::start().await;
         let adapter = client(&server)?;
         let req = obo_request()?;
@@ -1431,15 +1442,25 @@ mod tests {
         ));
         let successes = Arc::new(AtomicUsize::new(0));
         let response = verification()?;
-        Mock::given(method("POST")).and(path("/api/v1/obo-access/verify"))
-            .respond_with(move|_:&wiremock::Request| if successes.fetch_add(1,Ordering::SeqCst)==0 {
-                ResponseTemplate::new(200).set_body_json(response.clone())
-            } else {ResponseTemplate::new(409).set_body_json(json!({"error":{"code":"obo_proof_consumed","message":"Proof already consumed"}}))})
-            .expect(2).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/obo-access/token-verifications"))
+            .respond_with(move |_: &wiremock::Request| {
+                if successes.fetch_add(1, Ordering::SeqCst) < 2 {
+                    ResponseTemplate::new(200).set_body_json(response.clone())
+                } else {
+                    ResponseTemplate::new(403).set_body_json(
+                        json!({"error":{"code":"forbidden","message":"Grant revoked"}}),
+                    )
+                }
+            })
+            .expect(3)
+            .mount(&server)
+            .await;
+        assert!(as_obo(adapter.authenticate(&req)).await.is_ok());
         assert!(as_obo(adapter.authenticate(&req)).await.is_ok());
         assert!(matches!(
             as_obo(adapter.authenticate(&req)).await,
-            Err(ProviderError::Unauthenticated)
+            Err(ProviderError::Forbidden)
         ));
         Ok(())
     }
@@ -1452,7 +1473,47 @@ mod tests {
                 json!("other"),
                 ProviderError::Unauthenticated,
             ),
-            ("/audience", json!("other"), ProviderError::Unauthenticated),
+            (
+                "/endpoint/app_id",
+                json!("other"),
+                ProviderError::Unauthenticated,
+            ),
+            (
+                "/endpoint/endpoint_id",
+                json!("commit.todos.create"),
+                ProviderError::Unauthenticated,
+            ),
+            ("/active", json!(false), ProviderError::Unauthenticated),
+            (
+                "/authorization/scopes",
+                json!(["self.identity.read"]),
+                ProviderError::Unauthenticated,
+            ),
+            (
+                "/authorization/testing_environment_id",
+                json!(Uuid::now_v7()),
+                ProviderError::Unauthenticated,
+            ),
+            (
+                "/authorization/membership_id",
+                json!("c:other[test-org]"),
+                ProviderError::InvalidResponse,
+            ),
+            (
+                "/actor/type",
+                json!("silicon"),
+                ProviderError::Unauthenticated,
+            ),
+            (
+                "/expires_at",
+                json!("2020-01-01T00:00:00Z"),
+                ProviderError::Unauthenticated,
+            ),
+            (
+                "/grant_id",
+                json!(Uuid::nil()),
+                ProviderError::InvalidResponse,
+            ),
             (
                 "/org_id",
                 json!("other-org"),
@@ -1479,7 +1540,7 @@ mod tests {
                 ProviderError::Forbidden,
             ),
             (
-                "/proof_id",
+                "/token_id",
                 json!(Uuid::nil()),
                 ProviderError::InvalidResponse,
             ),
@@ -1488,7 +1549,7 @@ mod tests {
             let mut body = verification()?;
             *body.pointer_mut(pointer).ok_or("missing field")? = value;
             Mock::given(method("POST"))
-                .and(path("/api/v1/obo-access/verify"))
+                .and(path("/api/v1/obo-access/token-verifications"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(body))
                 .expect(1)
                 .mount(&server)
@@ -1593,7 +1654,7 @@ mod tests {
         for obo in [false, true] {
             let server = MockServer::start().await;
             let endpoint = if obo {
-                "/api/v1/obo-access/verify"
+                "/api/v1/obo-access/token-verifications"
             } else {
                 "/api/v1/oauth/introspect"
             };
@@ -1620,7 +1681,7 @@ mod tests {
     async fn obo_permission_denial_remains_forbidden() -> TestResult {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/obo-access/verify"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {
                 "code":"forbidden", "message":"The proof cannot authorize this endpoint"}})))
             .expect(1)
@@ -1632,12 +1693,75 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn obo_testing_credentials_preserve_the_selected_plane() -> TestResult {
+        for root in [false, true] {
+            for wrong_environment in [false, true] {
+                // Legacy root-selected worlds have independent Commit IDs;
+                // imported application-secret worlds share IAM's environment ID.
+                if root && wrong_environment {
+                    continue;
+                }
+                let server = MockServer::start().await;
+                let credentials = testing_credentials(root);
+                let environment = Uuid::parse_str(ORGANIZATION)?;
+                let mut response = verification()?;
+                response["authorization"]["testing_environment_id"] = json!(if wrong_environment {
+                    Uuid::now_v7()
+                } else {
+                    environment
+                });
+                let auth = format!(
+                    "Basic {}",
+                    STANDARD.encode(format!("commit:{}", credentials.app_secret.expose_secret()))
+                );
+                let (selector_name, selector) = if root {
+                    (
+                        "x-testing-environment-key",
+                        credentials.environment_key.expose_secret().to_owned(),
+                    )
+                } else {
+                    ("x-testing-application", auth.clone())
+                };
+                Mock::given(method("POST"))
+                    .and(path("/api/v1/obo-access/token-verifications"))
+                    .and(header("authorization", auth))
+                    .and(header(selector_name, selector))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let result = request_context::scope("testing-obo".into(), async {
+                    request_context::set_iam_testing_credentials(Some(credentials));
+                    request_context::set_testing_scope(Some(request_context::TestingScope {
+                        id: environment,
+                        version: 1,
+                    }));
+                    request_context::set_obo_request_binding(binding());
+                    client(&server)?
+                        .authenticate(&obo_request()?)
+                        .await
+                        .map_err(Into::into)
+                })
+                .await;
+                let result: Result<VerifiedActor, Box<dyn std::error::Error>> = result;
+                if wrong_environment {
+                    assert!(result.is_err());
+                } else {
+                    assert_eq!(result?.membership_id, "c:test-carbon[test-org]");
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn obo_self_assignee_uses_verified_membership_and_other_targets_require_bearer()
     -> TestResult {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/obo-access/verify"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .respond_with(ResponseTemplate::new(200).set_body_json(verification()?))
             .expect(1)
             .mount(&server)
@@ -1692,7 +1816,7 @@ mod tests {
         let mut response = verification()?;
         response["actor"]["public_id"] = json!("impostor");
         Mock::given(method("POST"))
-            .and(path("/api/v1/obo-access/verify"))
+            .and(path("/api/v1/obo-access/token-verifications"))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .expect(1)
             .mount(&server)

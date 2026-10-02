@@ -112,6 +112,11 @@ pub fn request(
 }
 
 pub(super) fn iam_credential(headers: &HeaderMap) -> Result<InboundCredential, AppError> {
+    if headers.contains_key("x-iam-obo-access-proof") {
+        return Err(AppError::BadRequest {
+            code: "legacy_obo_proof_unsupported".into(),
+        });
+    }
     if TRUSTED_HEADERS
         .iter()
         .any(|name| headers.contains_key(*name))
@@ -134,7 +139,7 @@ pub(super) fn iam_credential(headers: &HeaderMap) -> Result<InboundCredential, A
         })
         .transpose()?;
     let app_id = optional_header(headers, "x-app-id")?;
-    let proof = optional_header(headers, "x-iam-obo-access-proof")?.map(SecretString::from);
+    let proof = optional_header(headers, "x-iam-obo-access-token")?.map(SecretString::from);
 
     InboundCredential::from_external_parts(bearer, app_id, proof).map_err(map_credential_error)
 }
@@ -145,6 +150,7 @@ fn trusted_credential(
 ) -> Result<InboundCredential, AppError> {
     if headers.contains_key(http::header::AUTHORIZATION)
         || headers.contains_key("x-app-id")
+        || headers.contains_key("x-iam-obo-access-token")
         || headers.contains_key("x-iam-obo-access-proof")
     {
         return Err(AppError::BadRequest {
@@ -275,8 +281,28 @@ mod tests {
             HeaderValue::from_static("Bearer opaque"),
         );
         headers.insert("x-app-id", HeaderValue::from_static("silicon-dm"));
-        headers.insert("x-iam-obo-access-proof", HeaderValue::from_static("proof"));
+        headers.insert("x-iam-obo-access-token", HeaderValue::from_static("proof"));
 
         assert!(request(&headers, AuthenticationMode::Iam, "commit.test", None).is_err());
+    }
+
+    #[test]
+    fn legacy_obo_proof_is_rejected_even_with_a_valid_new_credential() {
+        for new_token in [false, true] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-org-id", HeaderValue::from_static("example"));
+            headers.insert("x-app-id", HeaderValue::from_static("interface"));
+            headers.insert(
+                "x-iam-obo-access-proof",
+                HeaderValue::from_static("obo_old"),
+            );
+            if new_token {
+                headers.insert(
+                    "x-iam-obo-access-token",
+                    HeaderValue::from_static("oba_new"),
+                );
+            }
+            assert!(request(&headers, AuthenticationMode::Iam, "commit.todos.list", None).is_err());
+        }
     }
 }

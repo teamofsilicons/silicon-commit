@@ -10,7 +10,7 @@ struct Context {
     iam_testing_credentials: RefCell<Option<IamTestingCredentials>>,
     iam_bearer_token: RefCell<Option<SecretString>>,
     testing_scope: RefCell<Option<TestingScope>>,
-    obo_request_binding: RefCell<Option<silicon_iam_client::models::OboVerifyRequestBinding>>,
+    obo_request_binding: RefCell<Option<silicon_iam_client::models::OboTokenRequestBinding>>,
     verified_iam_member: RefCell<Option<crate::application::ports::ActiveMember>>,
 }
 
@@ -35,15 +35,14 @@ pub async fn scope<T>(request_id: String, future: impl Future<Output = T>) -> T 
         )
         .await
 }
-/// Records the actual HTTP request for single-use IAM delegated verification.
-pub fn set_obo_request_binding(binding: silicon_iam_client::models::OboVerifyRequestBinding) {
+/// Records the actual HTTP request for reusable IAM delegated verification.
+pub fn set_obo_request_binding(binding: silicon_iam_client::models::OboTokenRequestBinding) {
     let _ = REQUEST.try_with(|c| *c.obo_request_binding.borrow_mut() = Some(binding));
 }
 
-/// Returns the method, path and digest observed at the HTTP boundary.
+/// Returns the method and server-matched endpoint path observed at the HTTP boundary.
 #[must_use]
-pub fn current_obo_request_binding() -> Option<silicon_iam_client::models::OboVerifyRequestBinding>
-{
+pub fn current_obo_request_binding() -> Option<silicon_iam_client::models::OboTokenRequestBinding> {
     REQUEST
         .try_with(|c| c.obo_request_binding.borrow().clone())
         .ok()

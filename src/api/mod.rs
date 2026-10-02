@@ -4,7 +4,7 @@ use std::{future::IntoFuture as _, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Request, State},
+    extract::{DefaultBodyLimit, MatchedPath, Request, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{self, CONTENT_TYPE},
@@ -371,6 +371,7 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
 
     let sensitive_headers = [
         header::AUTHORIZATION,
+        HeaderName::from_static("x-iam-obo-access-token"),
         HeaderName::from_static("x-iam-obo-access-proof"),
         HeaderName::from_static("idempotency-key"),
         HeaderName::from_static("x-test-organization-id"),
@@ -517,17 +518,19 @@ async fn no_store(request: Request, next: Next) -> Response {
 }
 
 async fn bind_obo_request(State(maximum): State<usize>, request: Request, next: Next) -> Response {
-    if !request.headers().contains_key("x-iam-obo-access-proof") {
+    if !request.headers().contains_key("x-iam-obo-access-token") {
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, maximum).await else {
         return AppError::PayloadTooLarge.into_response();
     };
-    request_context::set_obo_request_binding(silicon_iam_client::models::OboVerifyRequestBinding {
+    request_context::set_obo_request_binding(silicon_iam_client::models::OboTokenRequestBinding {
         method: parts.method.as_str().to_owned(),
-        path: parts.uri.path().to_owned(),
-        body_sha256: silicon_iam_client::api::obo::body_sha256(&bytes),
+        path: parts.extensions.get::<MatchedPath>().map_or_else(
+            || parts.uri.path().to_owned(),
+            |matched| matched.as_str().to_owned(),
+        ),
     });
     next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
         .await
@@ -620,7 +623,7 @@ fn cors_layer(settings: &ServerSettings) -> Result<CorsLayer, ApiBuildError> {
             CONTENT_TYPE,
             HeaderName::from_static("x-org-id"),
             HeaderName::from_static("x-app-id"),
-            HeaderName::from_static("x-iam-obo-access-proof"),
+            HeaderName::from_static("x-iam-obo-access-token"),
             HeaderName::from_static("idempotency-key"),
             header::IF_MATCH,
             REQUEST_ID_HEADER,
@@ -728,7 +731,7 @@ mod tests {
                 .method("POST")
                 .uri("/api/v1/todos?view=mine");
             if delegated {
-                request = request.header("x-iam-obo-access-proof", "test-proof");
+                request = request.header("x-iam-obo-access-token", "oba_test");
             }
             let response = app.clone().oneshot(request.body(Body::from(body))?).await?;
             assert_eq!(response.status(), StatusCode::OK);
@@ -738,13 +741,40 @@ mod tests {
             if delegated {
                 assert_eq!(
                     output["binding"],
-                    serde_json::json!({"method":"POST","path":"/api/v1/todos",
-                    "body_sha256":silicon_iam_client::api::obo::body_sha256(body.as_bytes())})
+                    serde_json::json!({"method":"POST","path":"/api/v1/todos"})
                 );
             } else {
                 assert!(output["binding"].is_null());
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delegated_binding_uses_the_server_route_template()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let app = Router::new()
+            .route(
+                "/api/v1/todos/{todo_id}",
+                get(|| async { Json(request_context::current_obo_request_binding()) }),
+            )
+            .layer(middleware::from_fn_with_state(1024_usize, bind_obo_request))
+            .layer(middleware::from_fn(request_id));
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/todos/123?endpoint_id=commit.todos.delete")
+                    .header("x-iam-obo-access-token", "oba_test")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let output: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+        assert_eq!(
+            output,
+            serde_json::json!({"method":"GET","path":"/api/v1/todos/{todo_id}"})
+        );
         Ok(())
     }
 
@@ -760,7 +790,7 @@ mod tests {
                 HttpRequest::builder()
                     .method("POST")
                     .uri("/todos")
-                    .header("x-iam-obo-access-proof", "test-proof")
+                    .header("x-iam-obo-access-token", "oba_test")
                     .body(Body::from("1234"))?,
             )
             .await?;

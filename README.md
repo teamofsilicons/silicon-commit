@@ -82,8 +82,9 @@ make test
 ## Security model
 
 - Bearer and OBO credentials are mutually exclusive and verified by IAM.
-- Every OBO verification attempt uses a fresh IAM idempotency key so IAM's
-  single-use proof consumption cannot be replayed as a cached verification.
+- Reusable OBO access tokens are verified online for every request, using the
+  handler's endpoint ID and matched route. Verification does not consume a token
+  or bypass Commit's resource permissions; revoked grants fail on the next check.
 - `X-Org-ID` is matched to the verified active IAM membership. Existing
   organization, principal, membership, actor-type, and public-ID projections
   must agree exactly before any read or write.
