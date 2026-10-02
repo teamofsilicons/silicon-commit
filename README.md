@@ -215,8 +215,11 @@ release still requires these contracts from the sibling services:
   directory scan per requested participant set; organizations whose active
   directory exceeds 10,000 members fail closed until IAM supplies server-side
   lookup.
-- IAM's closed OBO action catalog must add Commit's documented `commit.*`
-  actions.
+- Register Commit’s documented OBO endpoint definitions in Honeycomb and
+  approve the exact delegated features independently of ordinary login.
+- Cross-account OBO selection must disclose the selected membership context
+  needed by Commit’s resource ACLs. IAM 5 currently withholds this when the
+  selected account lacks an independent disclosure grant; Commit fails closed.
 - IAM's closed capability catalog must add `commit.todos.manage` and
   `commit.projects.manage` before non-owner admins can receive those powers.
 
