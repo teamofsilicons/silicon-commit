@@ -719,17 +719,29 @@ mod tests {
         assert_eq!(retained_root, encrypted_root);
 
         let principal = Uuid::new_v4();
-        let token_response = json!({"access_token":"oat_paired","refresh_token":"ort_paired","token_type":"Bearer","expires_in":3600,"scope":"","actor":{"principal_id":principal,"type":"silicon","public_id":"smoke:paired-org"}});
+        let token_response = json!({"access_token":"oat_paired","refresh_token":"ort_paired","token_type":"Bearer","expires_in":3600,"scope":"","org_id":"paired-org","actor":{"principal_id":principal,"type":"silicon","public_id":"si:paired"}});
         Mock::given(method("POST"))
             .and(path("/api/v1/app-auth/tokens"))
             .and(header("authorization", basic(TEST_SECRET)))
             .and(header("x-testing-environment-key", IAM_KEY))
             .and(body_string_contains("app_id=commit"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(token_response))
-            .expect(2)
+            .and(body_string_contains("slt=si%3Apaired"))
+            .and(body_string_contains("org_id=paired-org"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(token_response.clone()))
+            .expect(1)
             .mount(&server)
             .await;
-        let snapshot = json!({"principal_id":principal,"actor_type":"silicon","public_id":"smoke:paired-org","organization_id":Uuid::new_v4(),"org_id":"paired-org","membership_id":"smoke:paired-org[paired-org]","membership_version":1,"authorization_epoch":1,"audience":"commit","testing_environment_id":Uuid::new_v4(),"scopes":[],"org_role":"owner","tags":[]});
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("authorization", basic(TEST_SECRET)))
+            .and(header("x-testing-environment-key", IAM_KEY))
+            .and(body_string_contains("app_id=commit"))
+            .and(body_string_contains("refresh_token=ort_paired"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(token_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let snapshot = json!({"principal_id":principal,"actor_type":"silicon","public_id":"si:paired","organization_id":Uuid::new_v4(),"org_id":"paired-org","membership_id":"si:paired[paired-org]","membership_version":1,"authorization_epoch":1,"audience":"commit","testing_environment_id":Uuid::new_v4(),"scopes":[],"org_role":"owner","tags":[]});
         Mock::given(method("POST"))
             .and(path("/api/v1/oauth/introspect"))
             .and(header("authorization", basic(TEST_SECRET)))
@@ -737,7 +749,7 @@ mod tests {
             .and(body_string_contains("token=oat_paired"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(json!({"active":true,"authorizations":[snapshot]})),
+                    .set_body_json(json!({"active":true,"client_id":"commit","audience":"commit","expires_at":4_102_444_800_i64,"actor_type":"silicon","public_id":"si:paired","org_id":"paired-org","authorization":snapshot})),
             )
             .expect(2)
             .mount(&server)
@@ -754,11 +766,18 @@ mod tests {
         let login = scoped(sessions::login(
             State(state.clone()),
             test_headers.clone(),
-            StrictJson(serde_json::from_value(json!({"slt":"slt_paired"}))?),
+            StrictJson(serde_json::from_value(
+                json!({"slt":"si:paired","org_id":"paired-org"}),
+            )?),
         ))
         .await?
         .0;
         assert_eq!(login.access_token, "oat_paired");
+        assert_eq!(login.org_id.as_deref(), Some("paired-org"));
+        assert_eq!(
+            login.actor.as_ref().map(|actor| actor.public_id.as_str()),
+            Some("si:paired")
+        );
         let mut authenticated_headers = test_headers.clone();
         authenticated_headers.insert("authorization", "Bearer oat_paired".parse()?);
         let status = scoped(sessions::status(
@@ -768,6 +787,8 @@ mod tests {
         .await?
         .0;
         assert_eq!(status["authenticated"], true);
+        assert_eq!(status["org_id"], "paired-org");
+        assert_eq!(status["actor"], json!({"type":"silicon","id":"si:paired"}));
         let organizations = scoped(sessions::organizations(
             State(state.clone()),
             authenticated_headers,
@@ -787,6 +808,14 @@ mod tests {
         .await?
         .0;
         assert_eq!(refreshed.access_token, "oat_paired");
+        assert_eq!(refreshed.org_id.as_deref(), Some("paired-org"));
+        assert_eq!(
+            refreshed
+                .actor
+                .as_ref()
+                .map(|actor| actor.public_id.as_str()),
+            Some("si:paired")
+        );
         test_headers.insert("idempotency-key", "pairing-regression-logout".parse()?);
         assert_eq!(
             scoped(sessions::logout(
