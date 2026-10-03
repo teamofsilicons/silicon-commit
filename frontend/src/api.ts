@@ -1,3 +1,4 @@
+import { selectedContext, saveSelectedContext } from "./selected-context.ts";
 import { batch, createSignal, untrack } from "solid-js";
 import type { Session } from "./types";
 const read = (key: string, fallback: string) => {
@@ -19,6 +20,8 @@ const planeSessions = new Map<string, Session>();
 export function setSession(value: Session) {
   const plane = untrack(environment);
   if (value.environment_id && value.environment_id !== plane) return;
+  // Public selector only; authentication remains in the sealed HttpOnly cookie.
+  saveSelectedContext(plane, value.context_id);
   planeSessions.set(plane, value);
   batch(() => {
     setSessionValue(value);
@@ -108,8 +111,7 @@ export async function request<T>(
     "X-Commit-Environment": scope,
     "X-Commit-Telemetry": read("commit.telemetry", "on"),
   };
-  if (bound.id && path !== "/auth/session")
-    headers["X-Commit-Context"] = bound.id;
+  headers["X-Commit-Context"] = bound.id || selectedContext(scope);
   if (path.startsWith("/api/") && bound.org) headers["X-Org-ID"] = bound.org;
   if (method !== "GET") {
     headers["Content-Type"] = "application/json";
@@ -120,53 +122,68 @@ export async function request<T>(
   if (options.version !== undefined)
     headers["If-Match"] = `"${options.version}"`;
   if (options.testKey) headers["X-Testing-Environment-Key"] = options.testKey;
-  let response: Response;
-  try {
-    response = await fetch(path, {
-      method,
-      headers,
-      body: method === "GET" ? undefined : (body ?? "{}"),
-      signal: options.signal,
-    });
-  } catch {
-    throw new Error(
-      "Connection lost. Your draft is safe. Retry to resume the same request.",
-    );
-  }
-  const data =
-    response.status === 204
-      ? undefined
-      : await response.json().catch(() => undefined);
-  if (path !== "/auth/session" && !current())
-    throw new ApiError(
-      409,
-      {
-        error: {
-          code: "session_context_changed",
-          message:
-            "The response belongs to the previous workspace. Return there before retrying.",
+  const perform = async (): Promise<T> => {
+    if (!current())
+      throw new ApiError(
+        409,
+        {
+          error: {
+            code: "session_context_changed",
+            message:
+              "The selected workspace changed while waiting. Retry from the current account.",
+          },
         },
-      },
-      response.headers,
-    );
-  if (!response.ok) {
-    if (
-      response.status < 500 &&
-      ![403, 409, 412, 429].includes(response.status)
-    )
-      pending.delete(fingerprint);
-    if (
-      response.status === 401 &&
-      ["unauthenticated", "session_expired"].includes(data?.error?.code) &&
-      current() &&
-      scope === environment() &&
-      !options.testKey
-    )
-      window.dispatchEvent(new Event("commit:expired"));
-    throw new ApiError(response.status, data, response.headers);
-  }
-  pending.delete(fingerprint);
-  return data as T;
+        new Headers(),
+      );
+    let response: Response;
+    try {
+      response = await fetch(path, {
+        method,
+        headers,
+        body: method === "GET" ? undefined : (body ?? "{}"),
+        signal: options.signal,
+      });
+    } catch {
+      throw new Error(
+        "Connection lost. Your draft is safe. Retry to resume the same request.",
+      );
+    }
+    const data =
+      response.status === 204
+        ? undefined
+        : await response.json().catch(() => undefined);
+    if (!current())
+      throw new ApiError(
+        409,
+        {
+          error: {
+            code: "session_context_changed",
+            message:
+              "The response belongs to the previous workspace. Return there before retrying.",
+          },
+        },
+        response.headers,
+      );
+    if (!response.ok) {
+      if (
+        response.status < 500 &&
+        ![403, 409, 412, 429].includes(response.status)
+      )
+        pending.delete(fingerprint);
+      if (
+        response.status === 401 &&
+        ["unauthenticated", "session_expired"].includes(data?.error?.code) &&
+        current() &&
+        scope === environment() &&
+        !options.testKey
+      )
+        window.dispatchEvent(new Event("commit:expired"));
+      throw new ApiError(response.status, data, response.headers);
+    }
+    pending.delete(fingerprint);
+    return data as T;
+  };
+  return perform();
 }
 export const api = <T>(
   path: string,

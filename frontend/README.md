@@ -71,3 +71,17 @@ COMMIT_API_ORIGIN=http://127.0.0.1:4326 IAM_AUTH_ORIGIN=http://127.0.0.1:4326 FR
 Open http://127.0.0.1:4337 and select **Continue with IAM**. The test-only IAM handoff returns a fixture Carbon session granting `test-team`; the workspace opens automatically. This fixture does not exercise IAM's real consent screen. The test-only service has a two-item page size to exercise pagination, `/__conflict` to simulate the next diary conflict, `/__reject` for a revoked session, and `/__state` for test assertions. It never contacts IAM, sends webhooks, or persists data. Fixture state is shared; credential isolation is separately tested by gateway tests and backend PostgreSQL integration tests. It is never included in the production container.
 
 See [verification.md](verification.md) for the actual checks performed and their limits.
+
+IAM callbacks save an encrypted candidate context without selecting it. The active popup opener, or the full-page callback script, activates that candidate only against the signed current login attempt, requested identity kind, and previous selected context. Callback pages scrub the one-use code from their URL and support an identical activation retry after a temporary failure.
+
+Each tab stores its selected public context ID in session storage, separately for each production/testing environment. Every authenticated request resolves that selector against its sealed HttpOnly context cookie; an invalid or unavailable supplied context never falls back to another account. Refresh updates only its original credential cookie. Late callbacks and activation responses therefore cannot retarget another tab or a reloaded tab. Session storage must be available; otherwise account changes fail with an explicit error. A new tab offers saved workspaces for explicit selection.
+
+With an existing local Playwright installation, the actual callback script and Solid UI can be checked without live IAM or credentials:
+
+```sh
+PLAYWRIGHT_MODULE=/absolute/path/to/@playwright/test/index.mjs node --experimental-strip-types tests/login-activation-browser.mjs
+```
+
+This starts an ephemeral loopback server and headless browser, checks activation/retry, callback validation, popup activation and delayed/cancelled activation across independent tabs, and closes both afterward. Browser requests to external origins are blocked.
+
+Testing public-ID sign-in requires a canonical `c:…` or `si:…` ID plus its organization. A test SLT may optionally assert its existing organization. Selecting a test application saves that sandbox’s public context selector before entering it; production selection remains separate.

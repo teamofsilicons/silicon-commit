@@ -40,6 +40,7 @@ export default function App() {
     () => request<Session>("/auth/session"),
   );
   createEffect(() => {
+    if (auth.error) return;
     const s = auth();
     if (
       s &&
@@ -62,10 +63,11 @@ export default function App() {
   );
   const changeContext = useAction();
   async function selectContext(contextId: string) {
-    await request<Session>("/auth/context", {
+    const selected = await request<Session>("/auth/context", {
       method: "POST",
       body: { context_id: contextId },
     });
+    setSession(selected);
     await refetch();
     setMobile(false);
   }
@@ -374,12 +376,17 @@ function PopupSignIn() {
     try {
       const completed = await signInPopup(kind, pending.signal);
       if (!current()) return;
-      const value = await request<Session>("/auth/session", { context: bound });
+      const value = await request<Session>("/auth/activate", {
+        method: "POST",
+        context: bound,
+        signal: pending.signal,
+        body: { context_id: completed.contextId, attempt: completed.attempt },
+      });
       if (!current()) return;
       if (
         !value.authenticated ||
         value.actor?.type !== kind ||
-        value.context_id !== completed
+        value.context_id !== completed.contextId
       )
         throw new Error(
           "Your account did not match this sign-in. Please try again.",

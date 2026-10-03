@@ -17,6 +17,10 @@ async function client(t: any) {
     getItem: (key: string) => values.get(key) || null,
     setItem: (key: string, value: string) => values.set(key, value),
   });
+  install("sessionStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  });
   install("window", new EventTarget());
   const result = await build({
     entryPoints: [new URL("../src/api.ts", import.meta.url).pathname],
@@ -41,7 +45,7 @@ const account = (id: string, kind = "carbon") => ({
 
 test("a mounted form keeps its account context across delayed results and later requests", async (t) => {
   const api = await client(t);
-  api.setSession(account("first"));
+  api.setSession(account("a".repeat(32)));
   const bound = api.bindApi();
   let complete!: (response: Response) => void;
   const calls: any[] = [];
@@ -55,8 +59,8 @@ test("a mounted form keeps its account context across delayed results and later 
     method: "POST",
     body: { title: "Original draft" },
   });
-  assert.equal(calls[0].headers["X-Commit-Context"], "first");
-  api.setSession(account("second", "silicon"));
+  assert.equal(calls[0].headers["X-Commit-Context"], "a".repeat(32));
+  api.setSession(account("b".repeat(32), "silicon"));
   complete(Response.json({ id: "created-in-first" }));
   await assert.rejects(
     pending,
@@ -72,7 +76,7 @@ test("a mounted form keeps its account context across delayed results and later 
 test("permission retries preserve their operation while another account uses a separate key", async (t) => {
   const api = await client(t),
     calls: any[] = [];
-  api.setSession(account("first"));
+  api.setSession(account("a".repeat(32)));
   let status = 403;
   t.mock.method(globalThis, "fetch", async (_path: any, options: any) => {
     calls.push(options);
@@ -90,7 +94,7 @@ test("permission retries preserve their operation while another account uses a s
     calls[0].headers["Idempotency-Key"],
     calls[1].headers["Idempotency-Key"],
   );
-  api.setSession(account("second"));
+  api.setSession(account("b".repeat(32)));
   await assert.rejects(save());
   assert.notEqual(
     calls[1].headers["Idempotency-Key"],
@@ -100,14 +104,14 @@ test("permission retries preserve their operation while another account uses a s
 
 test("provider authorization failure does not sign the user out and testing retains production context", async (t) => {
   const api = await client(t);
-  api.setSession(account("production-account"));
+  api.setSession(account("c".repeat(32)));
   api.setEnvironment("sandbox");
   api.setSession({
-    ...account("late-production"),
+    ...account("e".repeat(32)),
     environment_id: "production",
   });
   assert.equal(api.session().authenticated, false);
-  api.setSession({ ...account("test-account"), environment_id: "sandbox" });
+  api.setSession({ ...account("d".repeat(32)), environment_id: "sandbox" });
   let expired = 0;
   window.addEventListener("commit:expired", () => expired++);
   let code = "obo_authorization_required";
@@ -120,8 +124,34 @@ test("provider authorization failure does not sign the user out and testing reta
   assert.equal(expired, 0);
   await assert.rejects(api.api("/todos", { production: true }));
   assert.equal(calls[1].headers["X-Commit-Environment"], "production");
-  assert.equal(calls[1].headers["X-Commit-Context"], "production-account");
+  assert.equal(calls[1].headers["X-Commit-Context"], "c".repeat(32));
   code = "unauthenticated";
   await assert.rejects(api.api("/todos"));
   assert.equal(expired, 1);
+});
+
+test("a delayed session read cannot replace a newly activated tab selector", async (t) => {
+  const api = await client(t);
+  api.setSession(account("a".repeat(32)));
+  let release!: (response: Response) => void;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    () =>
+      new Promise<Response>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const old = api.request("/auth/session").then(api.setSession);
+  api.setSession(account("b".repeat(32)));
+  release(Response.json(account("a".repeat(32))));
+  await assert.rejects(
+    old,
+    (error: any) => error.code === "session_context_changed",
+  );
+  assert.equal(api.session().context_id, "b".repeat(32));
+  assert.equal(
+    sessionStorage.getItem("commit.context.production"),
+    "b".repeat(32),
+  );
 });

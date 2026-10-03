@@ -58,7 +58,9 @@ function req(
     headers: {
       origin: config.origin,
       "content-type": "application/json",
-      ...(selected && /^[a-f0-9]{32}$/.test(selected)
+      ...(path !== "/auth/context" &&
+      selected &&
+      /^[a-f0-9]{32}$/.test(selected)
         ? { "x-commit-context": selected }
         : {}),
       ...headers,
@@ -258,16 +260,36 @@ test("unscoped IAM redirect binds callback to a browser state and fixed origin",
   const success = await g(
     req(callback.pathname + callback.search, "GET", undefined, headers),
   );
-  assert.equal(success.status, 303);
-  assert.equal(success.headers.get("location"), "/#/todos");
-  assert.equal(success.headers.getSetCookie().length, 3);
-  const sessionCookie = success.headers
-    .getSetCookie()
-    .slice(0, 2)
-    .map((c) => c.split(";")[0])
-    .join("; ");
+  assert.equal(success.status, 200);
+  assert.match(await success.text(), /data-page="true"/);
+  assert.equal(success.headers.getSetCookie().length, 1);
+  const contextId = success.headers
+    .getSetCookie()[0]
+    .split("=")[0]
+    .split("_ctx_")[1];
+  const sessionCookie =
+    headers.cookie +
+    "; " +
+    success.headers
+      .getSetCookie()
+      .map((c) => c.split(";")[0])
+      .join("; ");
+  const activation = await g(
+    req(
+      "/auth/activate",
+      "POST",
+      { context_id: contextId, state: callback.searchParams.get("state") },
+      { cookie: sessionCookie },
+    ),
+  );
+  assert.equal(activation.status, 200);
   const restored = await g(
-    req("/auth/session", "GET", undefined, { cookie: sessionCookie }),
+    req("/auth/session", "GET", undefined, {
+      cookie:
+        sessionCookie +
+        "; " +
+        activation.headers.getSetCookie()[0].split(";")[0],
+    }),
   );
   const restoredState = await restored.json();
   assert.equal(restoredState.authenticated, true);
@@ -592,7 +614,7 @@ test("test login replaces the short selection deadline with the full session dea
     req(
       "/auth/login",
       "POST",
-      { slt: "fixture" },
+      { slt: "oac_" + "a".repeat(43) },
       {
         cookie: cookie(selection, scope),
         "x-commit-environment": scope,
@@ -694,7 +716,7 @@ test("saved Carbon and Silicon workspaces separate same-org accounts and test pl
         path,
         method,
         {},
-        { cookie: jar.cookie(), "x-commit-context": ids[2] },
+        { cookie: jar.cookie(), "x-commit-context": "f".repeat(32) },
       ),
     );
     assert.equal(stale.status, 409);
@@ -714,7 +736,7 @@ test("saved Carbon and Silicon workspaces separate same-org accounts and test pl
     req(
       "/auth/login",
       "POST",
-      { slt: "test-login" },
+      { slt: "oac_" + "a".repeat(43) },
       { cookie: jar.cookie(), "x-commit-environment": scope },
     ),
   );
@@ -735,7 +757,10 @@ test("saved Carbon and Silicon workspaces separate same-org accounts and test pl
   );
   jar.apply(logout);
   const saved = await g(
-    req("/auth/session", "GET", undefined, { cookie: jar.cookie() }),
+    req("/auth/session", "GET", undefined, {
+      cookie: jar.cookie(),
+      "x-commit-context": "none",
+    }),
   );
   const state = await saved.json();
   assert.equal(state.authenticated, false);
@@ -886,9 +911,9 @@ test("typed popup binds kind and verifies live auth before issuing a session coo
     if (matches) {
       const selected = result.headers
         .getSetCookie()
-        .find((value) => value.startsWith("__Host-commit_production="))!
-        .split(";")[0]
-        .split("=")[1];
+        .find((value) => value.startsWith("__Host-commit_production_ctx_"))!
+        .split("=")[0]
+        .split("_ctx_")[1];
       assert.match(html, new RegExp(`data-context="${selected}"`));
     }
     assert.ok(!html.includes(tokens.access_token));
@@ -897,7 +922,7 @@ test("typed popup binds kind and verifies live auth before issuing a session coo
       result.headers
         .getSetCookie()
         .some((c) => c.startsWith("__Host-commit_production=")),
-      matches,
+      false,
     );
   }
 });
@@ -958,7 +983,14 @@ test("popup status mismatch cannot install credentials or overwrite an existing 
       false,
     );
     jar.apply(response);
-    assert.equal(jar.cookie(), original);
+    assert.equal(
+      jar
+        .cookie()
+        .split("; ")
+        .filter((value) => !value.startsWith("commit_login="))
+        .join("; "),
+      original,
+    );
   }
 });
 
@@ -1061,12 +1093,15 @@ test("full-page sign-in binds kind and safe return path to the signed callback",
     const result = await g(
       req(callback.pathname + callback.search, "GET", undefined, headers),
     );
-    assert.equal(result.status, 303);
-    assert.equal(result.headers.get("location"), returnTo);
+    assert.equal(result.status, 200);
+    assert.match(
+      await result.text(),
+      new RegExp(`data-return="${encodeURIComponent(returnTo)}"`),
+    );
     assert.ok(
       result.headers
         .getSetCookie()
-        .some((c) => c.startsWith("__Host-commit_production=")),
+        .some((c) => c.startsWith("__Host-commit_production_ctx_")),
     );
   }
   const g = gateway(() => {
@@ -1089,4 +1124,97 @@ test("full-page sign-in binds kind and safe return path to the signed callback",
       ).status,
       400,
     );
+});
+
+test("testing public actors require an explicit canonical organization and bind the token response", async () => {
+  const headers = {
+    cookie: cookie(session(undefined, "k".repeat(32)), scope),
+    "x-commit-environment": scope,
+  };
+  const calls: { path: string; body: any }[] = [];
+  let mismatch = false;
+  const g = gateway((url, init) => {
+    const body = init.body ? JSON.parse(init.body as string) : undefined;
+    calls.push({ path: url.pathname, body });
+    if (url.pathname.endsWith("/testing-context"))
+      return Response.json({ environment_id: scope });
+    assert.equal(
+      new Headers(init.headers).get("x-testing-environment-key"),
+      "k".repeat(32),
+    );
+    return Response.json({
+      ...tokens,
+      org_id: mismatch ? "other-team" : body.org_id || "test-team",
+      actor: {
+        type: body.slt.startsWith("si:") ? "silicon" : "carbon",
+        public_id: body.slt.startsWith("oac_") ? "c:alice" : body.slt,
+      },
+    });
+  });
+  for (const body of [
+    { slt: "c:alice" },
+    { slt: "alice", org_id: "test-team" },
+    { slt: "si:builder", org_id: "BAD" },
+  ]) {
+    const denied = await g(req("/auth/login", "POST", body, headers));
+    assert.equal(denied.status, 400);
+    assert.equal(denied.headers.has("set-cookie"), false);
+  }
+  assert.equal(calls.length, 0);
+  for (const slt of ["c:alice", "si:builder", "oac_" + "a".repeat(43)]) {
+    const accepted = await g(
+      req("/auth/login", "POST", { slt, org_id: "test-team" }, headers),
+    );
+    assert.equal(accepted.status, 200);
+    const result = await accepted.json();
+    assert.equal(
+      result.actor.public_id,
+      slt.startsWith("oac_") ? "c:alice" : slt,
+    );
+    assert.equal(result.org_id, "test-team");
+    assert.deepEqual(calls.at(-1)?.body, { slt, org_id: "test-team" });
+  }
+  const codeOnly = await g(
+    req("/auth/login", "POST", { slt: "oac_" + "b".repeat(43) }, headers),
+  );
+  assert.equal(codeOnly.status, 200);
+  assert.deepEqual(calls.at(-1)?.body, { slt: "oac_" + "b".repeat(43) });
+  const underscore = await g(
+    req(
+      "/auth/login",
+      "POST",
+      { slt: "c:alice", org_id: "test_team" },
+      headers,
+    ),
+  );
+  assert.equal(underscore.status, 200);
+  assert.equal((await underscore.json()).org_id, "test_team");
+  mismatch = true;
+  const mismatchResponse = await g(
+    req(
+      "/auth/login",
+      "POST",
+      { slt: "c:alice", org_id: "test-team" },
+      headers,
+    ),
+  );
+  assert.equal(mismatchResponse.status, 502);
+  assert.equal(mismatchResponse.headers.has("set-cookie"), false);
+  const before = calls.length;
+  assert.equal(
+    (
+      await g(
+        req("/auth/login", "POST", {
+          slt: "oac_" + "a".repeat(43),
+          org_id: "test-team",
+        }),
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    calls.length,
+    before,
+    "ordinary organization cannot be overridden",
+  );
 });

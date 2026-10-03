@@ -23,6 +23,7 @@ type Session = {
   environmentKey?: string;
   environmentName?: string;
   selectionOnly?: boolean;
+  loginState?: string;
 };
 export const failure = (
   status: number,
@@ -37,7 +38,7 @@ const validScope = (s: string) =>
   s === "production" ||
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
 const validOrg = (s: unknown): s is string =>
-  typeof s === "string" && /^[a-z0-9][a-z0-9-]{0,254}$/.test(s);
+  typeof s === "string" && /^[a-z0-9_-]{3,50}$/.test(s);
 const cookieName = (c: Config, scope: string) =>
   `${c.origin.startsWith("https:") ? "__Host-" : ""}commit_${scope}`;
 const options = (c: Config) =>
@@ -60,6 +61,8 @@ type LoginAttempt = {
   kind: "carbon" | "silicon";
   attempt: string;
   returnTo?: string;
+  previousContext: string | null;
+  until: number;
 };
 function loginCookie(value: LoginAttempt, c: Config) {
   const data = Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -87,6 +90,10 @@ function readLoginCookie(value: string, c: Config): LoginAttempt | null {
     return ["carbon", "silicon"].includes(result.kind) &&
       typeof result.state === "string" &&
       typeof result.attempt === "string" &&
+      (result.previousContext === null ||
+        /^[a-f0-9]{32}$/.test(result.previousContext || "")) &&
+      Number.isSafeInteger(result.until) &&
+      result.until > Date.now() &&
       (result.returnTo === undefined || validReturnTo(result.returnTo))
       ? result
       : null;
@@ -110,6 +117,24 @@ function popupResult(
   );
   return new Response(
     `<!doctype html><title>Commit sign-in</title><p>${ok ? "Signed in. You can close this window." : "Sign-in did not finish. Close this window and try again."}</p><script nonce="${nonce}" src="/popup-complete.js" data-attempt="${attempt.attempt}" data-kind="${attempt.kind}" data-ok="${ok}" data-context="${contextId}"></script>`,
+    { headers },
+  );
+}
+function pageCompletion(
+  c: Config,
+  attempt: LoginAttempt,
+  contextId: string,
+  headers: Headers,
+): Response {
+  const nonce = randomBytes(18).toString("base64url");
+  headers.set("content-type", "text/html; charset=utf-8");
+  headers.set("cache-control", "no-store");
+  headers.set(
+    "content-security-policy",
+    `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'`,
+  );
+  return new Response(
+    `<!doctype html><html lang="en"><meta name="viewport" content="width=device-width"><title>Commit sign-in</title><p id="login-status">Finishing sign-in…</p><button id="retry-activation" type="button" hidden>Retry sign-in</button><a href="/">Return to Commit</a><script nonce="${nonce}" src="/popup-complete.js" data-page="true" data-state="${attempt.state}" data-kind="${attempt.kind}" data-context="${contextId}" data-return="${encodeURIComponent(attempt.returnTo || "/#/todos")}"></script></html>`,
     { headers },
   );
 }
@@ -247,6 +272,7 @@ function fromTokens(
     org: t.org_id,
     environmentKey,
     environmentName: previous?.environmentName,
+    loginState: previous?.loginState,
   };
 }
 const routes: [RegExp, string[]][] = [
@@ -367,8 +393,28 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         "origin_rejected",
       );
     const saved = contexts(request, c, scope);
-    const selectedId = cookie(request, cookieName(c, scope));
+    const marker =
+      request.headers.get("x-commit-context") ??
+      (path === "/auth/start" ? url.searchParams.get("context_id") : null);
+    // A supplied public selector is authoritative for this tab and world.
+    // Its credentials must still exist as a valid authenticated sealed cookie.
+    if (marker !== null && marker !== "none" && !/^[a-f0-9]{32}$/.test(marker))
+      return failure(
+        409,
+        "Choose a saved workspace again.",
+        "session_context_changed",
+      );
+    const selectedId =
+      marker === "none"
+        ? null
+        : (marker ?? cookie(request, cookieName(c, scope)));
     let session = saved.find((s) => s.contextId === selectedId) || null;
+    if (marker && marker !== "none" && !session)
+      return failure(
+        409,
+        "That saved workspace is no longer available. Sign in again.",
+        "session_context_changed",
+      );
     const state = (current: Session | null) => ({
       ...summary(current),
       environment_id: scope,
@@ -377,15 +423,16 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         .concat(current && !current.selectionOnly ? [current] : [])
         .map(summary),
     });
-    const marker = request.headers.get("x-commit-context");
     if (
       ![
         "/auth/start",
         "/auth/callback",
         "/auth/session",
+        "/auth/activate",
+        "/auth/context",
         "/auth/testing",
       ].includes(path) &&
-      ((marker && marker !== session?.contextId) ||
+      ((marker && marker !== "none" && marker !== session?.contextId) ||
         (session && marker !== session.contextId))
     )
       return failure(
@@ -432,7 +479,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           status: 303,
           headers: {
             location: login.href,
-            "set-cookie": `commit_login=${loginCookie({ state, kind: kind as "carbon" | "silicon", attempt: attemptId, returnTo }, c)}; Max-Age=600${options(c)}`,
+            "set-cookie": `commit_login=${loginCookie({ state, kind: kind as "carbon" | "silicon", attempt: attemptId, returnTo, previousContext: session?.contextId ?? null, until: Date.now() + 600_000 }, c)}; Max-Age=600${options(c)}`,
           },
         });
       }
@@ -463,14 +510,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           if (r.status >= 500 || r.status === 429)
             throw new Error("Login temporarily unavailable");
           if (attempt?.attempt)
-            return popupResult(
-              c,
-              attempt,
-              false,
-              new Headers({
-                "set-cookie": `commit_login=; Max-Age=0${options(c)}`,
-              }),
-            );
+            return popupResult(c, attempt, false, new Headers());
           return new Response(null, {
             status: 303,
             headers: { location: "/#/login?error=login_failed" },
@@ -496,9 +536,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           verified.actor?.public_id !== s.actor.public_id ||
           (s.org && verified.org_id !== s.org)
         ) {
-          const h = new Headers({
-            "set-cookie": `commit_login=; Max-Age=0${options(c)}`,
-          });
+          const h = new Headers();
           return attempt?.attempt
             ? popupResult(c, attempt, false, h)
             : failure(
@@ -510,14 +548,57 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           .update("production|" + s.refresh)
           .digest("hex")
           .slice(0, 32);
-        const h = loginHeaders(s, c, "production");
-        h.set("location", attempt.returnTo || "/#/todos");
-        h.append("set-cookie", `commit_login=; Max-Age=0${options(c)}`);
+        s.loginState = attempt.state;
+        // An arriving callback may belong to a window the user just cancelled.
+        // Save only this context; the live initiating UI explicitly activates it.
+        // Do not clear the shared login cookie from a late callback response.
+        const h = new Headers({
+          "set-cookie": sessionHeader(s, c, "production"),
+        });
         if (attempt.attempt) {
-          h.delete("location");
           return popupResult(c, attempt, true, h, s.contextId);
         }
-        return new Response(null, { status: 303, headers: h });
+        return pageCompletion(c, attempt, s.contextId, h);
+      }
+      if (path === "/auth/activate" && method === "POST") {
+        const body = await request.json();
+        const attempt = readLoginCookie(cookie(request, "commit_login"), c);
+        const selected = saved.find(
+          (s) => s.contextId === body.context_id && !s.selectionOnly,
+        );
+        const correlated =
+          attempt &&
+          (attempt.attempt
+            ? body.attempt === attempt.attempt && body.state === undefined
+            : body.state === attempt.state && body.attempt === undefined);
+        if (
+          scope !== "production" ||
+          !correlated ||
+          !selected ||
+          selected.actor.type !== attempt.kind ||
+          selected.loginState !== attempt.state
+        )
+          return failure(
+            409,
+            "This sign-in is no longer current. Start again from Commit.",
+            "login_superseded",
+          );
+        // Retrying a lost activation response is safe for the exact same context.
+        if (
+          (session?.contextId ?? null) !== attempt.previousContext &&
+          session?.contextId !== selected.contextId
+        )
+          return failure(
+            409,
+            "Your workspace changed during sign-in. Choose an account again.",
+            "session_context_changed",
+          );
+        return Response.json(state(selected), {
+          headers:
+            marker === null
+              ? { "set-cookie": selectedHeader(selected, c, scope) }
+              : {},
+        });
       }
       if (path === "/auth/testing" && method === "POST") {
         const input = await request.json();
@@ -552,14 +633,40 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           environmentName: meta.name,
           selectionOnly: true,
         };
-        return Response.json(meta, {
-          headers: loginHeaders(selected, c, meta.environment_id),
-        });
+        return Response.json(
+          { ...meta, context_id: selected.contextId },
+          {
+            headers: loginHeaders(selected, c, meta.environment_id),
+          },
+        );
       }
       if (path === "/auth/login" && method === "POST") {
         const b = await request.json();
         if (typeof b.slt !== "string" || !b.slt || b.slt.length > 4096)
           return failure(400, "Enter an IAM short-lived token.");
+        const issuedCode = /^oac_[A-Za-z0-9_-]{43}$/.test(b.slt);
+        const publicActor = /^(?:c:[a-z0-9_-]{3,30}|si:[a-z0-9_-]{3,50})$/.test(
+          b.slt,
+        );
+        const organization = b.org_id;
+        if (scope === "production" && organization !== undefined)
+          return failure(
+            400,
+            "Choose the organization in IAM before ordinary sign-in.",
+            "organization_selected_by_iam",
+          );
+        if (
+          scope !== "production" &&
+          ((organization !== undefined &&
+            (typeof organization !== "string" ||
+              !/^[a-z0-9_-]{3,50}$/.test(organization))) ||
+            (!issuedCode && (!publicActor || !organization)))
+        )
+          return failure(
+            400,
+            "Enter a canonical test Carbon or Silicon ID and its organization, or an IAM short-lived code.",
+            "testing_login_requires_actor_and_organization",
+          );
         const selectedSecret = b.environment_key || session?.environmentKey;
         if (
           scope !== "production" &&
@@ -592,7 +699,12 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         const r = await upstream("/auth/login", {
           method: "POST",
           headers: h,
-          body: JSON.stringify({ slt: b.slt }),
+          body: JSON.stringify({
+            slt: b.slt,
+            ...(scope !== "production" && organization !== undefined
+              ? { org_id: organization }
+              : {}),
+          }),
         });
         if (!r.ok) return r;
         session = fromTokens(
@@ -601,6 +713,19 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           scope === "production" ? undefined : selectedSecret,
           session ? { ...session, selectionOnly: true } : undefined,
         );
+        if (
+          scope !== "production" &&
+          ((organization !== undefined && session.org !== organization) ||
+            (!issuedCode &&
+              (session.actor.public_id !== b.slt ||
+                session.actor.type !==
+                  (b.slt.startsWith("c:") ? "carbon" : "silicon"))))
+        )
+          return failure(
+            502,
+            "IAM returned a different testing account or organization.",
+            "identity_mismatch",
+          );
         session.contextId = createHmac("sha256", c.key)
           .update(scope + "|" + session.refresh)
           .digest("hex")
@@ -634,7 +759,10 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             "context_not_found",
           );
         return Response.json(state(selected), {
-          headers: { "set-cookie": selectedHeader(selected, c, scope) },
+          headers:
+            marker === null
+              ? { "set-cookie": selectedHeader(selected, c, scope) }
+              : {},
         });
       }
       if (path === "/auth/logout" && method === "POST") {
