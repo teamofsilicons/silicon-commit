@@ -105,6 +105,20 @@ function popupResult(
     { headers },
   );
 }
+function popupRetry(): Response {
+  const nonce = randomBytes(18).toString("base64url");
+  return new Response(
+    `<!doctype html><title>Retry Commit sign-in</title><p>Commit could not verify your account yet. Retry here to continue the same sign-in.</p><button id="retry" type="button">Retry sign-in</button><script nonce="${nonce}" src="/popup-complete.js" data-retry="true"></script>`,
+    {
+      status: 503,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "content-security-policy": `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+      },
+    },
+  );
+}
 export function seal(value: unknown, c: Config, scope: string) {
   const iv = randomBytes(12),
     cipher = createCipheriv("aes-256-gcm", Buffer.from(c.key, "base64url"), iv);
@@ -436,6 +450,8 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           body: JSON.stringify({ slt: url.searchParams.get("slt") }),
         });
         if (!r.ok) {
+          if (r.status >= 500 || r.status === 429)
+            throw new Error("Login temporarily unavailable");
           if (attempt?.attempt)
             return popupResult(
               c,
@@ -458,6 +474,8 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             ...(s.org ? { "x-org-id": s.org } : {}),
           },
         });
+        if (statusResponse.status >= 500 || statusResponse.status === 429)
+          throw new Error("Identity verification temporarily unavailable");
         const verified = statusResponse.ok ? await statusResponse.json() : null;
         if (
           !attempt ||
@@ -746,6 +764,13 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
       }
       return failure(404, "Not found.");
     } catch (error) {
+      // Retain the signed attempt and callback URL so uncertain SLT exchange or
+      // status verification can reuse the original idempotency key on retry.
+      if (
+        path === "/auth/callback" &&
+        readLoginCookie(cookie(request, "commit_login"), c)?.attempt
+      )
+        return popupRetry();
       if (error instanceof SessionExpired) {
         const response =
           path === "/auth/session"

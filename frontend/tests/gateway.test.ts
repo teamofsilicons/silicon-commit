@@ -961,3 +961,59 @@ test("popup status mismatch cannot install credentials or overwrite an existing 
     assert.equal(jar.cookie(), original);
   }
 });
+
+test("popup retry preserves the exact callback and exchange key across temporary login or status failure", async () => {
+  for (const failureAt of [
+    "login-503",
+    "status-503",
+    "status-429",
+    "status-transport",
+  ]) {
+    let failing = true;
+    const keys: string[] = [];
+    const g = gateway((url, init) => {
+      if (url.pathname.endsWith("/auth/login")) {
+        keys.push(new Headers(init.headers).get("idempotency-key")!);
+        if (failing && failureAt === "login-503")
+          return Response.json({}, { status: 503 });
+        return Response.json(tokens);
+      }
+      if (failing) {
+        if (failureAt === "status-transport") throw new Error("network failed");
+        return Response.json(
+          {},
+          { status: failureAt === "status-429" ? 429 : 503 },
+        );
+      }
+      return Response.json({
+        authenticated: true,
+        app_id: "commit",
+        org_id: tokens.org_id,
+        actor,
+      });
+    });
+    const start = await g(
+      req(
+        "/auth/start?identity_kind=silicon&display=popup&attempt=11111111-1111-4111-8111-111111111111",
+      ),
+    );
+    const callback = new URL(
+      new URL(start.headers.get("location")!).searchParams.get("redirect_uri")!,
+    );
+    callback.searchParams.set("slt", "same-slt");
+    const headers = { cookie: start.headers.getSetCookie()[0].split(";")[0] };
+    const retry = await g(
+      req(callback.pathname + callback.search, "GET", undefined, headers),
+    );
+    assert.equal(retry.status, 503);
+    assert.equal(retry.headers.has("set-cookie"), false);
+    assert.match(await retry.text(), /data-retry="true"/);
+    failing = false;
+    const done = await g(
+      req(callback.pathname + callback.search, "GET", undefined, headers),
+    );
+    assert.match(await done.text(), /data-ok="true"/);
+    assert.equal(keys.length, 2);
+    assert.equal(keys[0], keys[1]);
+  }
+});
