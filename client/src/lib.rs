@@ -163,6 +163,55 @@ pub struct SessionTokens {
     pub actor: Value,
     pub org_id: Option<String>,
 }
+/// Validates the immutable actor and organization of an ordinary IAM 5 session.
+pub fn validate_session_context(actor: &Value, org_id: Option<&str>) -> Result<(), Error> {
+    let (prefix, maximum) = match actor["type"].as_str() {
+        Some("carbon") => ("c:", 30),
+        Some("silicon") => ("si:", 50),
+        _ => return Err(Error::Invalid("session requires a Carbon or Silicon actor")),
+    };
+    let valid_id = actor["public_id"]
+        .as_str()
+        .and_then(|id| id.strip_prefix(prefix))
+        .is_some_and(|id| {
+            (3..=maximum).contains(&id.len())
+                && id.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+        });
+    let valid_org = org_id.is_some_and(|org| {
+        (3..=50).contains(&org.len())
+            && org.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+    });
+    if !valid_id || !valid_org {
+        return Err(Error::Invalid(
+            "session requires a canonical actor and one organization; sign in again",
+        ));
+    }
+    Ok(())
+}
+impl SessionTokens {
+    /// Rejects unscoped, malformed, or delegated credentials as ordinary sessions.
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_session_context(&self.actor, self.org_id.as_deref())?;
+        if self.access_token.is_empty()
+            || self.refresh_token.is_empty()
+            || self.expires_in <= 0
+            || self.token_type != "Bearer"
+            || self
+                .scope
+                .split_whitespace()
+                .any(|scope| scope.starts_with("obo:"))
+        {
+            return Err(Error::Invalid("invalid ordinary IAM 5 token response"));
+        }
+        Ok(())
+    }
+}
 impl fmt::Debug for SessionTokens {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionTokens")
@@ -349,24 +398,51 @@ impl Client {
         }
     }
     pub async fn login_with_slt(&self, slt: &str) -> Result<SessionTokens, Error> {
-        decode(
-            self.write(
-                Method::POST,
-                &["auth", "login"],
-                &serde_json::json!({"slt":slt}),
-            )
-            .await?,
-        )
+        // Explicit selection is needed when a testing actor belongs to several organizations.
+        let mut body = serde_json::json!({"slt":slt});
+        if let Some(org) = &self.org_id {
+            body["org_id"] = org.clone().into();
+        }
+        let mut broker = self.clone();
+        broker.bearer = None;
+        let tokens: SessionTokens = decode(
+            broker
+                .write(Method::POST, &["auth", "login"], &body)
+                .await?,
+        )?;
+        tokens.validate()?;
+        if self
+            .org_id
+            .as_ref()
+            .is_some_and(|org| Some(org) != tokens.org_id.as_ref())
+        {
+            return Err(Error::Invalid("login returned a different organization"));
+        }
+        Ok(tokens)
     }
+    /// The caller must additionally compare the returned actor and org with the saved family.
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<SessionTokens, Error> {
-        decode(
-            self.write(
-                Method::POST,
-                &["auth", "refresh"],
-                &serde_json::json!({"refresh_token":refresh_token}),
-            )
-            .await?,
-        )
+        let mut broker = self.clone();
+        broker.bearer = None;
+        broker.org_id = None;
+        let tokens: SessionTokens = decode(
+            broker
+                .write(
+                    Method::POST,
+                    &["auth", "refresh"],
+                    &serde_json::json!({"refresh_token":refresh_token}),
+                )
+                .await?,
+        )?;
+        tokens.validate()?;
+        if self
+            .org_id
+            .as_ref()
+            .is_some_and(|org| Some(org) != tokens.org_id.as_ref())
+        {
+            return Err(Error::Invalid("refresh returned a different organization"));
+        }
+        Ok(tokens)
     }
     pub async fn logout(&self, token: &str) -> Result<(), Error> {
         self.write(

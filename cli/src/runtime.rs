@@ -2,6 +2,7 @@
 use super::*;
 use sha2::{Digest as _, Sha256};
 use std::sync::{OnceLock, RwLock};
+static PROFILE: OnceLock<String> = OnceLock::new();
 static SELECTOR: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 #[derive(Subcommand, Clone)]
 pub enum TestingCommand {
@@ -23,22 +24,35 @@ pub fn directory() -> PathBuf {
         .unwrap_or_else(default_home_dir)
         .join(".commit")
 }
-fn selection_path() -> PathBuf {
-    directory().join("testing-selection")
+pub fn profile_name(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return Err(
+            "profile names use 1–64 lowercase letters, numbers, underscores or hyphens".into(),
+        );
+    }
+    Ok(value.to_owned())
 }
-pub fn initialize() {
-    let args = std::env::args().collect::<Vec<_>>();
-    let explicit = args
-        .windows(2)
-        .find(|w| w[0] == "--test")
-        .map(|w| w[1].clone())
-        .or_else(|| {
-            args.iter()
-                .find_map(|a| a.strip_prefix("--test=").map(str::to_owned))
-        });
-    let selected = explicit
-        .or_else(|| std::env::var("COMMIT_TEST_KEY").ok())
-        .or_else(|| fs::read_to_string(selection_path()).ok());
+pub fn profile() -> &'static str {
+    PROFILE.get().map_or("default", String::as_str)
+}
+pub fn profile_directory() -> PathBuf {
+    if profile() == "default" {
+        directory()
+    } else {
+        directory().join("profiles").join(profile())
+    }
+}
+fn selection_path() -> PathBuf {
+    profile_directory().join("testing-selection")
+}
+pub fn initialize(profile: String, explicit_test: Option<String>) {
+    let _ = PROFILE.set(profile);
+    let selected = explicit_test.or_else(|| fs::read_to_string(selection_path()).ok());
     let _ = SELECTOR.set(RwLock::new(selected));
 }
 pub fn selected_key() -> Option<String> {
@@ -53,7 +67,7 @@ pub fn session_file() -> String {
     )
 }
 fn metadata_path() -> PathBuf {
-    directory().join(format!("{}.metadata", session_file()))
+    profile_directory().join(format!("{}.metadata", session_file()))
 }
 pub fn private_write(
     path: &std::path::Path,
@@ -133,7 +147,7 @@ pub async fn testing(
             {
                 *s = Some(app_secret.clone());
             }
-            let path = directory().join(format!(
+            let path = profile_directory().join(format!(
                 "test-{:x}.json.metadata",
                 Sha256::digest(app_secret.as_bytes())
             ));

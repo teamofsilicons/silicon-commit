@@ -11,40 +11,24 @@ use wiremock::{
 };
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unscoped_session_discovers_and_remembers_its_only_organization() {
+async fn legacy_unscoped_or_actorless_sessions_require_new_login_without_network() {
     let home = Home::new();
     let server = MockServer::start().await;
     fs::create_dir_all(home.0.join(".commit")).unwrap();
     let session = home.0.join(".commit/session.json");
-    fs::write(
-        &session,
-        json!({"access_token":"oat_saved","refresh_token":"ort_saved",
-        "expires_at":4102444800_u64,"api_url":server.uri(),"org_id":null})
-        .to_string(),
-    )
-    .unwrap();
-    Mock::given(method("GET")).and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer oat_saved"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,
-            "actor":{"type":"silicon","id":"chef:bricks"},"org_id":"bricks","organizations":["bricks"]})))
-        .expect(1).mount(&server).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/todos"))
-        .and(header("authorization", "Bearer oat_saved"))
-        .and(header("x-org-id", "bricks"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[]})))
-        .expect(2)
-        .mount(&server)
-        .await;
-    for _ in 0..2 {
-        assert_eq!(
-            json_output(home.command().args(["todos", "list"]).output().unwrap()),
-            json!({"items":[]})
-        );
+    for (actor, org) in [
+        (Value::Null, json!("tos")),
+        (json!({"type":"carbon","public_id":"c:person"}), Value::Null),
+    ] {
+        let original = json!({"access_token":"oat_saved","refresh_token":"ort_saved",
+            "expires_at":4102444800_u64,"api_url":server.uri(),"org_id":org,"actor":actor})
+        .to_string();
+        fs::write(&session, &original).unwrap();
+        let output = home.command().args(["todos", "list"]).output().unwrap();
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(&session).unwrap(), original);
     }
-    let saved: Value = serde_json::from_slice(&fs::read(session).unwrap()).unwrap();
-    assert_eq!(saved["org_id"], "bricks");
-    assert_eq!(saved["refresh_token"], "ort_saved");
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -76,7 +60,7 @@ async fn ambiguous_organizations_require_selection_and_explicit_tokens_do_not_ch
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
-        error.contains("--org-id") && error.contains("bricks, tos"),
+        error.contains("one organization") && error.contains("--profile"),
         "{error}"
     );
     Mock::given(method("GET"))
@@ -192,7 +176,7 @@ async fn login_status_distinguishes_expired_sessions_from_refresh_permission_err
         let session = home.0.join(".commit/session.json");
         fs::create_dir_all(session.parent().unwrap()).unwrap();
         let saved = json!({"access_token":"oat_old", "refresh_token":"ort_old",
-            "api_url":server.uri(), "org_id":"tos", "expires_at":1})
+            "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "expires_at":1})
         .to_string();
         fs::write(&session, &saved).unwrap();
         Mock::given(method("POST"))
@@ -244,7 +228,7 @@ async fn login_to_another_server_does_not_send_the_old_session() {
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new",
             "refresh_token":"ort_new","expires_in":1800,"token_type":"Bearer","scope":"",
-            "actor":{"type":"carbon","id":"person"},"org_id":null})),
+            "actor":{"type":"carbon","public_id":"c:person"},"org_id":"tos"})),
         )
         .expect(1)
         .mount(&destination)
@@ -278,6 +262,7 @@ impl Home {
             "COMMIT_ACCESS_TOKEN",
             "COMMIT_ORG_ID",
             "COMMIT_TEST_KEY",
+            "COMMIT_PROFILE",
             "SILICON_HOME",
         ] {
             command.env_remove(name);
@@ -377,7 +362,7 @@ async fn logout_revokes_the_saved_session_before_removing_only_its_credentials()
         ));
         let saved = serde_json::to_vec(&json!({
             "access_token": "oat_saved", "refresh_token": "ort_saved",
-            "api_url": server.uri(), "org_id": "tos", "test_key":test_key
+            "api_url": server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id": "tos", "test_key":test_key
         }))
         .unwrap();
         fs::write(&session, &saved).unwrap();
@@ -387,7 +372,7 @@ async fn logout_revokes_the_saved_session_before_removing_only_its_credentials()
                 .env("SILICON_HOME", &silicon.0)
                 .env("COMMIT_API_URL", api)
                 .env("COMMIT_ACCESS_TOKEN", "oat_unrelated")
-                .env("COMMIT_ORG_ID", "unrelated")
+                .env("COMMIT_ORG_ID", "tos")
                 .args(["logout", "--json"]);
             if let Some(key) = test_key {
                 command.env("COMMIT_TEST_KEY", key);
@@ -453,7 +438,7 @@ async fn silicon_home_persists_login_and_explicit_configuration_overrides_it() {
         .and(body_json(json!({"slt":"slt_once"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token":"oat_secret", "refresh_token":"ort_secret", "token_type":"Bearer",
-            "expires_in":3600, "scope":"profile.read", "actor":{"type":"carbon","id":"person"}, "org_id":"tos"
+            "expires_in":3600, "scope":"profile.read", "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"
         }))).expect(3).mount(&server).await;
     let login = || {
         let mut command = home.command();
@@ -750,7 +735,7 @@ async fn shared_lifecycle_errors_explain_honeycomb_recovery() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn expired_and_legacy_sessions_refresh_once_across_concurrent_commands() {
+async fn expired_scoped_sessions_refresh_once_across_concurrent_commands() {
     for test_key in [None, Some("abcdefghijklmnopqrstuvwxyz123456")] {
         let home = Home::new();
         let server = MockServer::start().await;
@@ -763,13 +748,12 @@ async fn expired_and_legacy_sessions_refresh_once_across_concurrent_commands() {
                 format!("test-{:x}.json", Sha256::digest(key.as_bytes()))
             },
         ));
-        // Existing installations did not save expiry. Treat them as needing
-        // rotation once, then persist the returned deadline.
+        // Missing expiry on a scoped IAM 5 family requires one serialized rotation.
         fs::write(
             &session,
             serde_json::to_vec(&json!({
                 "access_token":"oat_expired", "refresh_token":"ort_saved",
-                "api_url":server.uri(), "org_id":"tos", "test_key":test_key
+                "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "test_key":test_key
             }))
             .unwrap(),
         )
@@ -782,7 +766,7 @@ async fn expired_and_legacy_sessions_refresh_once_across_concurrent_commands() {
             })
             .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(100))
                 .set_body_json(json!({"access_token":"oat_new", "refresh_token":"ort_new", "expires_in":1800,
-                    "token_type":"Bearer", "scope":"self.identity.read", "actor":{"type":"carbon","id":"person"}, "org_id":"tos"})))
+                    "token_type":"Bearer", "scope":"self.identity.read", "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"})))
             .expect(1).mount(&server).await;
         Mock::given(method("GET"))
             .and(path("/api/v1/auth/status"))
@@ -827,7 +811,7 @@ async fn uncertain_refresh_retains_credentials_and_reuses_key_without_sending_to
     let other = MockServer::start().await;
     let session = home.0.join(".commit/session.json");
     fs::create_dir_all(session.parent().unwrap()).unwrap();
-    let saved = serde_json::to_vec(&json!({"access_token":"oat_old", "refresh_token":"ort_old", "api_url":server.uri(), "org_id":"tos", "expires_at":1})).unwrap();
+    let saved = serde_json::to_vec(&json!({"access_token":"oat_old", "refresh_token":"ort_old", "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "expires_at":1})).unwrap();
     fs::write(&session, &saved).unwrap();
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/refresh"))
@@ -876,7 +860,7 @@ async fn delayed_refresh_replay_rotates_the_recovered_token_before_using_it() {
     fs::write(
         &session,
         json!({"access_token":"oat_old", "refresh_token":"ort_old",
-        "api_url":server.uri(), "org_id":"tos", "expires_at":1, "refresh_started_at":1})
+        "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "expires_at":1, "refresh_started_at":1})
         .to_string(),
     )
     .unwrap();
@@ -887,7 +871,7 @@ async fn delayed_refresh_replay_rotates_the_recovered_token_before_using_it() {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "access_token":format!("oat_{new}"), "refresh_token":format!("ort_{new}"),
                 "expires_in":1800, "token_type":"Bearer", "scope":"",
-                "actor":{"type":"carbon","id":"person"}, "org_id":"tos"})))
+                "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"})))
             .expect(1)
             .mount(&server)
             .await;
@@ -922,7 +906,7 @@ async fn early_access_rejection_refreshes_and_replays_identical_mutation() {
     fs::write(
         &session,
         json!({"access_token":"oat_old","refresh_token":"ort_old",
-        "api_url":server.uri(),"org_id":"bricks","expires_at":4102444800_u64})
+        "api_url":server.uri(),"actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks","expires_at":4102444800_u64})
         .to_string(),
     )
     .unwrap();
@@ -947,7 +931,7 @@ async fn early_access_rejection_refreshes_and_replays_identical_mutation() {
     Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
         .and(body_json(json!({"refresh_token":"ort_old"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new","refresh_token":"ort_new",
-            "expires_in":1800,"token_type":"Bearer","scope":"","actor":{"type":"silicon","id":"chef:bricks"},"org_id":null})))
+            "expires_in":1800,"token_type":"Bearer","scope":"","actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks"})))
         .expect(1).mount(&server).await;
     Mock::given(method("POST"))
         .and(path("/api/v1/todos"))
@@ -995,7 +979,7 @@ async fn inactive_status_silently_renews_the_existing_family_once() {
     let server = MockServer::start().await;
     let session = home.0.join(".commit/session.json");
     fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(&session,json!({"access_token":"oat_old","refresh_token":"ort_old","api_url":server.uri(),"org_id":"bricks","expires_at":4102444800_u64}).to_string()).unwrap();
+    fs::write(&session,json!({"access_token":"oat_old","refresh_token":"ort_old","api_url":server.uri(),"actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks","expires_at":4102444800_u64}).to_string()).unwrap();
     Mock::given(method("GET"))
         .and(path("/api/v1/auth/status"))
         .and(header("authorization", "Bearer oat_old"))
@@ -1005,7 +989,7 @@ async fn inactive_status_silently_renews_the_existing_family_once() {
         .await;
     Mock::given(method("POST")).and(path("/api/v1/auth/refresh")).and(body_json(json!({"refresh_token":"ort_old"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new","refresh_token":"ort_new","expires_in":1800,
-            "token_type":"Bearer","scope":"","actor":{"type":"silicon","id":"chef:bricks"},"org_id":"bricks"})))
+            "token_type":"Bearer","scope":"","actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks"})))
         .expect(1).mount(&server).await;
     Mock::given(method("GET"))
         .and(path("/api/v1/auth/status"))
@@ -1034,7 +1018,7 @@ async fn forced_refresh_outages_retain_the_family_and_retry_receipt() {
     let server = MockServer::start().await;
     let session = home.0.join(".commit/session.json");
     fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(&session,json!({"access_token":"oat_old","refresh_token":"ort_old","api_url":server.uri(),"org_id":"bricks","expires_at":4102444800_u64}).to_string()).unwrap();
+    fs::write(&session,json!({"access_token":"oat_old","refresh_token":"ort_old","api_url":server.uri(),"actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks","expires_at":4102444800_u64}).to_string()).unwrap();
     Mock::given(method("GET"))
         .and(path("/api/v1/todos"))
         .respond_with(
@@ -1059,4 +1043,262 @@ async fn forced_refresh_outages_retain_the_family_and_retry_receipt() {
     assert_eq!(saved["access_token"], "oat_old");
     assert_eq!(saved["refresh_token"], "ort_old");
     assert!(saved["refresh_started_at"].is_u64());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_profiles_keep_accounts_and_sandboxes_independent() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    let sandbox = "abcdefghijklmnopqrstuvwxyz123456";
+    for (profile, org, actor, test) in [
+        ("personal", "team-a", "c:person", None),
+        ("work", "team-b", "si:helper", None),
+        ("work", "team-b", "si:helper", Some(sandbox)),
+    ] {
+        let identity = json!({"type":if actor.starts_with("c:") {"carbon"} else {"silicon"},"public_id":actor});
+        let label = format!(
+            "{profile}-{}",
+            if test.is_some() {
+                "testing"
+            } else {
+                "production"
+            }
+        );
+        Mock::given(method("POST")).and(path("/api/v1/auth/login"))
+            .and(body_json(json!({"slt":label,"org_id":org})))
+            .and(move |r: &wiremock::Request| r.headers.get("x-testing-environment-key").and_then(|v| v.to_str().ok()) == test)
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":label,"refresh_token":format!("refresh-{label}"),
+                "token_type":"Bearer","expires_in":3600,"scope":"self.identity.read","actor":identity,"org_id":org})))
+            .expect(1).mount(&server).await;
+        let mut command = home.command();
+        command.args([
+            "--profile",
+            profile,
+            "--api-url",
+            &server.uri(),
+            "--org-id",
+            org,
+            "login",
+            &label,
+        ]);
+        if let Some(key) = test {
+            command.env("COMMIT_TEST_KEY", key);
+        }
+        assert_eq!(json_output(command.output().unwrap())["org_id"], org);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/todos"))
+            .and(header("authorization", format!("Bearer {label}")))
+            .and(header("x-org-id", org))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"context":label})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut read = home.command();
+        read.env("COMMIT_PROFILE", profile).args(["todos", "list"]);
+        if let Some(key) = test {
+            read.env("COMMIT_TEST_KEY", key);
+        }
+        assert_eq!(json_output(read.output().unwrap())["context"], label);
+    }
+    assert!(!home.0.join(".commit/session.json").exists());
+    for profile in ["personal", "work"] {
+        let stored: Value = serde_json::from_slice(
+            &fs::read(
+                home.0
+                    .join(format!(".commit/profiles/{profile}/session.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(stored["actor"]["public_id"].is_string());
+    }
+    let invalid = home
+        .command()
+        .args(["--profile", "../work", "todos", "list"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_profile_org_override_is_rejected_before_refresh_or_logout() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    let path = home.0.join(".commit/session.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let saved = json!({"access_token":"access", "refresh_token":"refresh", "api_url":server.uri(),"expires_at":1,
+        "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}}).to_string();
+    fs::write(&path, &saved).unwrap();
+    for args in [
+        vec!["--org-id", "team-b", "todos", "list"],
+        vec!["--org-id", "team-b", "logout"],
+    ] {
+        let result = home.command().args(args).output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("--profile"));
+    }
+    assert_eq!(fs::read_to_string(path).unwrap(), saved);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_cannot_change_saved_actor_or_organization() {
+    for (actor, org) in [
+        (json!({"type":"carbon","public_id":"c:another"}), "team-a"),
+        (json!({"type":"carbon","public_id":"c:person"}), "team-b"),
+        (json!({"type":"silicon","public_id":"si:person"}), "team-a"),
+    ] {
+        let home = Home::new();
+        let server = MockServer::start().await;
+        let session_file = home.0.join(".commit/session.json");
+        fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+        fs::write(&session_file, json!({"access_token":"original-access", "refresh_token":"original-refresh", "api_url":server.uri(),"expires_at":1,
+            "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}}).to_string()).unwrap();
+        Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"changed-access", "refresh_token":"changed-refresh",
+                "token_type":"Bearer","expires_in":3600,"scope":"self.identity.read","actor":actor,"org_id":org})))
+            .expect(1).mount(&server).await;
+        assert!(
+            !home
+                .command()
+                .args(["todos", "list"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(session_file).unwrap()).unwrap();
+        assert_eq!(saved["access_token"], "original-access");
+        assert_eq!(saved["refresh_token"], "original-refresh");
+        assert_eq!(saved["org_id"], "team-a");
+        assert_eq!(saved["actor"]["public_id"], "c:person");
+        assert!(saved["refresh_started_at"].is_u64());
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_profile_cannot_receive_a_pending_commands_retry() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    let session = home.0.join(".commit/session.json");
+    fs::create_dir_all(session.parent().unwrap()).unwrap();
+    let mut saved = json!({"access_token":"original-access", "refresh_token":"original-refresh", "api_url":server.uri(),"expires_at":4102444800_u64,
+        "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}});
+    fs::write(&session, saved.to_string()).unwrap();
+    saved["access_token"] = json!("replacement-access");
+    saved["refresh_token"] = json!("replacement-refresh");
+    saved["actor"]["public_id"] = json!("c:another");
+    let changed_path = session.clone();
+    let replacement = saved.to_string();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/todos"))
+        .and(header("authorization", "Bearer original-access"))
+        .respond_with(move |_: &wiremock::Request| {
+            fs::write(&changed_path, &replacement).unwrap();
+            ResponseTemplate::new(401).set_body_json(json!({"error":{"code":"unauthenticated"}}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = home
+        .command()
+        .args([
+            "todos",
+            "create",
+            "--data",
+            "{\"title\":\"Original account\",\"assigned_to\":\"c:person\"}",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("profile changed"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(session).unwrap()).unwrap(),
+        saved
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn profile_testing_selection_and_logout_leave_other_profiles_untouched() {
+    let home = Home::new();
+    let server = MockServer::start().await;
+    let key = format!("ask_{}", "a".repeat(43));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/testing-context"))
+        .and(header("x-testing-environment-key", &key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name":"Sandbox"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let output = home
+        .command()
+        .args([
+            "--profile",
+            "work",
+            "--api-url",
+            &server.uri(),
+            "testing",
+            "use",
+            &key,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        json_output(
+            home.command()
+                .args(["--profile", "personal", "testing", "status"])
+                .output()
+                .unwrap()
+        ),
+        json!({"testing":false})
+    );
+    assert_eq!(
+        fs::read_to_string(home.0.join(".commit/profiles/work/testing-selection")).unwrap(),
+        key
+    );
+    assert!(
+        home.command()
+            .args(["--profile", "work", "testing", "exit"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    for profile in ["work", "personal"] {
+        let session = home
+            .0
+            .join(format!(".commit/profiles/{profile}/session.json"));
+        fs::create_dir_all(session.parent().unwrap()).unwrap();
+        fs::write(session, json!({"access_token":format!("access-{profile}"), "refresh_token":format!("refresh-{profile}"), "api_url":server.uri(),"expires_at":4102444800_u64,
+            "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}}).to_string()).unwrap();
+    }
+    let personal = fs::read(home.0.join(".commit/profiles/personal/session.json")).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/logout"))
+        .and(body_json(json!({"token":"refresh-work"})))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        json_output(
+            home.command()
+                .args(["--profile", "work", "logout"])
+                .output()
+                .unwrap()
+        )["removed"],
+        true
+    );
+    assert!(!home.0.join(".commit/profiles/work/session.json").exists());
+    assert_eq!(
+        fs::read(home.0.join(".commit/profiles/personal/session.json")).unwrap(),
+        personal
+    );
 }

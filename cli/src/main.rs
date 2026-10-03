@@ -3,7 +3,7 @@ mod runtime;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use silicon_commit_client::{Client, Mutation};
+use silicon_commit_client::{Client, Mutation, validate_session_context};
 use std::{fs, path::PathBuf};
 
 #[derive(Parser, Clone)]
@@ -25,6 +25,9 @@ struct Root {
     token: Option<String>,
     #[arg(long, env = "COMMIT_ORG_ID")]
     org_id: Option<String>,
+    #[arg(long, global = true, env = "COMMIT_PROFILE", default_value = "default", value_parser = runtime::profile_name,
+        help = "Named account/organization profile; keeps production and each sandbox independent")]
+    profile: String,
     #[arg(
         long,
         global = true,
@@ -354,11 +357,20 @@ struct Session {
     api_url: String,
     org_id: Option<String>,
     #[serde(default)]
+    actor: Value,
+    #[serde(default)]
     test_key: Option<String>,
     #[serde(default)]
     expires_at: u64,
     #[serde(default)]
     refresh_started_at: Option<u64>,
+}
+
+struct SavedRequestContext {
+    api: String,
+    access_token: String,
+    actor: Value,
+    org_id: Option<String>,
 }
 
 fn now() -> u64 {
@@ -397,6 +409,8 @@ async fn session_lock() -> Result<fs::File, Box<dyn std::error::Error>> {
 async fn refresh_saved_session(
     api: &str,
     rejected_access: Option<&str>,
+    actor: &Value,
+    org: Option<&str>,
 ) -> Result<Option<Session>, Box<dyn std::error::Error>> {
     let _lock = session_lock().await?;
     // Re-read after acquiring the process lock: another command may already
@@ -404,6 +418,13 @@ async fn refresh_saved_session(
     let Some(mut session) = load_session() else {
         return Ok(None);
     };
+    validate_saved_session(&session)?;
+    if session.org_id.as_deref() != org
+        || session.actor["type"] != actor["type"]
+        || session.actor["public_id"] != actor["public_id"]
+    {
+        return Err("this profile changed accounts or organizations while the command was running; retry explicitly".into());
+    }
     let mut client = Client::new(api)?;
     if client.base_url() != Client::new(&session.api_url)?.base_url() {
         return Err("the selected API does not match the saved session; sign in for this API or supply an explicit token".into());
@@ -437,9 +458,16 @@ async fn refresh_saved_session(
             .with_mutation(Mutation::with_key(key)?)
             .refresh_session(&session.refresh_token)
             .await?;
+        if tokens.org_id != session.org_id
+            || tokens.actor["type"] != session.actor["type"]
+            || tokens.actor["public_id"] != session.actor["public_id"]
+        {
+            return Err(
+                "refresh changed this profile's actor or organization; sign in again".into(),
+            );
+        }
         session.access_token = tokens.access_token;
         session.refresh_token = tokens.refresh_token;
-        session.org_id = tokens.org_id.or(session.org_id);
         session.expires_at = started_at.saturating_add(tokens.expires_in.max(0) as u64);
         session.refresh_started_at = None;
         save_session(&session)?;
@@ -477,10 +505,14 @@ fn parse_todo_create(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
 }
 
 fn session_path() -> PathBuf {
-    configured_home_dir()
-        .unwrap_or_else(default_home_dir)
-        .join(".commit")
-        .join(runtime::session_file())
+    runtime::profile_directory().join(runtime::session_file())
+}
+fn validate_saved_session(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
+    validate_session_context(&session.actor, session.org_id.as_deref())?;
+    if session.access_token.is_empty() || session.refresh_token.is_empty() {
+        return Err("saved profile has no usable IAM 5 session; sign in again".into());
+    }
+    Ok(())
 }
 fn default_home_dir() -> PathBuf {
     std::env::var_os("SILICON_HOME")
@@ -533,17 +565,6 @@ fn load_session() -> Option<Session> {
 fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
     runtime::private_write(&session_path(), &serde_json::to_vec_pretty(s)?)
 }
-async fn remember_organization(token: &str, org: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let _lock = session_lock().await?;
-    if let Some(mut session) = load_session()
-        && session.access_token == token
-    {
-        session.org_id = Some(org.to_owned());
-        save_session(&session)?;
-    }
-    Ok(())
-}
-
 fn organization_from_status(status: &Value) -> Result<String, Box<dyn std::error::Error>> {
     if status["authenticated"] != true {
         return Err(
@@ -554,15 +575,7 @@ fn organization_from_status(status: &Value) -> Result<String, Box<dyn std::error
     if let Some(org) = status["org_id"].as_str().filter(|s| !s.is_empty()) {
         return Ok(org.to_owned());
     }
-    let organizations = status["organizations"]
-        .as_array()
-        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-        .unwrap_or_default();
-    match organizations.as_slice() {
-        [org] => Ok((*org).to_owned()),
-        [] => Err("Your session has no accessible organization. Check IAM organization access and sign in again.".into()),
-        _ => Err(format!("Choose an organization with --org-id. Available organizations: {}", organizations.join(", ")).into()),
-    }
+    Err("IAM 5 requires a login for one organization; sign in to a separate --profile for each organization".into())
 }
 async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
     let directory = match fs::read_to_string(home_dir_config_path()) {
@@ -571,7 +584,13 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_home_dir(),
         Err(error) => return Err(error.into()),
     };
-    let path = directory.join(".commit").join(runtime::session_file());
+    let directory = directory.join(".commit");
+    let directory = if runtime::profile() == "default" {
+        directory
+    } else {
+        directory.join("profiles").join(runtime::profile())
+    };
+    let path = directory.join(runtime::session_file());
     if !path.exists() {
         return Ok(());
     }
@@ -582,8 +601,14 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => return Err(error.into()),
     };
     let saved: Session = serde_json::from_slice(&bytes)?;
-    if saved.refresh_token.is_empty() {
-        return Err("the saved session has no refresh token".into());
+    validate_saved_session(&saved)?;
+    if a.org_id
+        .as_ref()
+        .is_some_and(|org| Some(org) != saved.org_id.as_ref())
+    {
+        return Err(
+            "--org-id does not match this saved profile; select a different --profile".into(),
+        );
     }
     let mut client = Client::new(&saved.api_url)?;
     if let Some(api) = &a.api_url
@@ -595,8 +620,6 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
         Some(key) => Mutation::with_key(key)?,
         None => Mutation::new(),
     });
-    // ponytail: legacy sessions do not store test context; callers must reuse
-    // their login selector until a future session format persists it.
     if saved.test_key.as_deref() != runtime::selected_key().as_deref() {
         return Err("saved session belongs to a different environment; sign in again".into());
     }
@@ -609,9 +632,9 @@ async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
 }
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    runtime::initialize();
     let result = match Root::try_parse() {
         Ok(mut args) => {
+            runtime::initialize(args.profile.clone(), args.test.clone());
             args.test = runtime::selected_key();
             let report = match &args.command {
                 Command::Report {
@@ -727,15 +750,22 @@ async fn run_with_session_recovery(mut args: Root) -> Result<(), Box<dyn std::er
         })
     );
     let mut used_access = None;
-    let first = run(args.clone(), &mut used_access, true).await;
+    let first = run(args.clone(), &mut used_access, true, None).await;
     if let Err(error) = first {
-        let Some((api, rejected)) = used_access.filter(|_| access_rejected(error.as_ref())) else {
+        let Some(context) = used_access.filter(|_| access_rejected(error.as_ref())) else {
             return Err(error);
         };
         // Reload under the same process lock used for proactive refresh. Adopt
         // another command's replacement instead of rotating a newer generation.
-        match refresh_saved_session(&api, Some(&rejected)).await {
-            Ok(Some(_)) => run(args, &mut None, false).await,
+        match refresh_saved_session(
+            &context.api,
+            Some(&context.access_token),
+            &context.actor,
+            context.org_id.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(_)) => run(args, &mut None, false, Some(&context)).await,
             Ok(None) => Err(error),
             Err(refresh_error) if is_status && access_rejected(refresh_error.as_ref()) => {
                 println!(
@@ -753,8 +783,9 @@ async fn run_with_session_recovery(mut args: Root) -> Result<(), Box<dyn std::er
 
 async fn run(
     a: Root,
-    rejected_access: &mut Option<(String, String)>,
+    rejected_access: &mut Option<SavedRequestContext>,
     retry_inactive_status: bool,
+    expected_context: Option<&SavedRequestContext>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let login_status = matches!(
         a.command,
@@ -793,7 +824,7 @@ async fn run(
         } => {
             println!(
                 "{}",
-                serde_json::json!({"home":configured_home_dir().unwrap_or_else(default_home_dir),"auto_update":daemon::updates_enabled(),"update_manager":"honeycomb","docs":"https://docs.commit.teamofsilicons.com","repository":"https://github.com/teamofsilicons/silicon-commit"})
+                serde_json::json!({"home":configured_home_dir().unwrap_or_else(default_home_dir),"profile":runtime::profile(),"auto_update":daemon::updates_enabled(),"update_manager":"honeycomb","docs":"https://docs.commit.teamofsilicons.com","repository":"https://github.com/teamofsilicons/silicon-commit"})
             );
             return Ok(());
         }
@@ -839,8 +870,33 @@ async fn run(
                     ..
                 }
         );
+    if let Some(expected) = expected_context {
+        let matches = saved.as_ref().is_some_and(|saved| {
+            uses_saved_session
+                && saved.actor["type"] == expected.actor["type"]
+                && saved.actor["public_id"] == expected.actor["public_id"]
+                && saved.org_id == expected.org_id
+        });
+        if !matches || Client::new(&api)?.base_url() != Client::new(&expected.api)?.base_url() {
+            return Err(
+                "this profile changed while the command was running; retry explicitly".into(),
+            );
+        }
+    }
     if uses_saved_session {
-        saved = match refresh_saved_session(&api, None).await {
+        let selected = saved
+            .as_ref()
+            .ok_or("saved session disappeared; sign in again")?;
+        validate_saved_session(selected)?;
+        if a.org_id
+            .as_ref()
+            .is_some_and(|org| Some(org) != selected.org_id.as_ref())
+        {
+            return Err("--org-id does not match this saved profile; log in to another --profile for that organization".into());
+        }
+        saved = match refresh_saved_session(&api, None, &selected.actor, selected.org_id.as_deref())
+            .await
+        {
             Ok(saved) => saved,
             Err(error)
                 if matches!(
@@ -864,7 +920,14 @@ async fn run(
         }
     });
     if uses_saved_session {
-        *rejected_access = token.clone().map(|token| (api.clone(), token));
+        *rejected_access = token.clone().and_then(|token| {
+            saved.as_ref().map(|saved| SavedRequestContext {
+                api: api.clone(),
+                access_token: token,
+                actor: saved.actor.clone(),
+                org_id: saved.org_id.clone(),
+            })
+        });
     }
     let org = a.org_id.clone().or_else(|| {
         if uses_saved_session {
@@ -921,9 +984,6 @@ async fn run(
             return Err(inactive_access());
         }
         let selected = organization_from_status(&status)?;
-        if uses_saved_session && let Some(token) = &token {
-            remember_organization(token, &selected).await?;
-        }
         c = c.with_org_id(selected);
     }
     let output = match a.command {
@@ -978,6 +1038,7 @@ async fn run(
                     refresh_token: s.refresh_token.clone(),
                     api_url: api,
                     org_id: s.org_id.clone(),
+                    actor: s.actor.clone(),
                     test_key: runtime::selected_key(),
                     expires_at: now().saturating_add(s.expires_in.max(0) as u64),
                     refresh_started_at: None,
