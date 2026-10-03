@@ -217,9 +217,11 @@ release still requires these contracts from the sibling services:
   lookup.
 - Register Commit’s documented OBO endpoint definitions in Honeycomb and
   approve the exact delegated features independently of ordinary login.
-- Cross-account OBO selection must disclose the selected membership context
-  needed by Commit’s resource ACLs. IAM 5 currently withholds this when the
-  selected account lacks an independent disclosure grant; Commit fails closed.
+- Cross-account OBO selection requires explicit per-provider account and
+  organization consent for the declared and approved identity, membership,
+  and tag disclosures along the delegation path. Commit applies its resource
+  ACLs to that selected context and fails closed when required disclosures
+  are absent; it never substitutes the initiating account.
 - IAM's closed capability catalog must add `commit.todos.manage` and
   `commit.projects.manage` before non-owner admins can receive those powers.
 
