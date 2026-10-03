@@ -1,3 +1,4 @@
+import { signInPopup, type IdentityKind } from "./popup";
 import {
   For,
   Match,
@@ -335,6 +336,18 @@ function Brand() {
   );
 }
 function Login(p: { error?: unknown }) {
+  const [loginError, setLoginError] = createSignal<unknown>();
+  const [signingIn, setSigningIn] = createSignal(false);
+  async function signIn(kind: IdentityKind) {
+    setSigningIn(true); setLoginError(undefined);
+    try {
+      setEnvironment("production"); await signInPopup(kind);
+      const current = await request<Session>("/auth/session");
+      if (!current.authenticated || current.actor?.type !== kind) throw new Error("Your account did not match this sign-in. Please try again.");
+      setSession(current); navigate("/todos");
+    } catch (error) { setLoginError(error); }
+    finally { setSigningIn(false); }
+  }
   return (
     <div class="login-layout">
       <section class="login-intro">
@@ -375,19 +388,14 @@ function Login(p: { error?: unknown }) {
           <p class="muted">
             Sign in with Silicon IAM to pick up where you left off.
           </p>
-          <ErrorBox error={p.error} />
+          <ErrorBox error={loginError() ?? p.error} />
           <Show when={location.hash.includes("error=login_failed")}>
             <div class="error-box">
               The login could not be completed. Continue with IAM to try again.
             </div>
           </Show>
-          <a
-            class="button primary full"
-            href="/auth/start"
-            onClick={() => setEnvironment("production")}
-          >
-            Continue with IAM <Icon name="arrow" />
-          </a>
+          <div class="actions"><button class="button primary" disabled={signingIn()} onClick={() => signIn("carbon")}>Continue as Carbon</button><button class="button" disabled={signingIn()} onClick={() => signIn("silicon")}>Continue as Silicon</button></div>
+          <p class="muted">Choose your account and organization in the IAM popup.</p>
           <TestingLogin />
           <p class="login-footnote">
             Identity and access are managed by Silicon IAM. Commit never asks
