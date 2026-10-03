@@ -64,10 +64,9 @@ function readLoginCookie(value: string, c: Config): LoginAttempt | null {
 }
 function popupResult(c: Config, attempt: LoginAttempt, ok: boolean, headers = new Headers()): Response {
   const nonce = randomBytes(18).toString("base64url");
-  const payload = JSON.stringify({ type: "commit:sign-in", attempt: attempt.attempt, kind: attempt.kind, ok });
   headers.set("content-type", "text/html; charset=utf-8"); headers.set("cache-control", "no-store");
   headers.set("content-security-policy", `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`);
-  return new Response(`<!doctype html><title>Commit sign-in</title><p>${ok ? "Signed in. You can close this window." : "Sign-in did not finish. Close this window and try again."}</p><script nonce="${nonce}">if(window.opener){window.opener.postMessage(${payload},${JSON.stringify(c.origin)});window.close();}</script>`, { headers });
+  return new Response(`<!doctype html><title>Commit sign-in</title><p>${ok ? "Signed in. You can close this window." : "Sign-in did not finish. Close this window and try again."}</p><script nonce="${nonce}" src="/popup-complete.js" data-attempt="${attempt.attempt}" data-kind="${attempt.kind}" data-ok="${ok}"></script>`, { headers });
 }
 export function seal(value: unknown, c: Config, scope: string) {
   const iv = randomBytes(12),

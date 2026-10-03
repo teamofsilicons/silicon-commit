@@ -590,7 +590,7 @@ test("typed popup binds kind and verifies live auth before issuing a session coo
     const callback = new URL(target.searchParams.get("redirect_uri")!); callback.searchParams.set("slt", "fixture");
     const result = await g(req(callback.pathname + callback.search, "GET", undefined, { cookie: start.headers.getSetCookie()[0].split(";")[0] }));
     const html = await result.text();
-    assert.match(html, new RegExp(`"ok":${matches}`)); assert.ok(!html.includes(tokens.access_token)); assert.ok(!html.includes(tokens.refresh_token));
+    assert.match(html, new RegExp(`data-ok="${matches}"`)); assert.ok(!html.includes(tokens.access_token)); assert.ok(!html.includes(tokens.refresh_token));
     assert.equal(result.headers.getSetCookie().some(c => c.startsWith("__Host-commit_production=")), matches);
   }
 });
