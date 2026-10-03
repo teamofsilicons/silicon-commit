@@ -145,7 +145,7 @@ gateway = createGateway(
       return Response.json({
         authenticated: true,
         app_id: "commit",
-        actor: pair.actor,
+        actor: { type: pair.actor.type, id: pair.actor.public_id },
         org_id: pair.org_id,
       });
     }

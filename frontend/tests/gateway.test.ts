@@ -225,7 +225,7 @@ test("unscoped IAM redirect binds callback to a browser state and fixed origin",
         authenticated: true,
         app_id: "commit",
         org_id: tokens.org_id,
-        actor: { type: "carbon", public_id: "person" },
+        actor: { type: "carbon", id: "person" },
       });
     assert.equal(u.pathname, "/api/v1/auth/login");
     assert.deepEqual(JSON.parse(i.body as string), { slt: "fixture" });
@@ -889,7 +889,10 @@ test("typed popup binds kind and verifies live auth before issuing a session coo
             authenticated: true,
             app_id: "commit",
             org_id: tokens.org_id,
-            actor: { ...actor, type: matches ? "silicon" : "carbon" },
+            actor: {
+              id: actor.public_id,
+              type: matches ? "silicon" : "carbon",
+            },
           }),
     );
     const attempt = "11111111-1111-4111-8111-111111111111";
@@ -943,14 +946,14 @@ test("popup status mismatch cannot install credentials or overwrite an existing 
     authenticated: true,
     app_id: "commit",
     org_id: tokens.org_id,
-    actor,
+    actor: { type: actor.type, id: actor.public_id },
   };
   const changes = [
     { authenticated: false },
     { app_id: "other" },
     { org_id: "another-org" },
-    { actor: { ...actor, public_id: "another-actor" } },
-    { actor: { ...actor, type: "carbon" } },
+    { actor: { type: actor.type, id: "another-actor" } },
+    { actor: { type: "carbon", id: actor.public_id } },
   ];
   for (const change of changes) {
     const jar = browserJar(cookie());
@@ -1021,7 +1024,7 @@ test("popup retry preserves the exact callback and exchange key across temporary
         authenticated: true,
         app_id: "commit",
         org_id: tokens.org_id,
-        actor,
+        actor: { type: actor.type, id: actor.public_id },
       });
     });
     const start = await g(
@@ -1060,7 +1063,7 @@ test("full-page sign-in binds kind and safe return path to the signed callback",
             authenticated: true,
             app_id: "commit",
             org_id: tokens.org_id,
-            actor: identity,
+            actor: { type: identity.type, id: identity.public_id },
           }),
     );
     const returnTo = "/#/projects/example?view=tasks";
