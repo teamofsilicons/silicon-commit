@@ -10,8 +10,6 @@ servers:
 - url: https://commit.teamofsilicons.com/api/v1
 security:
 - bearerAuth: []
-- oboAccess: []
-  oboAppId: []
 tags:
 - name: Operations
   description: Public build metadata for deployment verification.
@@ -1261,6 +1259,729 @@ paths:
       - $ref: '#/components/parameters/SupportedVersions'
       - $ref: '#/components/parameters/TestingAppSecret'
       - $ref: '#/components/parameters/TelemetryPreference'
+  /obo/todos/list:
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: List todos
+      operationId: delegated_listTodos
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - {name: view, in: query, schema: {type: string, enum: [assigned_to_me, delegated_by_me, all], default: assigned_to_me}}
+      - {name: status, in: query, schema: {$ref: '#/components/schemas/TodoStatus'}}
+      - {name: assigned_to, in: query, schema: {$ref: '#/components/schemas/ActorId'}}
+      - {name: assigned_by, in: query, schema: {$ref: '#/components/schemas/ActorId'}}
+      - {name: created_from, in: query, schema: {type: string, format: date-time}}
+      - {name: created_to, in: query, schema: {type: string, format: date-time}}
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - name: project_id
+        in: query
+        schema:
+          type: string
+          format: uuid
+        description: Filter by related project; private access remains enforced.
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      responses:
+        '200':
+          description: Filtered todos.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TodoPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/todos/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: Create a todo
+      operationId: delegated_createTodo
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TodoCreate'}
+      responses:
+        '201':
+          description: Todo created.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Location: {$ref: '#/components/headers/Location'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Todo'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/todos/{todo_id}/read:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: Get a todo
+      operationId: delegated_getTodo
+      responses:
+        '200':
+          description: Todo.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Todo'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /obo/todos/{todo_id}/update:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
+    patch:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: Update a todo
+      operationId: delegated_updateTodo
+      parameters: [$ref: '#/components/parameters/IdempotencyKey', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                title: {$ref: '#/components/schemas/TitleText'}
+                description: {$ref: '#/components/schemas/NullableDescriptionText'}
+                assigned_to: {$ref: '#/components/schemas/ActorId'}
+                status: {$ref: '#/components/schemas/TodoStatus'}
+                attachments: {type: array, maxItems: 20, uniqueItems: true, items: {$ref: '#/components/schemas/AttachmentUrl'}}
+                project_id:
+                  type:
+                  - string
+                  - 'null'
+                  format: uuid
+      responses:
+        '200':
+          description: Updated todo.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Todo'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/todos/{todo_id}/delete:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
+    delete:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: Delete a todo
+      operationId: delegated_deleteTodo
+      responses:
+        '204':
+          description: Todo deleted.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /obo/todos/{todo_id}/notes/list:
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: List todo notes
+      operationId: delegated_listTodoNotes
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/TodoId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      responses:
+        '200':
+          description: Notes in reverse creation order.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotePage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/todos/{todo_id}/notes/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Todos]
+      summary: Add a todo note
+      operationId: delegated_addTodoNote
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/TodoId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [body], additionalProperties: false, properties: {body: {$ref: '#/components/schemas/NoteText'}}}}}}
+      responses:
+        '201':
+          description: Note created.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Note'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/notification-settings/read:
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Notifications]
+      summary: Get the authenticated Silicon's notification settings
+      operationId: delegated_getNotificationSettings
+      description: Returns virtual version zero when the authenticated Silicon has never persisted settings. Carbons are forbidden.
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      responses:
+        '200':
+          description: Complete optional webhook destination and list-wide subscription.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationSettings'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/notification-settings/update:
+    put:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Notifications]
+      summary: Replace the authenticated Silicon's notification settings
+      operationId: delegated_replaceNotificationSettings
+      description: Complete optimistic-concurrency replacement. Both nullable properties must be sent explicitly.
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/NotificationIfMatch'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/NotificationSettingsUpdate'}
+      responses:
+        '200':
+          description: Current settings after replacement or an exact stale retry.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotificationSettings'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/todos/{todo_id}/notification-subscription/read:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Notifications]
+      summary: Get the authenticated Silicon's todo-specific subscription
+      operationId: delegated_getTodoNotificationSubscription
+      description: Available only to the Silicon which assigned this active delegated todo. Returns virtual version zero when no override resource exists.
+      responses:
+        '200':
+          description: Todo-specific override; a null subscription falls back to the current list-wide rule.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TodoNotificationSubscription'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /obo/todos/{todo_id}/notification-subscription/update:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/TodoId'
+    put:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Notifications]
+      summary: Replace the authenticated Silicon's todo-specific subscription
+      operationId: delegated_replaceTodoNotificationSubscription
+      description: Complete optimistic-concurrency replacement. A non-null rule exclusively overrides the list rule; null removes the active override and restores list-rule fallback.
+      parameters:
+      - $ref: '#/components/parameters/NotificationIfMatch'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TodoNotificationSubscriptionUpdate'}
+      responses:
+        '200':
+          description: Current todo-specific resource after replacement or an exact stale retry.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/NotificationETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TodoNotificationSubscription'}
+        '409': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/list:
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Projects]
+      summary: List projects
+      operationId: delegated_listProjects
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - {name: status, in: query, schema: {$ref: '#/components/schemas/ProjectStatus'}}
+      - {name: silicon_id, in: query, schema: {$ref: '#/components/schemas/ActorId'}}
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      responses:
+        '200':
+          description: Organization-visible projects.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Projects]
+      summary: Create a project
+      operationId: delegated_createProject
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectCreate'}}}}
+      responses:
+        '201':
+          description: Project created.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Location: {$ref: '#/components/headers/Location'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/read:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/ProjectId'
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Projects]
+      summary: Get a project
+      operationId: delegated_getProject
+      responses:
+        '200':
+          description: Project.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+      parameters:
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+  /obo/projects/{project_id}/update:
+    parameters:
+    - $ref: '#/components/parameters/OrgId'
+    - $ref: '#/components/parameters/RequestId'
+    - $ref: '#/components/parameters/ProjectId'
+    patch:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Projects]
+      summary: Update a project
+      operationId: delegated_updateProject
+      parameters: [$ref: '#/components/parameters/IdempotencyKey', $ref: '#/components/parameters/CommitVersion', $ref: '#/components/parameters/SupportedVersions', $ref: '#/components/parameters/TestingAppSecret', $ref: '#/components/parameters/TelemetryPreference']
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, minProperties: 1, additionalProperties: false, properties: {name: {$ref: '#/components/schemas/ProjectNameText'}, status: {$ref: '#/components/schemas/ProjectPatchStatus'}, silicon_ids: {
+                  type: array, maxItems: 100, uniqueItems: true, description: 'Complete replacement set; it must retain the project creator.', items: {$ref: '#/components/schemas/ActorId'}}, description: {type: string,
+                    maxLength: 100000, default: ''}, attachments: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/AttachmentUrl'}}, private: {type: boolean, default: false}, carbon_ids: {type: array,
+                    maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/ActorId'}}, tags: {type: array, maxItems: 100, items: {type: string, maxLength: 255}}}}
+      responses:
+        '200':
+          description: Updated project.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Project'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/diary/read:
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Diary]
+      summary: Get the project diary
+      operationId: delegated_getProjectDiary
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      responses:
+        '200':
+          description: Markdown diary.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Diary'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/diary/update:
+    put:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Diary]
+      summary: Replace the project diary
+      operationId: delegated_updateProjectDiary
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IfMatch'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [markdown], additionalProperties: false, properties: {markdown: {$ref: '#/components/schemas/DiaryMarkdown'}}}}}}
+      responses:
+        '200':
+          description: Updated diary.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            ETag: {$ref: '#/components/headers/ETag'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Diary'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/tasks/list:
+    get:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Work]
+      summary: List project tasks
+      operationId: delegated_listProjectTasks
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/Cursor'
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      responses:
+        '200':
+          description: Tasks and nested subtasks in reverse creation order.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectTaskPage'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/tasks/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Work]
+      summary: Create a project task
+      operationId: delegated_createProjectTask
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectTaskCreate'}}}}
+      responses:
+        '201':
+          description: Task or subtask created.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+            Location: {$ref: '#/components/headers/Location'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectTask'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/tasks/{task_id}/update:
+    patch:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Work]
+      summary: Update a project task
+      operationId: delegated_updateProjectTask
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - &id001
+        $ref: '#/components/parameters/ProjectId'
+      - &id002 {name: task_id, in: path, required: true, schema: {type: string, format: uuid}}
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {type: object, minProperties: 1, additionalProperties: false, properties: {title: {$ref: '#/components/schemas/TitleText'}, description: {$ref: '#/components/schemas/DescriptionText'},
+                status: {$ref: '#/components/schemas/TodoStatus'}, assigned_to: {oneOf: [$ref: '#/components/schemas/ActorId', type: 'null']}}}}}}
+      responses:
+        '200':
+          description: Updated task.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectTask'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/blockers/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Work]
+      summary: Add a project blocker
+      operationId: delegated_createBlocker
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BlockerCreate'}}}}
+      responses:
+        '201':
+          description: Blocker created.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectEntry'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/updates/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Work]
+      summary: Add a project update
+      operationId: delegated_createProjectUpdate
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectEntryCreate'}}}}
+      responses:
+        '201':
+          description: Update created.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectEntry'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /obo/projects/{project_id}/completion/create:
+    post:
+      security:
+      - oboAccess: []
+        oboAppId: []
+      tags: [Project Work]
+      summary: Complete a project
+      operationId: delegated_completeProject
+      parameters:
+      - $ref: '#/components/parameters/OrgId'
+      - $ref: '#/components/parameters/RequestId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/CommitVersion'
+      - $ref: '#/components/parameters/SupportedVersions'
+      - $ref: '#/components/parameters/TestingAppSecret'
+      - $ref: '#/components/parameters/TelemetryPreference'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectEntryCreate'}}}}
+      responses:
+        '201':
+          description: Completion entry created and project completed.
+          headers:
+            X-Request-ID: {$ref: '#/components/headers/XRequestId'}
+            Cache-Control: {$ref: '#/components/headers/CacheControl'}
+            Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProjectEntry'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer, bearerFormat: IAM access token}

@@ -218,6 +218,13 @@ test("a rejected refresh family clears the cookie after one renewal attempt", as
 });
 test("unscoped IAM redirect binds callback to a browser state and fixed origin", async () => {
   const g = gateway((u, i) => {
+    if (u.pathname.endsWith("/auth/status"))
+      return Response.json({
+        authenticated: true,
+        app_id: "commit",
+        org_id: tokens.org_id,
+        actor: { type: "carbon", public_id: "person" },
+      });
     assert.equal(u.pathname, "/api/v1/auth/login");
     assert.deepEqual(JSON.parse(i.body as string), { slt: "fixture" });
     assert.equal(new Headers(i.headers).has("x-org-id"), false);
@@ -846,4 +853,111 @@ test("legacy unscoped encrypted cookies require a new IAM login", async () => {
     contexts: [],
   });
   assert.equal(calls, 0);
+});
+
+test("typed popup binds kind and verifies live auth before issuing a session cookie", async () => {
+  for (const matches of [false, true]) {
+    const g = gateway((u) =>
+      u.pathname.endsWith("/auth/login")
+        ? Response.json(tokens)
+        : Response.json({
+            authenticated: true,
+            app_id: "commit",
+            org_id: tokens.org_id,
+            actor: { ...actor, type: matches ? "silicon" : "carbon" },
+          }),
+    );
+    const attempt = "11111111-1111-4111-8111-111111111111";
+    const start = await g(
+      req(`/auth/start?identity_kind=silicon&display=popup&attempt=${attempt}`),
+    );
+    const target = new URL(start.headers.get("location")!);
+    assert.equal(target.searchParams.get("identity_kind"), "silicon");
+    assert.equal(target.searchParams.get("display"), "popup");
+    const callback = new URL(target.searchParams.get("redirect_uri")!);
+    callback.searchParams.set("slt", "fixture");
+    const result = await g(
+      req(callback.pathname + callback.search, "GET", undefined, {
+        cookie: start.headers.getSetCookie()[0].split(";")[0],
+      }),
+    );
+    const html = await result.text();
+    assert.match(html, new RegExp(`data-ok="${matches}"`));
+    if (matches) {
+      const selected = result.headers
+        .getSetCookie()
+        .find((value) => value.startsWith("__Host-commit_production="))!
+        .split(";")[0]
+        .split("=")[1];
+      assert.match(html, new RegExp(`data-context="${selected}"`));
+    }
+    assert.ok(!html.includes(tokens.access_token));
+    assert.ok(!html.includes(tokens.refresh_token));
+    assert.equal(
+      result.headers
+        .getSetCookie()
+        .some((c) => c.startsWith("__Host-commit_production=")),
+      matches,
+    );
+  }
+});
+test("unknown popup kind and invalid attempt never contact upstream", async () => {
+  const g = gateway(() => {
+    throw new Error("unexpected upstream");
+  });
+  assert.equal((await g(req("/auth/start?identity_kind=other"))).status, 400);
+  assert.equal(
+    (await g(req("/auth/start?identity_kind=carbon&display=popup&attempt=bad")))
+      .status,
+    400,
+  );
+});
+
+test("popup status mismatch cannot install credentials or overwrite an existing account", async () => {
+  const verified = {
+    authenticated: true,
+    app_id: "commit",
+    org_id: tokens.org_id,
+    actor,
+  };
+  const changes = [
+    { authenticated: false },
+    { app_id: "other" },
+    { org_id: "another-org" },
+    { actor: { ...actor, public_id: "another-actor" } },
+    { actor: { ...actor, type: "carbon" } },
+  ];
+  for (const change of changes) {
+    const jar = browserJar(cookie());
+    const original = jar.cookie();
+    const g = gateway((u) =>
+      u.pathname.endsWith("/auth/login")
+        ? Response.json(tokens)
+        : Response.json({ ...verified, ...change }),
+    );
+    const start = await g(
+      req(
+        "/auth/start?identity_kind=silicon&display=popup&attempt=11111111-1111-4111-8111-111111111111",
+      ),
+    );
+    jar.apply(start);
+    const callback = new URL(
+      new URL(start.headers.get("location")!).searchParams.get("redirect_uri")!,
+    );
+    callback.searchParams.set("slt", "fixture");
+    const response = await g(
+      req(callback.pathname + callback.search, "GET", undefined, {
+        cookie: jar.cookie(),
+      }),
+    );
+    assert.match(await response.text(), /data-ok="false"/);
+    assert.equal(
+      response.headers
+        .getSetCookie()
+        .some((value) => value.startsWith("__Host-commit_")),
+      false,
+    );
+    jar.apply(response);
+    assert.equal(jar.cookie(), original);
+  }
 });

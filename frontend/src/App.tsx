@@ -1,3 +1,4 @@
+import { signInPopup, type IdentityKind } from "./popup";
 import {
   For,
   Match,
@@ -134,9 +135,8 @@ export default function App() {
                   </select>
                 </Field>
                 <Show when={environment() === "production"}>
-                  <a class="text-button" href="/auth/start">
-                    Add an account or organization
-                  </a>
+                  <p class="muted">Add an account or organization</p>
+                  <PopupSignIn />
                 </Show>
                 <ErrorBox error={changeContext.error()} />
               </div>
@@ -349,6 +349,68 @@ function Brand() {
     </a>
   );
 }
+function PopupSignIn() {
+  const [loginError, setLoginError] = createSignal<unknown>();
+  const [signingIn, setSigningIn] = createSignal(false);
+  const controller = new AbortController();
+  onCleanup(() => controller.abort());
+  async function signIn(kind: IdentityKind) {
+    if (signingIn()) return;
+    setSigningIn(true);
+    setLoginError(undefined);
+    if (environment() !== "production") setEnvironment("production");
+    const bound = captureContext();
+    const original = context();
+    const current = () => !controller.signal.aborted && context() === original;
+    try {
+      const completed = await signInPopup(kind, controller.signal);
+      if (!current()) return;
+      const value = await request<Session>("/auth/session", { context: bound });
+      if (!current()) return;
+      if (
+        !value.authenticated ||
+        value.actor?.type !== kind ||
+        value.context_id !== completed
+      )
+        throw new Error(
+          "Your account did not match this sign-in. Please try again.",
+        );
+      setSession(value);
+      navigate("/todos");
+    } catch (error) {
+      if (current()) setLoginError(error);
+    } finally {
+      if (!controller.signal.aborted) setSigningIn(false);
+    }
+  }
+  return (
+    <>
+      <div class="actions">
+        <button
+          type="button"
+          class="button primary"
+          disabled={signingIn()}
+          onClick={() => void signIn("carbon")}
+        >
+          Continue as Carbon
+        </button>
+        <button
+          type="button"
+          class="button"
+          disabled={signingIn()}
+          onClick={() => void signIn("silicon")}
+        >
+          Continue as Silicon
+        </button>
+      </div>
+      <p class="muted">
+        Choose your account and organization in the IAM popup.
+      </p>
+      <ErrorBox error={loginError()} />
+    </>
+  );
+}
+
 function Login(p: {
   error?: unknown;
   selectContext: (id: string) => Promise<void>;
@@ -400,13 +462,7 @@ function Login(p: {
               The login could not be completed. Continue with IAM to try again.
             </div>
           </Show>
-          <a
-            class="button primary full"
-            href="/auth/start"
-            onClick={() => setEnvironment("production")}
-          >
-            Continue with IAM <Icon name="arrow" />
-          </a>
+          <PopupSignIn />
           <For each={session().contexts || []}>
             {(saved) => (
               <button

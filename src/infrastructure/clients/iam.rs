@@ -1424,7 +1424,7 @@ mod tests {
     fn binding() -> models::OboTokenRequestBinding {
         models::OboTokenRequestBinding {
             method: "GET".into(),
-            path: "/api/v1/todos".into(),
+            path: "/api/v1/obo/todos/list".into(),
         }
     }
     fn obo_request() -> Result<AuthenticationRequest, Box<dyn std::error::Error>> {
@@ -1447,7 +1447,7 @@ mod tests {
             "issuer_app_id":"interface","originating_app_id":"interface",
             "org_id":"test-org","actor":{"type":"carbon","public_id":"c:test-carbon"},
             "authorization":authority,
-            "endpoint":{"app_id":"commit","endpoint_id":"commit.todos.list","path":"/api/v1/todos"},
+            "endpoint":{"app_id":"commit","endpoint_id":"commit.todos.list","path":"/api/v1/obo/todos/list"},
             "chain":[{"app_id":"interface","audience":"commit","endpoint_id":"commit.todos.list"}],
             "expires_at":(OffsetDateTime::now_utc()+time::Duration::minutes(30)).format(&Rfc3339)?}),
         )
@@ -1541,6 +1541,11 @@ mod tests {
             (
                 "/endpoint/endpoint_id",
                 json!("commit.todos.create"),
+                ProviderError::Unauthenticated,
+            ),
+            (
+                "/endpoint/path",
+                json!("/api/v1/todos"),
                 ProviderError::Unauthenticated,
             ),
             ("/active", json!(false), ProviderError::Unauthenticated),

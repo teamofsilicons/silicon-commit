@@ -49,6 +49,62 @@ function cookie(r: Request, name: string) {
     .filter((x) => x.startsWith(name + "="));
   return values.length === 1 ? values[0].slice(name.length + 1) : "";
 }
+type LoginAttempt = {
+  state: string;
+  kind: "carbon" | "silicon";
+  attempt: string;
+};
+function loginCookie(value: LoginAttempt, c: Config) {
+  const data = Buffer.from(JSON.stringify(value)).toString("base64url");
+  return (
+    data +
+    "." +
+    createHmac("sha256", c.key)
+      .update("login|" + data)
+      .digest("base64url")
+  );
+}
+function readLoginCookie(value: string, c: Config): LoginAttempt | null {
+  try {
+    const [data, signature, extra] = value.split(".");
+    const expected = createHmac("sha256", c.key)
+      .update("login|" + data)
+      .digest("base64url");
+    if (
+      extra ||
+      signature?.length !== expected.length ||
+      !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+    )
+      return null;
+    const result = JSON.parse(Buffer.from(data, "base64url").toString());
+    return ["carbon", "silicon"].includes(result.kind) &&
+      typeof result.state === "string" &&
+      typeof result.attempt === "string"
+      ? result
+      : null;
+  } catch {
+    return null;
+  }
+}
+function popupResult(
+  c: Config,
+  attempt: LoginAttempt,
+  ok: boolean,
+  headers = new Headers(),
+  contextId = "",
+): Response {
+  const nonce = randomBytes(18).toString("base64url");
+  headers.set("content-type", "text/html; charset=utf-8");
+  headers.set("cache-control", "no-store");
+  headers.set(
+    "content-security-policy",
+    `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`,
+  );
+  return new Response(
+    `<!doctype html><title>Commit sign-in</title><p>${ok ? "Signed in. You can close this window." : "Sign-in did not finish. Close this window and try again."}</p><script nonce="${nonce}" src="/popup-complete.js" data-attempt="${attempt.attempt}" data-kind="${attempt.kind}" data-ok="${ok}" data-context="${contextId}"></script>`,
+    { headers },
+  );
+}
 export function seal(value: unknown, c: Config, scope: string) {
   const iv = randomBytes(12),
     cipher = createCipheriv("aes-256-gcm", Buffer.from(c.key, "base64url"), iv);
@@ -328,9 +384,22 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
       );
     try {
       if (path === "/auth/start" && method === "GET") {
+        const kind = url.searchParams.get("identity_kind") ?? "carbon";
+        const popup = url.searchParams.get("display") === "popup";
+        const attemptId = popup ? (url.searchParams.get("attempt") ?? "") : "";
+        if (
+          !["carbon", "silicon"].includes(kind) ||
+          (popup && !/^[a-f0-9-]{36}$/.test(attemptId))
+        )
+          return failure(
+            400,
+            "Choose Carbon or Silicon and start sign-in again.",
+          );
         const state = randomBytes(24).toString("base64url"),
           login = new URL("/login", c.iam);
         login.searchParams.set("app_id", c.appId);
+        login.searchParams.set("identity_kind", kind);
+        if (popup) login.searchParams.set("display", "popup");
         login.searchParams.set(
           "redirect_uri",
           `${c.origin}/auth/callback?state=${state}`,
@@ -339,12 +408,13 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           status: 303,
           headers: {
             location: login.href,
-            "set-cookie": `commit_login=${state}; Max-Age=600${options(c)}`,
+            "set-cookie": `commit_login=${loginCookie({ state, kind: kind as "carbon" | "silicon", attempt: attemptId }, c)}; Max-Age=600${options(c)}`,
           },
         });
       }
       if (path === "/auth/callback" && method === "GET") {
-        const state = cookie(request, "commit_login"),
+        const attempt = readLoginCookie(cookie(request, "commit_login"), c);
+        const state = attempt?.state,
           supplied = url.searchParams.get("state") || "";
         if (
           !state ||
@@ -365,12 +435,49 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           },
           body: JSON.stringify({ slt: url.searchParams.get("slt") }),
         });
-        if (!r.ok)
+        if (!r.ok) {
+          if (attempt?.attempt)
+            return popupResult(
+              c,
+              attempt,
+              false,
+              new Headers({
+                "set-cookie": `commit_login=; Max-Age=0${options(c)}`,
+              }),
+            );
           return new Response(null, {
             status: 303,
             headers: { location: "/#/login?error=login_failed" },
           });
+        }
         const s = fromTokens(await r.json(), startedAt);
+        const statusResponse = await upstream("/auth/status", {
+          method: "GET",
+          headers: {
+            authorization: `Bearer ${s.access}`,
+            ...(s.org ? { "x-org-id": s.org } : {}),
+          },
+        });
+        const verified = statusResponse.ok ? await statusResponse.json() : null;
+        if (
+          !attempt ||
+          s.actor.type !== attempt.kind ||
+          verified?.authenticated !== true ||
+          verified.app_id !== c.appId ||
+          verified.actor?.type !== attempt.kind ||
+          verified.actor?.public_id !== s.actor.public_id ||
+          (s.org && verified.org_id !== s.org)
+        ) {
+          const h = new Headers({
+            "set-cookie": `commit_login=; Max-Age=0${options(c)}`,
+          });
+          return attempt?.attempt
+            ? popupResult(c, attempt, false, h)
+            : failure(
+                401,
+                "The returned account did not match your sign-in choice.",
+              );
+        }
         s.contextId = createHmac("sha256", c.key)
           .update("production|" + s.refresh)
           .digest("hex")
@@ -378,6 +485,10 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         const h = loginHeaders(s, c, "production");
         h.set("location", "/#/todos");
         h.append("set-cookie", `commit_login=; Max-Age=0${options(c)}`);
+        if (attempt.attempt) {
+          h.delete("location");
+          return popupResult(c, attempt, true, h, s.contextId);
+        }
         return new Response(null, { status: 303, headers: h });
       }
       if (path === "/auth/testing" && method === "POST") {

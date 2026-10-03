@@ -360,6 +360,30 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             "/projects/{project_id}/completion",
             post(projects::complete),
         )
+        // Each delegated action has one canonical IAM path; handlers retain their ACLs.
+        .route("/obo/todos/list", axum::routing::get(todos::list))
+        .route("/obo/todos/create", axum::routing::post(todos::create))
+        .route("/obo/todos/{todo_id}/read", axum::routing::get(todos::get))
+        .route("/obo/todos/{todo_id}/update", axum::routing::patch(todos::update))
+        .route("/obo/todos/{todo_id}/delete", axum::routing::delete(todos::delete))
+        .route("/obo/todos/{todo_id}/notes/list", axum::routing::get(todos::list_notes))
+        .route("/obo/todos/{todo_id}/notes/create", axum::routing::post(todos::add_note))
+        .route("/obo/notification-settings/read", axum::routing::get(notifications::get_settings))
+        .route("/obo/notification-settings/update", axum::routing::put(notifications::replace_settings))
+        .route("/obo/todos/{todo_id}/notification-subscription/read", axum::routing::get(notifications::get_todo_subscription))
+        .route("/obo/todos/{todo_id}/notification-subscription/update", axum::routing::put(notifications::replace_todo_subscription))
+        .route("/obo/projects/list", axum::routing::get(projects::list))
+        .route("/obo/projects/create", axum::routing::post(projects::create))
+        .route("/obo/projects/{project_id}/read", axum::routing::get(projects::get))
+        .route("/obo/projects/{project_id}/update", axum::routing::patch(projects::update))
+        .route("/obo/projects/{project_id}/diary/read", axum::routing::get(projects::get_diary))
+        .route("/obo/projects/{project_id}/diary/update", axum::routing::put(projects::replace_diary))
+        .route("/obo/projects/{project_id}/tasks/list", axum::routing::get(projects::list_tasks))
+        .route("/obo/projects/{project_id}/tasks/create", axum::routing::post(projects::create_task))
+        .route("/obo/projects/{project_id}/tasks/{task_id}/update", axum::routing::patch(projects::update_task))
+        .route("/obo/projects/{project_id}/blockers/create", axum::routing::post(projects::create_blocker))
+        .route("/obo/projects/{project_id}/updates/create", axum::routing::post(projects::create_update))
+        .route("/obo/projects/{project_id}/completion/create", axum::routing::post(projects::complete))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             contracts::negotiate,
@@ -802,6 +826,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingIdentity {
         calls: Mutex<Vec<(String, Option<String>)>>,
+        bindings: Mutex<Vec<Option<silicon_iam_client::models::OboTokenRequestBinding>>>,
     }
 
     impl RecordingIdentity {
@@ -820,6 +845,10 @@ mod tests {
         ) -> Result<VerifiedActor, ProviderError> {
             let mut calls = self.calls.lock().map_err(|_| ProviderError::Unavailable)?;
             calls.push((request.action.clone(), request.resource.clone()));
+            self.bindings
+                .lock()
+                .map_err(|_| ProviderError::Unavailable)?
+                .push(request_context::current_obo_request_binding());
             Err(ProviderError::Forbidden)
         }
 
@@ -1061,35 +1090,99 @@ mod tests {
         let identity = Arc::new(RecordingIdentity::default());
         let state = test_state(identity.clone())?;
         let app = router(state, &test_server_settings(1_048_576)?)?;
+        let catalog: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../deploy/obo-endpoints.json"))?;
+        assert_eq!(catalog.len(), cases.len());
+        let paths: std::collections::HashSet<_> =
+            catalog.iter().map(|row| row["path"].as_str()).collect();
+        assert_eq!(
+            paths.len(),
+            catalog.len(),
+            "IAM requires unique canonical OBO paths"
+        );
         for case in cases {
-            let mut builder = HttpRequest::builder()
-                .method(case.method.clone())
-                .uri(case.uri)
-                .header("x-org-id", "test-org")
-                .header(header::AUTHORIZATION, "Bearer opaque-token")
-                .header(CONTENT_TYPE, "application/json");
-            if case.idempotent {
-                builder = builder.header("idempotency-key", "route-test-key");
+            let endpoint = catalog
+                .iter()
+                .find(|row| row["endpoint_id"] == case.action)
+                .ok_or_else(|| anyhow::anyhow!("Missing OBO action {}", case.action))?;
+            let template = endpoint["path"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Missing OBO path"))?;
+            assert_eq!(endpoint["metadata"]["http_method"], case.method.as_str());
+            let alias = template
+                .replace("{todo_id}", TODO_ID)
+                .replace("{project_id}", PROJECT_ID)
+                .replace("{task_id}", TASK_ID);
+            for delegated in [false, true] {
+                let uri = if delegated { alias.as_str() } else { case.uri };
+                let mut builder = HttpRequest::builder()
+                    .method(case.method.clone())
+                    .uri(uri)
+                    .header("x-org-id", "test-org")
+                    .header(CONTENT_TYPE, "application/json");
+                builder = if delegated {
+                    builder
+                        .header("x-app-id", "interface")
+                        .header("x-iam-obo-access-token", "oba_test")
+                } else {
+                    builder.header(header::AUTHORIZATION, "Bearer opaque-token")
+                };
+                if case.idempotent {
+                    builder = builder.header("idempotency-key", "route-test-key");
+                }
+                if case.if_match {
+                    builder = builder.header(header::IF_MATCH, "\"1\"");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(builder.body(Body::from(case.body.unwrap_or_default()))?)
+                    .await?;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "{} {} did not reach IAM",
+                    case.method,
+                    uri
+                );
+                assert_eq!(
+                    identity.take_calls(),
+                    vec![(case.action.to_owned(), case.resource.clone())],
+                    "{} {} used the wrong IAM action/resource",
+                    case.method,
+                    uri
+                );
+                let bindings = std::mem::take(
+                    &mut *identity
+                        .bindings
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Poisoned binding lock"))?,
+                );
+                let expected =
+                    delegated.then(|| silicon_iam_client::models::OboTokenRequestBinding {
+                        method: case.method.to_string(),
+                        path: template.to_owned(),
+                    });
+                assert_eq!(
+                    serde_json::to_value(bindings)?,
+                    serde_json::to_value(vec![expected])?
+                );
             }
-            if case.if_match {
-                builder = builder.header(header::IF_MATCH, "\"1\"");
-            }
-            let request = builder.body(Body::from(case.body.unwrap_or_default()))?;
-            let response = app.clone().oneshot(request).await?;
-            assert_eq!(
-                response.status(),
-                StatusCode::FORBIDDEN,
-                "{} {} did not reach IAM",
-                case.method,
-                case.uri
-            );
-            assert_eq!(
-                identity.take_calls(),
-                vec![(case.action.to_owned(), case.resource)],
-                "{} {} used the wrong IAM binding",
-                case.method,
-                case.uri
-            );
+            let wrong_method = if case.method == Method::GET {
+                Method::POST
+            } else {
+                Method::GET
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(wrong_method)
+                        .uri(&alias)
+                        .body(Body::empty())?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert!(identity.take_calls().is_empty());
         }
         Ok(())
     }
