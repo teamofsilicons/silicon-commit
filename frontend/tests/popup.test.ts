@@ -1,6 +1,16 @@
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { matchesSignIn } from "../src/popup.ts";
+beforeEach(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    },
+  });
+});
 test("popup completion binds exact source, origin, nonce and chosen kind", () => {
   const popup = {} as Window;
   const event = {
@@ -105,6 +115,7 @@ test("blocked popup offers an explicit typed full-page continuation without toke
     "/#/projects/project-a?view=tasks",
   );
   assert.deepEqual([...target.searchParams.keys()].sort(), [
+    "context_id",
     "identity_kind",
     "return_to",
   ]);

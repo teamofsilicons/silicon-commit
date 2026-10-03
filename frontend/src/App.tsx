@@ -40,6 +40,7 @@ export default function App() {
     () => request<Session>("/auth/session"),
   );
   createEffect(() => {
+    if (auth.error) return;
     const s = auth();
     if (
       s &&
@@ -62,10 +63,11 @@ export default function App() {
   );
   const changeContext = useAction();
   async function selectContext(contextId: string) {
-    await request<Session>("/auth/context", {
+    const selected = await request<Session>("/auth/context", {
       method: "POST",
       body: { context_id: contextId },
     });
+    setSession(selected);
     await refetch();
     setMobile(false);
   }
@@ -88,7 +90,16 @@ export default function App() {
       >
         <Show
           when={session().authenticated}
-          fallback={<Login error={auth.error} selectContext={selectContext} />}
+          fallback={
+            <Login
+              error={auth.error}
+              selectContext={selectContext}
+              recoverContext={async () => {
+                setSession({ authenticated: false });
+                await refetch();
+              }}
+            />
+          }
         >
           <div class="app-shell">
             <a
@@ -374,12 +385,17 @@ function PopupSignIn() {
     try {
       const completed = await signInPopup(kind, pending.signal);
       if (!current()) return;
-      const value = await request<Session>("/auth/session", { context: bound });
+      const value = await request<Session>("/auth/activate", {
+        method: "POST",
+        context: bound,
+        signal: pending.signal,
+        body: { context_id: completed.contextId, attempt: completed.attempt },
+      });
       if (!current()) return;
       if (
         !value.authenticated ||
         value.actor?.type !== kind ||
-        value.context_id !== completed
+        value.context_id !== completed.contextId
       )
         throw new Error(
           "Your account did not match this sign-in. Please try again.",
@@ -444,6 +460,7 @@ function PopupSignIn() {
 function Login(p: {
   error?: unknown;
   selectContext: (id: string) => Promise<void>;
+  recoverContext: () => Promise<void>;
 }) {
   const savedAction = useAction();
   return (
@@ -487,6 +504,16 @@ function Login(p: {
             Sign in with Silicon IAM to pick up where you left off.
           </p>
           <ErrorBox error={p.error} />
+          <Show when={p.error}>
+            <button
+              type="button"
+              class="button"
+              disabled={savedAction.busy()}
+              onClick={() => void savedAction.run(p.recoverContext)}
+            >
+              Start a new sign-in
+            </button>
+          </Show>
           <Show when={location.hash.includes("error=login_failed")}>
             <div class="error-box">
               The login could not be completed. Continue with IAM to try again.

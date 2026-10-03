@@ -1,3 +1,4 @@
+import { saveSelectedContext } from "./selected-context.ts";
 import { Show, createSignal } from "solid-js";
 import {
   environment,
@@ -10,7 +11,8 @@ import {
 import { ErrorBox, Field, Submit, useAction } from "./ui";
 export function TestingLogin() {
   const [secret, setSecret] = createSignal(""),
-    [identity, setIdentity] = createSignal("");
+    [identity, setIdentity] = createSignal(""),
+    [organization, setOrganization] = createSignal("");
   const action = useAction();
   return (
     <section class="panel testing-setup">
@@ -25,6 +27,7 @@ export function TestingLogin() {
           void action.run(async () => {
             const selected = await request<{
               environment_id: string;
+              context_id: string;
               name: string;
             }>("/auth/testing", {
               method: "POST",
@@ -32,6 +35,7 @@ export function TestingLogin() {
               production: true,
             });
             setSecret("");
+            saveSelectedContext(selected.environment_id, selected.context_id);
             setEnvironment(selected.environment_id);
             sessionStorage.setItem(
               "commit.test.name." + selected.environment_id,
@@ -59,7 +63,12 @@ export function TestingLogin() {
             void action.run(async () => {
               const result = await request<any>("/auth/login", {
                 method: "POST",
-                body: { slt: identity() },
+                body: {
+                  slt: identity().trim(),
+                  ...(organization().trim()
+                    ? { org_id: organization().trim() }
+                    : {}),
+                },
               });
               setIdentity("");
               setSession(result);
@@ -74,9 +83,23 @@ export function TestingLogin() {
               autocomplete="off"
               value={identity()}
               onInput={(e) => setIdentity(e.currentTarget.value)}
-              placeholder="alice or builder:team"
+              placeholder="oac_… or c:alice / si:builder"
             />
           </Field>
+          <Field label="Testing organization">
+            <input
+              value={organization()}
+              onInput={(e) => setOrganization(e.currentTarget.value)}
+              placeholder="test-team"
+              pattern="[a-z0-9_-]{3,50}"
+              required={!/^oac_[A-Za-z0-9_-]{43}$/.test(identity().trim())}
+              title="3–50 lowercase letters, numbers, underscores or hyphens"
+            />
+          </Field>
+          <p class="muted">
+            Required for a public Carbon or Silicon ID. With an IAM short-lived
+            code, this only checks the organization already selected by IAM.
+          </p>
           <Submit busy={action.busy()} label="Sign in to sandbox" />
         </form>
       </Show>

@@ -1,3 +1,4 @@
+import { selectedContext } from "./selected-context.ts";
 export type IdentityKind = "carbon" | "silicon";
 export class PopupBlockedError extends Error {
   constructor() {
@@ -9,6 +10,7 @@ export function continueSignInHere(kind: IdentityKind, signal?: AbortSignal) {
   if (signal?.aborted) throw new Error("Sign-in cancelled. Please try again.");
   const start = new URL("/auth/start", window.location.origin);
   start.searchParams.set("identity_kind", kind);
+  start.searchParams.set("context_id", selectedContext("production"));
   start.searchParams.set(
     "return_to",
     "/" + (window.location.hash || "#/todos"),
@@ -35,14 +37,14 @@ export function matchesSignIn(
 export function signInPopup(
   kind: IdentityKind,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<{ contextId: string; attempt: string }> {
   if (signal?.aborted)
     return Promise.reject(new Error("Sign-in cancelled. Please try again."));
   const attempt = crypto.randomUUID();
   let popup: Window | null;
   try {
     popup = window.open(
-      `/auth/start?identity_kind=${kind}&display=popup&attempt=${attempt}`,
+      `/auth/start?identity_kind=${kind}&display=popup&attempt=${attempt}&context_id=${selectedContext("production")}`,
       `commit-login-${attempt}`,
       "popup,width=520,height=720",
     );
@@ -73,7 +75,7 @@ export function signInPopup(
         return;
       settled = true;
       cleanup();
-      if (event.data.ok) resolve(event.data.contextId);
+      if (event.data.ok) resolve({ contextId: event.data.contextId, attempt });
       else
         reject(
           new Error(
