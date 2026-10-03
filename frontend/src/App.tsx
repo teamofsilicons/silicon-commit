@@ -197,20 +197,29 @@ export default function App() {
                 >
                   ☰
                 </button>
-                <div class="breadcrumb">
-                  Silicon / <strong>Commit</strong>
-                  <span class="divider" />
-                  <span
-                    class={
-                      "environment-label " +
-                      (environment() !== "production" ? "test" : "")
-                    }
+                <div class="workspace-context">
+                  <div class="breadcrumb">
+                    Silicon / <strong>Commit</strong>
+                    <span class="divider" />
+                    <span
+                      class={
+                        "environment-label " +
+                        (environment() !== "production" ? "test" : "")
+                      }
+                    >
+                      <span />
+                      {environment() === "production"
+                        ? "Production"
+                        : "Testing workspace"}
+                    </span>
+                  </div>
+                  <div
+                    class="active-account"
+                    aria-label="Current account and organization"
+                    title={`${session().actor?.public_id} · ${session().org_id}`}
                   >
-                    <span />
-                    {environment() === "production"
-                      ? "Production"
-                      : "Testing workspace"}
-                  </span>
+                    {session().actor?.public_id} · {session().org_id}
+                  </div>
                 </div>
                 <button
                   class="text-button"

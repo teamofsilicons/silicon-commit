@@ -1,0 +1,306 @@
+/* UIArc free Button CSS adaptation. Copyright (c) 2026 Elia Kuratli, MIT.
+   Pinned source and license: UIARC.md and licenses/uiarc-MIT.txt. */
+:root {
+  --arc-surface: #fff;
+  --arc-muted: #f3f4f2;
+  --arc-ink: #202521;
+  --arc-secondary: #616861;
+  --arc-line: #dfe3df;
+  --arc-focus: #1f5fb8;
+  --arc-radius: 12px;
+  --arc-fast: 150ms;
+  --arc-ease: cubic-bezier(0.2, 0, 0, 1);
+}
+.button {
+  position: relative;
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid var(--arc-line);
+  border-radius: var(--arc-radius);
+  padding: 0 16px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color var(--arc-fast) var(--arc-ease),
+    background var(--arc-fast) var(--arc-ease),
+    border-color var(--arc-fast) var(--arc-ease),
+    box-shadow var(--arc-fast) var(--arc-ease);
+}
+.button:focus-visible {
+  outline: 2px solid var(--arc-focus);
+  outline-offset: 3px;
+}
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+.button[aria-busy="true"] {
+  cursor: progress;
+}
+.button:is(
+  [aria-haspopup]:not([aria-haspopup="false"]),
+  [data-state],
+  [role="combobox"]
+) {
+  transform: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  .button:hover:not(:disabled) {
+    box-shadow: 0 1px 3px #18241c0d;
+  }
+}
+.button:active:not(:disabled) {
+  opacity: 0.84;
+}
+@media (prefers-reduced-motion: reduce) {
+  .button {
+    transition: none;
+  }
+}
+/* UIArc Input: stable geometry, contracting focus halo and explicit invalid state. */
+:is(input:not([type="checkbox"]), select, textarea) {
+  border: 1px solid var(--arc-line);
+  border-radius: var(--arc-radius);
+  background: var(--arc-surface);
+  box-shadow: 0 0 0 6px transparent;
+  transition:
+    border-color var(--arc-fast) var(--arc-ease),
+    box-shadow 200ms var(--arc-ease);
+}
+:is(input:not([type="checkbox"]), select, textarea):focus-visible {
+  border-color: var(--arc-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--arc-focus) 16%, transparent);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+:is(input:not([type="checkbox"]), select, textarea)[aria-invalid="true"] {
+  border-color: #ae3d3a;
+}
+@media (prefers-reduced-motion: reduce) {
+  :is(input:not([type="checkbox"]), select, textarea) {
+    transition: none;
+  }
+}
+/* UIArc Segmented Control: compact scrolling rail, quiet raised selection. */
+.tabs {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  gap: 2px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 4px;
+  border: 1px solid var(--arc-line);
+  border-radius: 12px;
+  background: var(--arc-muted);
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tabs > button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0 13px;
+  background: transparent;
+  color: var(--arc-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    color var(--arc-fast) var(--arc-ease),
+    background var(--arc-fast) var(--arc-ease);
+}
+.tabs
+  > button:is(
+    [aria-selected="true"],
+    [aria-checked="true"],
+    [aria-pressed="true"]
+  ) {
+  color: var(--arc-ink);
+  background: var(--arc-surface);
+  border-color: var(--arc-line);
+  box-shadow: 0 1px 3px #18241c0d;
+}
+.tabs > button:focus-visible {
+  outline: 2px solid var(--arc-focus);
+  outline-offset: -2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tabs > button {
+    transition: none;
+  }
+}
+
+/* App-specific surfaces retain Commit's blue identity and dense work tables. */
+:root {
+  --radius: 16px;
+  --line: #e3e6e2;
+  background: #f8f9f6;
+  --muted: #616963;
+}
+.sidebar {
+  background: #fff;
+  padding-top: 30px;
+}
+.sidebar nav a {
+  border-radius: 11px;
+}
+.sidebar nav a.active {
+  background: #edf3fb;
+  color: #1f5fb8;
+}
+.org-picker {
+  padding: 14px 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fafbf9;
+}
+.org-picker .field > span {
+  letter-spacing: 0.08em;
+}
+.org-picker .text-button {
+  text-align: left;
+  padding: 8px 0 0;
+  line-height: 1.5;
+}
+.topbar {
+  background: #ffffffc9;
+}
+.page-heading h1 {
+  font-size: 36px;
+  font-weight: 550;
+  letter-spacing: -0.055em;
+}
+.work-panel {
+  box-shadow: 0 2px 4px #26352303;
+}
+.work-panel thead {
+  background: #fafbf9;
+}
+.button {
+  border-radius: 999px;
+}
+.button.primary {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.toolbar {
+  gap: 16px;
+}
+.tabs {
+  border-bottom: 1px solid var(--arc-line);
+  width: fit-content;
+}
+.tabs button.active {
+  color: var(--arc-ink);
+  background: var(--arc-surface);
+}
+.tabs.section-tabs {
+  margin-bottom: 20px;
+}
+.status {
+  border-radius: 999px;
+  padding: 5px 9px;
+}
+@media (max-width: 640px) {
+  .page-heading h1 {
+    font-size: 30px;
+  }
+  .tabs {
+    width: 100%;
+  }
+  .tabs > button {
+    flex: 1 0 auto;
+    min-height: 40px;
+  }
+  .button,
+  .button.small,
+  .icon-button {
+    min-height: 44px;
+  }
+  .icon-button {
+    min-width: 44px;
+  }
+  .toolbar {
+    align-items: stretch;
+  }
+}
+
+/* Keep title, state and open action visible together on narrow screens. */
+@media (max-width: 640px) {
+  .todo-table :is(th, td):is(:nth-child(3), :nth-child(4), :nth-child(5)) {
+    display: none;
+  }
+  .todo-table td:first-child {
+    min-width: 0;
+    width: auto;
+    overflow-wrap: anywhere;
+  }
+  .todo-table :is(th, td) {
+    padding: 16px 12px;
+  }
+  .todo-table td:last-child {
+    width: 42px;
+    padding-inline: 4px;
+  }
+  .todo-table td:last-child a {
+    display: flex;
+    min-width: 36px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+  }
+  .todo-table .status {
+    white-space: nowrap;
+  }
+}
+
+.workspace-context {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-right: auto;
+}
+.active-account {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar > .text-button {
+  flex-shrink: 0;
+}
+@media (max-width: 850px) {
+  .topbar {
+    height: 76px;
+  }
+  .workspace-context {
+    flex: 1;
+  }
+  .workspace-context .breadcrumb {
+    flex-wrap: wrap;
+    font-size: 11px;
+    margin: 0;
+  }
+  .workspace-context .divider {
+    margin: 0 3px;
+  }
+  .active-account {
+    font-size: 12px;
+    color: var(--ink);
+  }
+}

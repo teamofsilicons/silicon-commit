@@ -18,6 +18,7 @@ import {
   Modal,
   Status,
   StatusSelect,
+  segmentKeys,
   Submit,
   date,
   label,
@@ -472,6 +473,8 @@ export function ProjectDetail(p: { id: string }) {
                     <button
                       role="tab"
                       aria-selected={tab() === key}
+                      tabIndex={tab() === key ? 0 : -1}
+                      onKeyDown={segmentKeys}
                       class={tab() === key ? "active" : ""}
                       onClick={() => setTab(key)}
                     >

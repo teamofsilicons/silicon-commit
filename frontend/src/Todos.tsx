@@ -17,6 +17,7 @@ import {
   Modal,
   Status,
   StatusSelect,
+  segmentKeys,
   Submit,
   date,
   label,
@@ -120,7 +121,7 @@ export function TodoForm(p: {
               maxLength={255}
               value={assigned()}
               onInput={(e) => setAssigned(e.currentTarget.value)}
-              placeholder="e.g. engineer:tos"
+              placeholder="e.g. si:engineer"
             />
           </Field>
           <Field label="Status">
@@ -233,6 +234,8 @@ export function Todos() {
                 <button
                   role="tab"
                   aria-selected={view() === value}
+                  tabIndex={view() === value ? 0 : -1}
+                  onKeyDown={segmentKeys}
                   class={view() === value ? "active" : ""}
                   onClick={() => setView(value)}
                 >
@@ -362,7 +365,7 @@ export function Todos() {
             }
           >
             <div class="table-wrap">
-              <table>
+              <table class="todo-table" aria-label="Todos">
                 <thead>
                   <tr>
                     <th>Work</th>
