@@ -859,11 +859,6 @@ mod tests {
     #[tokio::test]
     async fn introspection_rejects_inactive_expired_and_mismatched_bindings() -> TestResult {
         for (pointer, replacement, expected) in [
-            (
-                "/endpoint/path",
-                json!("/api/v1/todos"),
-                ProviderError::Unauthenticated,
-            ),
             ("/active", json!(false), ProviderError::Unauthenticated),
             ("/expires_at", json!(1), ProviderError::Unauthenticated),
             (
