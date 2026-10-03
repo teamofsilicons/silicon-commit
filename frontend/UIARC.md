@@ -9,3 +9,5 @@ The local adaptation retains semantic native controls, focus-visible rings, touc
 reduced-motion support and restrained surface/selection styles. It uses the existing app
 framework and identity palette rather than adding a second runtime. CSS tokens are scoped
 with an `arc` prefix; controls retain existing click, busy, validation and authorization behavior.
+
+The static build also ships the MIT notice at `/licenses/uiarc-MIT.txt`; the source CSS retains an attribution comment.
