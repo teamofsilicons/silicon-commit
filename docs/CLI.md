@@ -28,15 +28,23 @@ Writes accept `--data JSON` or `--data @FILE`. Reuse an idempotency key for a re
 
 ## Organization selection and recovery
 
-For an unscoped login, Commit discovers the organizations authorized by IAM. If exactly one is available, ordinary commands select it and remember it for the saved session. With several organizations, use `--org-id HANDLE`; the CLI lists the available choices. Explicit `--token` calls do not inherit or modify a saved session's organization.
+IAM 5 login returns one Carbon or Silicon and one organization. Use `--profile NAME` or `COMMIT_PROFILE` to save several independent accounts or organization logins. The default profile is `default`; names use 1–64 lowercase letters, numbers, underscores or hyphens. A saved profile's actor and organization never change during refresh; `--org-id` must match its saved organization. To use another organization, log in under another profile. Legacy unscoped or actorless session files require a fresh login. Explicit `--token` calls remain caller-managed and do not inherit or modify a saved session's organization.
+
+```sh
+commit --profile personal --org-id team-a login '<oac_code>'
+commit --profile work --org-id team-b login '<oac_code>'
+commit --profile personal todos list
+COMMIT_PROFILE=work commit projects list
+commit --profile work logout
+```
 
 `commit report "DETAILS"` saves a private local Markdown copy if submission fails, including when authentication or organization discovery fails. The command still exits with the original failure so automation can distinguish local saving from submission. Use `--save-only` to write a report without contacting the service.
 
 ## Sessions and configuration
 
-State is stored in `$SILICON_HOME/.commit` or `$HOME/.commit`. `commit config home DIRECTORY` selects an existing directory; the pointer remains in the original configuration root. Production uses `session.json`; every sandbox secret has a separate hashed session filename. Files are atomically saved with private permissions.
+State is stored in `$SILICON_HOME/.commit` or `$HOME/.commit`. `commit config home DIRECTORY` selects an existing directory; the pointer remains in the original configuration root. The default profile keeps `session.json` and hashed sandbox session filenames. Named profiles use `profiles/NAME/` with their own production session, sandbox sessions, and saved testing selector. Files are atomically saved with private permissions.
 
-`--api-url`, `--token`, `--org-id` and their `COMMIT_API_URL`, `COMMIT_ACCESS_TOKEN`, `COMMIT_ORG_ID` environment variables override saved values. Default backend: `https://backend.commit.teamofsilicons.com`. `commit logout` revokes and removes only the selected saved session. It retains the file on failure. `commit login SLT --no-save` prints tokens instead of persisting them; treat that output as secret.
+`--api-url`, `--token`, `--org-id` and their environment variables configure explicit calls; saved credentials cannot be sent to another API or organization. `--profile` takes precedence over `COMMIT_PROFILE`. Default backend: `https://backend.commit.teamofsilicons.com`. `commit logout` revokes and removes only the selected saved session. It retains the file on failure. `commit login SLT --no-save` prints tokens instead of persisting them; treat that output as secret.
 
 ```sh
 commit config show
@@ -76,4 +84,4 @@ commit todos create --data '{"title":"Eat","assigned_to":"assistant:example-org"
 
 `--data @file.json` accepts the same object. Optional fields are `description`, `status`, `attachments`, and `project_id`; run `commit todos create --help` for types and values. `assignee` and `assignee_id` are not supported. The CLI rejects these fields and missing or non-string required fields before making a request. Other validation remains on the server; a 422 error retains its request ID and points to the command's schema help. Errors go to stderr with a nonzero exit status.
 
-Authenticated commands, including `login status`, automatically rotate the saved session within 60 seconds of access-token expiry. Older session files without expiry refresh once. Concurrent commands serialize rotation; retries after uncertain responses reuse the same key and retain the saved credentials until replacement tokens arrive. Refresh uses only the session's saved server and selected test environment. An explicit `--token` remains caller-managed.
+Authenticated commands, including `login status`, automatically rotate the saved session within 60 seconds of access-token expiry. Scoped IAM 5 session files without expiry refresh once; older actorless or unscoped sessions require reauthentication. Concurrent commands serialize rotation; retries after uncertain responses reuse the same key and retain the saved credentials until replacement tokens arrive. Refresh uses only the session's saved server, actor, organization, and selected test environment. An account change during a request stops automatic replay instead of sending the pending operation as the replacement account. An explicit `--token` remains caller-managed.
