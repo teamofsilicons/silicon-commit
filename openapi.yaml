@@ -160,7 +160,7 @@ paths:
               type: object
               required: [slt]
               additionalProperties: false
-              properties: {slt: {type: string, minLength: 1}}
+              properties: {slt: {type: string, minLength: 1}, org_id: {type: string, pattern: "^[a-z0-9_-]{3,50}$", description: "Selected organization; required for a testing actor with multiple memberships."}}
       responses:
         '200': {description: Session tokens and verified actor context., content: {application/json: {schema: {type: object}}}}
         default: {$ref: '#/components/responses/Error'}

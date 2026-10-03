@@ -196,31 +196,7 @@ async fn verified_status(
     token: &str,
     org_id: Option<&PublicOrganizationId>,
 ) -> Result<serde_json::Value, AppError> {
-    let snapshots = if let Some(org) = org_id {
-        client
-            .oauth()
-            .authorization(token, Some(org.as_str()))
-            .await
-            .map_err(map_error)?
-            .map(|snapshot| vec![snapshot])
-    } else {
-        client
-            .oauth()
-            .authorizations(token)
-            .await
-            .map_err(map_error)?
-    }
-    .ok_or(AppError::Unauthenticated)?;
-    let first = snapshots.first().ok_or(AppError::Unauthenticated)?;
-    if snapshots.iter().any(|snapshot| {
-        snapshot.audience != app_id
-            || !snapshot_environment_matches(snapshot.testing_environment_id)
-            || snapshot.public_id != first.public_id
-            || snapshot.actor_type != first.actor_type
-            || org_id.is_some_and(|org| snapshot.org_id != org.as_str())
-    }) {
-        return Err(AppError::Unauthenticated);
-    }
+    let first = ordinary_snapshot(client, app_id, token, org_id).await?;
     let actor = crate::domain::ActorRef::new(
         match first.actor_type.as_ref() {
             Some(models::ApplicationAuthorizationActorType::Carbon) => {
@@ -241,23 +217,9 @@ async fn verified_status(
             .parse()
             .map_err(|_| AppError::BadGateway)?,
     );
-    let organizations = snapshots
-        .iter()
-        .map(|snapshot| {
-            snapshot
-                .org_id
-                .parse::<PublicOrganizationId>()
-                .map_err(|_| AppError::BadGateway)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::json!({
-        "authenticated": true,
-        "app_id": app_id,
-        "actor": actor,
-        "org_id": org_id.map(PublicOrganizationId::as_str).or_else(|| {
-            (organizations.len() == 1).then(|| organizations[0].as_str())
-        }),
-        "organizations": organizations,
+        "authenticated": true, "app_id": app_id, "actor": actor,
+        "org_id": first.org_id, "organizations": [first.org_id],
     }))
 }
 
@@ -266,6 +228,7 @@ async fn verified_status(
 #[serde(deny_unknown_fields)]
 pub(crate) struct Login {
     slt: SecretString,
+    org_id: Option<String>,
 }
 
 /// A refresh token continues an existing application session.
@@ -306,29 +269,135 @@ async fn selected_organizations(
     app_id: &str,
     token: &str,
 ) -> Result<Vec<PublicOrganizationId>, AppError> {
-    let snapshots = client
+    let snapshot = ordinary_snapshot(client, app_id, token, None).await?;
+    Ok(vec![
+        snapshot.org_id.parse().map_err(|_| AppError::BadGateway)?,
+    ])
+}
+
+async fn ordinary_snapshot(
+    client: &Client,
+    app_id: &str,
+    token: &str,
+    requested_org: Option<&PublicOrganizationId>,
+) -> Result<models::ApplicationAuthorization, AppError> {
+    let response = client
         .oauth()
-        .authorizations(token)
+        .introspect(
+            &models::TokenIntrospectionRequest {
+                token: token.to_owned(),
+                token_type_hint: Some(models::TokenIntrospectionRequestTokenTypeHint::AccessToken),
+            },
+            requested_org.map(PublicOrganizationId::as_str),
+        )
         .await
-        .map_err(map_error)?
-        .ok_or(AppError::Unauthenticated)?;
-    let mut organizations = Vec::with_capacity(snapshots.len());
-    for snapshot in snapshots {
-        if snapshot.audience != app_id
-            || !snapshot_environment_matches(snapshot.testing_environment_id)
-        {
-            return Err(AppError::Unauthenticated);
-        }
-        organizations.push(
-            snapshot
-                .org_id
-                .parse::<PublicOrganizationId>()
-                .map_err(|_| AppError::BadGateway)?,
-        );
+        .map_err(map_error)?;
+    if !response.active
+        || response.authorizations.is_some()
+        || response.client_id.as_deref() != Some(app_id)
+        || response.audience.as_deref() != Some(app_id)
+        || response
+            .expires_at
+            .is_none_or(|expires| expires <= time::OffsetDateTime::now_utc().unix_timestamp())
+        || response.scope.as_deref().is_some_and(|scope| {
+            scope
+                .split_whitespace()
+                .any(|scope| scope.starts_with("obo:"))
+        })
+    {
+        return Err(AppError::Unauthenticated);
     }
-    organizations.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    organizations.dedup();
-    Ok(organizations)
+    let snapshot = response.authorization.ok_or(AppError::Unauthenticated)?;
+    let identity_matches = matches!(
+        (&response.actor_type, &snapshot.actor_type),
+        (
+            Some(models::TokenIntrospectionActorType::Carbon),
+            Some(models::ApplicationAuthorizationActorType::Carbon)
+        ) | (
+            Some(models::TokenIntrospectionActorType::Silicon),
+            Some(models::ApplicationAuthorizationActorType::Silicon)
+        )
+    );
+    if response.org_id.as_deref() != Some(snapshot.org_id.as_str())
+        || response.public_id != snapshot.public_id
+        || !identity_matches
+        || snapshot.audience != app_id
+        || !snapshot_environment_matches(snapshot.testing_environment_id)
+        || requested_org.is_some_and(|org| org.as_str() != snapshot.org_id)
+        || snapshot.organization_id.is_nil()
+        || snapshot.membership_version < 1
+        || snapshot.authorization_epoch < 1
+        || snapshot
+            .scopes
+            .iter()
+            .any(|scope| scope.starts_with("obo:"))
+    {
+        return Err(AppError::Unauthenticated);
+    }
+    let public_id = snapshot
+        .public_id
+        .as_deref()
+        .ok_or(AppError::Unauthenticated)?;
+    let kind = if matches!(
+        snapshot.actor_type,
+        Some(models::ApplicationAuthorizationActorType::Carbon)
+    ) {
+        "carbon"
+    } else {
+        "silicon"
+    };
+    if !valid_actor(kind, public_id)
+        || snapshot.membership_id != format!("{public_id}[{}]", snapshot.org_id)
+        || snapshot.org_id.parse::<PublicOrganizationId>().is_err()
+    {
+        return Err(AppError::Unauthenticated);
+    }
+    Ok(snapshot)
+}
+
+fn valid_actor(kind: &str, public_id: &str) -> bool {
+    let (prefix, maximum) = if kind == "carbon" {
+        ("c:", 30)
+    } else {
+        ("si:", 50)
+    };
+    public_id.strip_prefix(prefix).is_some_and(|id| {
+        (3..=maximum).contains(&id.len())
+            && id.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+            })
+    })
+}
+
+fn validate_tokens(
+    tokens: models::OAuthTokenResponse,
+    requested_org: Option<&str>,
+) -> Result<models::OAuthTokenResponse, AppError> {
+    let org = tokens
+        .org_id
+        .as_deref()
+        .filter(|org| org.parse::<PublicOrganizationId>().is_ok())
+        .ok_or(AppError::BadGateway)?;
+    let actor = tokens.actor.as_ref().ok_or(AppError::BadGateway)?;
+    let kind = match actor.type_field {
+        models::ActorRefType::Carbon => "carbon",
+        models::ActorRefType::Silicon => "silicon",
+        _ => return Err(AppError::BadGateway),
+    };
+    if tokens.token_type != "Bearer"
+        || tokens.expires_in <= 0
+        || tokens.access_token.is_empty()
+        || tokens.refresh_token.is_empty()
+        || tokens
+            .scope
+            .split_whitespace()
+            .any(|scope| scope.starts_with("obo:"))
+        || !valid_actor(kind, &actor.public_id)
+        || requested_org.is_some_and(|selected| selected != org)
+    {
+        return Err(AppError::BadGateway);
+    }
+    Ok(tokens)
 }
 
 pub(crate) async fn login(
@@ -358,12 +427,31 @@ pub(crate) async fn login(
     if request_context::testing_scope().is_none() && !issued_code {
         return Err(AppError::Unauthenticated);
     }
-    client
-        .oauth()
-        .login(&service.app_id, input.slt.expose_secret(), &mutation)
-        .await
-        .map(Json)
-        .map_err(map_error)
+    let header_org = super::auth::optional_header(&headers, "x-org-id")?;
+    if input
+        .org_id
+        .as_deref()
+        .zip(header_org.as_deref())
+        .is_some_and(|(body, header)| body != header)
+    {
+        return Err(AppError::BadRequest {
+            code: "conflicting_organization".into(),
+        });
+    }
+    let selected_org = input.org_id.as_deref().or(header_org.as_deref());
+    let tokens = if !issued_code && let Some(org) = selected_org {
+        client
+            .oauth()
+            .login_testing_actor(&service.app_id, input.slt.expose_secret(), org, &mutation)
+            .await
+    } else {
+        client
+            .oauth()
+            .login(&service.app_id, input.slt.expose_secret(), &mutation)
+            .await
+    }
+    .map_err(map_error)?;
+    validate_tokens(tokens, selected_org).map(Json)
 }
 
 pub(crate) async fn refresh(
@@ -378,7 +466,7 @@ pub(crate) async fn refresh(
     let mutation = mutation(&headers)?;
     super::test_environments::resolve_context(&state, &headers).await?;
     let client = service.request_client()?;
-    client
+    let tokens = client
         .oauth()
         .refresh(
             &service.app_id,
@@ -386,8 +474,12 @@ pub(crate) async fn refresh(
             &mutation,
         )
         .await
-        .map(Json)
-        .map_err(map_error)
+        .map_err(map_error)?;
+    validate_tokens(
+        tokens,
+        super::auth::optional_header(&headers, "x-org-id")?.as_deref(),
+    )
+    .map(Json)
 }
 
 pub(crate) async fn logout(
@@ -554,7 +646,8 @@ mod tests {
             })
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "access_token":"oat_fixture", "refresh_token":"ort_fixture",
-                "token_type":"Bearer", "expires_in":300, "scope":"self.identity.read"
+                "token_type":"Bearer", "expires_in":300, "scope":"self.identity.read",
+                "org_id":"tos", "actor":{"type":"carbon","public_id":"c:person"}
             })))
             .expect(2)
             .mount(&server)
@@ -646,14 +739,77 @@ mod tests {
     fn snapshot(org: &str, audience: &str) -> serde_json::Value {
         json!({
             "principal_id": "11111111-1111-4111-8111-111111111111",
-            "actor_type": "carbon", "public_id": "person",
+            "actor_type": "carbon", "public_id": "c:person",
             "organization_id": "22222222-2222-4222-8222-222222222222",
             "org_id": org,
-            "membership_id": format!("person[{org}]"),
+            "membership_id": format!("c:person[{org}]"),
             "membership_version": 1, "authorization_epoch": 1,
             "audience": audience, "testing_environment_id": null,
             "scopes": [], "org_role": null, "tags": null
         })
+    }
+
+    #[tokio::test]
+    async fn ordinary_sessions_reject_scope_and_identity_migration() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        let client = Client::builder(&server.uri())?
+            .credential(Credential::application("commit", "secret"))
+            .auto_update(false)
+            .build()?;
+        for (field, value) in [
+            ("org_id", json!(null)),
+            ("org_id", json!("other")),
+            ("public_id", json!("c:someone")),
+            ("scope", json!("obo:briefcase:read")),
+            ("actor_type", json!("silicon")),
+            ("expires_at", json!(0)),
+            ("client_id", json!("different")),
+            ("authorizations", json!([])),
+        ] {
+            server.reset().await;
+            let mut response = introspection(snapshot("tos", "commit"));
+            response[field] = value;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/oauth/introspect"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+            assert!(
+                super::ordinary_snapshot(&client, "commit", "oat_test", None)
+                    .await
+                    .is_err(),
+                "accepted {field}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_token_response_requires_actor_and_one_organization() -> anyhow::Result<()> {
+        let valid = json!({"access_token":"oat_test","refresh_token":"ort_test","token_type":"Bearer","expires_in":1800,
+            "scope":"self.identity.read","org_id":"tos","actor":{"type":"carbon","public_id":"c:person"}});
+        assert!(
+            super::validate_tokens(serde_json::from_value(valid.clone())?, Some("tos")).is_ok()
+        );
+        for (field, value) in [
+            ("org_id", json!(null)),
+            ("actor", json!(null)),
+            ("scope", json!("obo:briefcase:read")),
+            ("org_id", json!("other")),
+            ("actor", json!({"type":"application","public_id":"commit"})),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(super::validate_tokens(serde_json::from_value(invalid)?, Some("tos")).is_err());
+        }
+        Ok(())
+    }
+
+    fn introspection(snapshot: serde_json::Value) -> serde_json::Value {
+        json!({"active":true,"org_id":snapshot["org_id"],"public_id":snapshot["public_id"],
+            "actor_type":snapshot["actor_type"],"client_id":"commit","audience":"commit",
+            "expires_at":4_102_444_800_i64,"authorization":snapshot})
     }
 
     #[tokio::test]
@@ -664,11 +820,14 @@ mod tests {
                 let server = MockServer::start().await;
                 let mut grant = snapshot("tos", "commit");
                 grant["actor_type"] = json!(kind);
-                let response = if scoped {
-                    json!({"active":true,"authorization":grant})
+                let public_id = if kind == "carbon" {
+                    "c:person"
                 } else {
-                    json!({"active":true,"authorizations":[grant]})
+                    "si:agent"
                 };
+                grant["public_id"] = json!(public_id);
+                grant["membership_id"] = json!(format!("{public_id}[tos]"));
+                let response = introspection(grant);
                 Mock::given(method("POST"))
                     .and(path("/api/v1/oauth/introspect"))
                     .and(move |request: &wiremock::Request| {
@@ -687,7 +846,7 @@ mod tests {
                     super::verified_status(&client, "commit", "oat_test", scoped.then_some(&org))
                         .await?;
                 assert_eq!(output["authenticated"], true);
-                assert_eq!(output["actor"], json!({"type":kind,"id":"person"}));
+                assert_eq!(output["actor"], json!({"type":kind,"id":public_id}));
                 assert_eq!(output["org_id"], "tos");
                 assert!(!output.to_string().contains("principal_id"));
                 assert!(!output.to_string().contains("oat_test"));
@@ -745,16 +904,17 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let responses = [
             (
-                json!({"active": true, "authorizations": [snapshot("z-team", "commit"), snapshot("a-team", "commit")]}),
-                Some(vec!["a-team", "z-team"]),
+                introspection(snapshot("a-team", "commit")),
+                Some(vec!["a-team"]),
             ),
-            (json!({"active": true, "authorizations": []}), Some(vec![])),
-            (json!({"active": false}), None),
             (
-                json!({"active": true, "authorizations": [snapshot("a-team", "other>app")]}),
+                json!({"active":true,"authorizations":[snapshot("a-team", "commit"),snapshot("z-team", "commit")]}),
                 None,
             ),
-            (json!({"active": true}), None),
+            (json!({"active":true,"authorizations":[]}), None),
+            (json!({"active":false}), None),
+            (introspection(snapshot("a-team", "other-app")), None),
+            (json!({"active":true}), None),
         ];
         for (response, expected) in responses {
             let server = MockServer::start().await;
