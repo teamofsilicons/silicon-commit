@@ -442,6 +442,68 @@ try {
       page.getByLabel("Account and organization", { exact: true }),
     ).toHaveValue(productionId);
   });
+  await test("missing selected cookie fails closed and explicit recovery permits a new sign-in", async (page, context) => {
+    await page.goto(
+      origin + "/auth/start?identity_kind=carbon&context_id=none",
+    );
+    await expect(page).toHaveURL(origin + "/#/todos");
+    const carbonId = await page.evaluate(() =>
+      sessionStorage.getItem("commit.context.production"),
+    );
+    await page.goto(
+      origin + "/auth/start?identity_kind=silicon&context_id=" + carbonId,
+    );
+    await expect(page).toHaveURL(origin + "/#/todos");
+    await page
+      .getByLabel("Account and organization", { exact: true })
+      .selectOption(carbonId);
+    await expect(
+      page.getByLabel("Account and organization", { exact: true }),
+    ).toHaveValue(carbonId);
+    const originalCookie = (await context.cookies()).find((c) =>
+      c.name.endsWith("_ctx_" + carbonId),
+    );
+    assert.ok(originalCookie);
+    await context.clearCookies({ name: originalCookie.name });
+    await page.reload();
+    await expect(
+      page.getByText(
+        "That saved workspace is no longer available. Sign in again.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByLabel("Account and organization", { exact: true }),
+    ).toHaveCount(0);
+    assert.equal(
+      await page.evaluate(() =>
+        sessionStorage.getItem("commit.context.production"),
+      ),
+      carbonId,
+    );
+    await page
+      .getByRole("button", { name: "Start a new sign-in", exact: true })
+      .click();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          sessionStorage.getItem("commit.context.production"),
+        ),
+      )
+      .toBe("none");
+    await page
+      .getByRole("button", {
+        name: "Continue as Carbon in this tab",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByLabel("Account and organization", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByLabel("Account and organization", { exact: true }),
+    ).toHaveValue(carbonId);
+  });
   console.log(JSON.stringify({ local_only: true, results }, null, 2));
 } finally {
   await browser.close();

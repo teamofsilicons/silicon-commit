@@ -90,7 +90,16 @@ export default function App() {
       >
         <Show
           when={session().authenticated}
-          fallback={<Login error={auth.error} selectContext={selectContext} />}
+          fallback={
+            <Login
+              error={auth.error}
+              selectContext={selectContext}
+              recoverContext={async () => {
+                setSession({ authenticated: false });
+                await refetch();
+              }}
+            />
+          }
         >
           <div class="app-shell">
             <a
@@ -451,6 +460,7 @@ function PopupSignIn() {
 function Login(p: {
   error?: unknown;
   selectContext: (id: string) => Promise<void>;
+  recoverContext: () => Promise<void>;
 }) {
   const savedAction = useAction();
   return (
@@ -494,6 +504,16 @@ function Login(p: {
             Sign in with Silicon IAM to pick up where you left off.
           </p>
           <ErrorBox error={p.error} />
+          <Show when={p.error}>
+            <button
+              type="button"
+              class="button"
+              disabled={savedAction.busy()}
+              onClick={() => void savedAction.run(p.recoverContext)}
+            >
+              Start a new sign-in
+            </button>
+          </Show>
           <Show when={location.hash.includes("error=login_failed")}>
             <div class="error-box">
               The login could not be completed. Continue with IAM to try again.
