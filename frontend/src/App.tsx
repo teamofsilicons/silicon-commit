@@ -427,6 +427,8 @@ function PopupSignIn() {
               class="button"
               onClick={() => {
                 activePopup?.abort();
+                if (environment() !== "production")
+                  setEnvironment("production");
                 continueSignInHere(kind, controller.signal);
               }}
             >
