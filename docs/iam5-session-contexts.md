@@ -14,3 +14,10 @@ organization are checked before exposing the ordinary session context.
 Validation: nine focused session tests, including malformed/legacy contexts,
 identity mismatch, ordinary/OBO separation, and Carbon/Silicon status. Strict
 backend Clippy passed. Live IAM 5 validation remains a release gate.
+
+Resource requests enforce the same single-organization ordinary-session contract:
+active canonical identity, exact client/audience and membership, matching authorization
+epoch, and no legacy authorization array or OBO scope on the ordinary bearer path.
+IAM organization handles are checked without normalizing malformed values into an
+accepted identity. Testing actor login requires an explicit organization and must
+return the requested actor before a session response is exposed.

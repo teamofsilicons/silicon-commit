@@ -348,13 +348,19 @@ async fn ordinary_snapshot(
     };
     if !valid_actor(kind, public_id)
         || snapshot.membership_id != format!("{public_id}[{}]", snapshot.org_id)
-        || snapshot.org_id.parse::<PublicOrganizationId>().is_err()
+        || !canonical_organization(&snapshot.org_id)
     {
         return Err(AppError::Unauthenticated);
     }
     Ok(snapshot)
 }
 
+fn canonical_organization(org: &str) -> bool {
+    (3..=50).contains(&org.len())
+        && org
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+}
 fn valid_actor(kind: &str, public_id: &str) -> bool {
     let (prefix, maximum) = if kind == "carbon" {
         ("c:", 30)
@@ -376,7 +382,7 @@ fn validate_tokens(
     let org = tokens
         .org_id
         .as_deref()
-        .filter(|org| org.parse::<PublicOrganizationId>().is_ok())
+        .filter(|org| canonical_organization(org))
         .ok_or(AppError::BadGateway)?;
     let actor = tokens.actor.as_ref().ok_or(AppError::BadGateway)?;
     let kind = match actor.type_field {
@@ -439,6 +445,15 @@ pub(crate) async fn login(
         });
     }
     let selected_org = input.org_id.as_deref().or(header_org.as_deref());
+    if !issued_code
+        && (!selected_org.is_some_and(canonical_organization)
+            || !(valid_actor("carbon", input.slt.expose_secret())
+                || valid_actor("silicon", input.slt.expose_secret())))
+    {
+        return Err(AppError::BadRequest {
+            code: "testing_login_requires_actor_and_organization".into(),
+        });
+    }
     let tokens = if !issued_code && let Some(org) = selected_org {
         client
             .oauth()
@@ -451,6 +466,14 @@ pub(crate) async fn login(
             .await
     }
     .map_err(map_error)?;
+    if !issued_code
+        && tokens
+            .actor
+            .as_ref()
+            .is_none_or(|actor| actor.public_id != input.slt.expose_secret())
+    {
+        return Err(AppError::BadGateway);
+    }
     validate_tokens(tokens, selected_org).map(Json)
 }
 
@@ -787,6 +810,10 @@ mod tests {
 
     #[test]
     fn ordinary_token_response_requires_actor_and_one_organization() -> anyhow::Result<()> {
+        for org in ["", "a", " tos ", "Upper", "name:org", &"a".repeat(51)] {
+            assert!(!super::canonical_organization(org));
+        }
+
         let valid = json!({"access_token":"oat_test","refresh_token":"ort_test","token_type":"Bearer","expires_in":1800,
             "scope":"self.identity.read","org_id":"tos","actor":{"type":"carbon","public_id":"c:person"}});
         assert!(

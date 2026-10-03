@@ -161,6 +161,9 @@ impl IamClient {
         token: &SecretString,
         request: &AuthenticationRequest,
     ) -> Result<VerifiedActor, ProviderError> {
+        if !canonical_organization(request.org_id.as_str()) {
+            return Err(ProviderError::Unauthenticated);
+        }
         request_context::set_iam_bearer_token(Some(token.clone()));
         let client = self.request_client()?;
         let introspection = self.bounded(
@@ -185,6 +188,13 @@ impl IamClient {
             .is_none_or(|expiry| expiry <= OffsetDateTime::now_utc().unix_timestamp())
             || introspection.org_id.as_deref() != Some(request.org_id.as_str())
             || introspection.audience.as_deref() != Some(self.audience.as_str())
+            || introspection.client_id.as_deref() != Some(self.audience.as_str())
+            || introspection.authorizations.is_some()
+            || introspection.scope.as_deref().is_some_and(|scope| {
+                scope
+                    .split_whitespace()
+                    .any(|scope| scope.starts_with("obo:"))
+            })
         {
             return Err(ProviderError::Unauthenticated);
         }
@@ -193,6 +203,18 @@ impl IamClient {
         let snapshot = introspection
             .authorization
             .ok_or(ProviderError::InvalidResponse)?;
+        if introspection.public_id.is_none() {
+            return Err(ProviderError::Forbidden);
+        }
+        if introspection.authorization_epoch != Some(snapshot.authorization_epoch)
+            || snapshot.authorization_epoch < 1
+            || snapshot
+                .scopes
+                .iter()
+                .any(|scope| scope.starts_with("obo:"))
+        {
+            return Err(ProviderError::Unauthenticated);
+        }
         if introspection
             .public_id
             .as_ref()
@@ -570,6 +592,12 @@ fn validate_membership(
     }
     Ok(())
 }
+fn canonical_organization(org: &str) -> bool {
+    (3..=50).contains(&org.len())
+        && org
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+}
 fn require_active_directory_status(
     status: &str,
     inactive_status: &str,
@@ -780,7 +808,7 @@ mod tests {
     }
     fn introspection() -> Value {
         json!({"active":true,"public_id":"c:test-carbon","principal_id":PRINCIPAL,"membership_id":"c:test-carbon[test-org]",
-            "actor_type":"carbon","org_id":"test-org","audience":"commit",
+            "actor_type":"carbon","org_id":"test-org","audience":"commit","client_id":"commit","authorization_epoch":1,
             "expires_at":OffsetDateTime::now_utc().unix_timestamp()+300,"authorization":snapshot()})
     }
     async fn introspect_mock(server: &MockServer, body: Value) {
@@ -928,6 +956,38 @@ mod tests {
                 "{pointer}: {actual:?}"
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ordinary_resource_access_rejects_legacy_or_delegated_snapshot_contracts() -> TestResult
+    {
+        for (field, value) in [
+            ("client_id", json!("another")),
+            ("authorizations", json!([])),
+            ("authorization_epoch", json!(null)),
+            ("scope", json!("obo:commit:commit.todos.list")),
+        ] {
+            let server = MockServer::start().await;
+            let mut body = introspection();
+            body[field] = value;
+            introspect_mock(&server, body).await;
+            assert!(
+                matches!(
+                    client(&server)?.authenticate(&request()?).await,
+                    Err(ProviderError::Unauthenticated)
+                ),
+                "{field}"
+            );
+        }
+        let server = MockServer::start().await;
+        let mut body = introspection();
+        body["authorization"]["scopes"] = json!(["obo:commit:commit.todos.list"]);
+        introspect_mock(&server, body).await;
+        assert!(matches!(
+            client(&server)?.authenticate(&request()?).await,
+            Err(ProviderError::Unauthenticated)
+        ));
         Ok(())
     }
 
