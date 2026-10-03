@@ -133,7 +133,7 @@ pub struct IamSettings {
     pub app_id: Option<String>,
     /// Commit IAM application secret.
     pub app_secret: Option<SecretString>,
-    /// OBO proof audience expected by Commit.
+    /// OBO recipient application expected by Commit.
     pub audience: String,
     /// Secret used to authenticate exact-byte incoming IAM webhooks.
     pub webhook_secret: Option<SecretString>,

@@ -1,5 +1,5 @@
 import { Show, createEffect, createResource, createSignal } from "solid-js";
-import { api, context, session } from "./api";
+import { bindApi, context, session } from "./api";
 import type { Settings, Rule, Subscription } from "./types";
 import {
   ErrorBox,
@@ -62,6 +62,7 @@ export function Notifications() {
   );
 }
 function SettingsForm() {
+  const api = bindApi();
   const [data, { refetch }] = createResource(context, () =>
     api<Settings>("/notification-settings"),
   );
@@ -177,6 +178,7 @@ function SettingsForm() {
   );
 }
 export function SubscriptionPanel(p: { todoId: string }) {
+  const api = bindApi();
   const [data, { refetch }] = createResource(
     () => context() + p.todoId,
     () =>
@@ -257,6 +259,7 @@ export function SubscriptionPanel(p: { todoId: string }) {
 }
 
 function EmailSettings() {
+  const api = bindApi();
   const [data, { refetch }] = createResource(context, () =>
     api<any>("/email-settings"),
   );

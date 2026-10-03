@@ -3,7 +3,7 @@
 Install the CLI through Honeycomb:
 
 ```sh
-honeycomb install 'tos>commit'
+honeycomb install 'commit'
 ```
 
 Honeycomb selects the prebuilt CLI for your operating system and architecture and manages updates. It does not sign you in. State lives under `$SILICON_HOME/.commit`, or `$HOME/.commit` if SILICON_HOME is unset.

@@ -3,7 +3,7 @@
 [Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md)
 
 ```sh
-honeycomb install 'tos>commit'
+honeycomb install 'commit'
 commit iam --json
 commit login "<IAM-SLT>"
 ```
@@ -82,8 +82,9 @@ make test
 ## Security model
 
 - Bearer and OBO credentials are mutually exclusive and verified by IAM.
-- Every OBO verification attempt uses a fresh IAM idempotency key so IAM's
-  single-use proof consumption cannot be replayed as a cached verification.
+- Reusable OBO access tokens are verified online for every request, using the
+  handler's endpoint ID and matched route. Verification does not consume a token
+  or bypass Commit's resource permissions; revoked grants fail on the next check.
 - `X-Org-ID` is matched to the verified active IAM membership. Existing
   organization, principal, membership, actor-type, and public-ID projections
   must agree exactly before any read or write.
@@ -214,8 +215,13 @@ release still requires these contracts from the sibling services:
   directory scan per requested participant set; organizations whose active
   directory exceeds 10,000 members fail closed until IAM supplies server-side
   lookup.
-- IAM's closed OBO action catalog must add Commit's documented `commit.*`
-  actions.
+- Register Commit’s documented OBO endpoint definitions in Honeycomb and
+  approve the exact delegated features independently of ordinary login.
+- Cross-account OBO selection requires explicit per-provider account and
+  organization consent for the declared and approved identity, membership,
+  and tag disclosures along the delegation path. Commit applies its resource
+  ACLs to that selected context and fails closed when required disclosures
+  are absent; it never substitutes the initiating account.
 - IAM's closed capability catalog must add `commit.todos.manage` and
   `commit.projects.manage` before non-owner admins can receive those powers.
 

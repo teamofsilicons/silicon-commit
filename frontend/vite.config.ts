@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
       e.COMMIT_API_ORIGIN || "https://backend.commit.teamofsilicons.com",
     origin: e.FRONTEND_ORIGIN || "http://127.0.0.1:4325",
     iam: e.IAM_AUTH_ORIGIN || "https://iam.teamofsilicons.com",
-    appId: e.COMMIT_APP_ID || "tos>commit",
+    appId: e.COMMIT_APP_ID || "commit",
     key: e.SESSION_COOKIE_KEY || randomBytes(32).toString("base64url"),
   });
   return {

@@ -83,7 +83,7 @@ def main() -> None:
         if tomllib.loads((ROOT / cargo_manifest).read_text())["package"]["version"] != version:
             raise SystemExit(f"{cargo_manifest} must use app release version {version}")
     manifest = (ROOT / "honeycomb.yaml").read_text()
-    for key, expected in (("app_id", "tos>commit"), ("version", version)):
+    for key, expected in (("app_id", "commit"), ("version", version)):
         match = re.search(rf"^{key}:\s*[\"']?([^\s\"'#]+)[\"']?\s*(?:#.*)?$", manifest, re.MULTILINE)
         if not match or match.group(1) != expected:
             raise SystemExit(f"honeycomb.yaml {key} must match {expected!r}")

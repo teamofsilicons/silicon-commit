@@ -34,11 +34,11 @@ pub const PROJECT_MANAGE_CAPABILITY: &str = "commit.projects.manage";
 pub enum InboundCredential {
     /// Opaque IAM access token.
     Bearer(SecretString),
-    /// Single-use proof presented by an upstream application.
+    /// Reusable OBO access token presented by an upstream application.
     Obo {
-        /// IAM application which obtained the proof.
+        /// Immediate application caller in the approved delegation chain.
         app_id: String,
-        /// Opaque OBO access proof.
+        /// Opaque reusable OBO access token.
         proof: SecretString,
     },
     /// Explicit non-production identity supplied through trusted headers.
@@ -108,8 +108,8 @@ pub enum CredentialError {
     /// Bearer and OBO credentials were supplied together.
     #[error("bearer and OBO credentials are mutually exclusive")]
     Multiple,
-    /// OBO authentication requires both application ID and proof.
-    #[error("OBO authentication requires both application ID and proof")]
+    /// OBO authentication requires both application ID and access token.
+    #[error("OBO authentication requires both application ID and access token")]
     IncompleteObo,
     /// An opaque credential is empty or contains whitespace.
     #[error("the authentication credential is malformed")]

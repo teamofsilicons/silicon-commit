@@ -1,3 +1,4 @@
+import { signInPopup, continueSignInHere, type IdentityKind } from "./popup";
 import {
   For,
   Match,
@@ -11,6 +12,7 @@ import {
 } from "solid-js";
 import {
   api,
+  captureContext,
   context,
   environment,
   navigate,
@@ -39,7 +41,11 @@ export default function App() {
   );
   createEffect(() => {
     const s = auth();
-    if (s) {
+    if (
+      s &&
+      !auth.loading &&
+      (!s.environment_id || s.environment_id === environment())
+    ) {
       setSession(s);
     }
   });
@@ -51,21 +57,18 @@ export default function App() {
   onCleanup(() => window.removeEventListener("commit:expired", expire));
   const logout = useAction();
   const [organizations, { refetch: reloadOrganizations }] = createResource(
-    () =>
-      session().authenticated ? environment() + "|" + sessionEpoch() : false,
+    () => (session().authenticated ? context() + "|" + sessionEpoch() : false),
     () => request<string[]>("/auth/organizations"),
   );
-  createEffect(() => {
-    const choices = organizations();
-    if (
-      session().authenticated &&
-      choices &&
-      !organizations.loading &&
-      !organizations.error
-    ) {
-      if (!choices.includes(org())) setOrg(choices[0] || "");
-    }
-  });
+  const changeContext = useAction();
+  async function selectContext(contextId: string) {
+    await request<Session>("/auth/context", {
+      method: "POST",
+      body: { context_id: contextId },
+    });
+    await refetch();
+    setMobile(false);
+  }
   const route = () => path().split("?")[0].split("/").filter(Boolean),
     active = () => route()[0] || "todos";
   return (
@@ -85,7 +88,7 @@ export default function App() {
       >
         <Show
           when={session().authenticated}
-          fallback={<Login error={auth.error} />}
+          fallback={<Login error={auth.error} selectContext={selectContext} />}
         >
           <div class="app-shell">
             <a
@@ -111,32 +114,31 @@ export default function App() {
             >
               <Brand />
               <div class="org-picker">
-                <Field label="ORGANIZATION">
+                <Field label="ACCOUNT & ORGANIZATION">
                   <select
-                    aria-label="Organization"
-                    value={org()}
-                    disabled={
-                      organizations.loading ||
-                      !!organizations.error ||
-                      !organizations()?.length
+                    aria-label="Account and organization"
+                    value={session().context_id}
+                    disabled={changeContext.busy()}
+                    onChange={(e) =>
+                      void changeContext.run(() =>
+                        selectContext(e.currentTarget.value),
+                      )
                     }
-                    onChange={(e) => {
-                      setOrg(e.currentTarget.value);
-                      setMobile(false);
-                    }}
                   >
-                    <Show when={!organizations()?.length}>
-                      <option value="">
-                        {organizations.loading
-                          ? "Loading organizations…"
-                          : "No organizations available"}
-                      </option>
-                    </Show>
-                    <For each={organizations()}>
-                      {(id) => <option value={id}>{id}</option>}
+                    <For each={session().contexts || [session()]}>
+                      {(saved) => (
+                        <option value={saved.context_id}>
+                          {saved.actor?.public_id} · {saved.org_id}
+                        </option>
+                      )}
                     </For>
                   </select>
                 </Field>
+                <Show when={environment() === "production"}>
+                  <p class="muted">Add an account or organization</p>
+                  <PopupSignIn />
+                </Show>
+                <ErrorBox error={changeContext.error()} />
               </div>
               <nav aria-label="Main navigation">
                 <For
@@ -195,20 +197,29 @@ export default function App() {
                 >
                   ☰
                 </button>
-                <div class="breadcrumb">
-                  Silicon / <strong>Commit</strong>
-                  <span class="divider" />
-                  <span
-                    class={
-                      "environment-label " +
-                      (environment() !== "production" ? "test" : "")
-                    }
+                <div class="workspace-context">
+                  <div class="breadcrumb">
+                    Silicon / <strong>Commit</strong>
+                    <span class="divider" />
+                    <span
+                      class={
+                        "environment-label " +
+                        (environment() !== "production" ? "test" : "")
+                      }
+                    >
+                      <span />
+                      {environment() === "production"
+                        ? "Production"
+                        : "Testing workspace"}
+                    </span>
+                  </div>
+                  <div
+                    class="active-account"
+                    aria-label="Current account and organization"
+                    title={`${session().actor?.public_id} · ${session().org_id}`}
                   >
-                    <span />
-                    {environment() === "production"
-                      ? "Production"
-                      : "Testing workspace"}
-                  </span>
+                    {session().actor?.public_id} · {session().org_id}
+                  </div>
                 </div>
                 <button
                   class="text-button"
@@ -250,8 +261,8 @@ export default function App() {
                         when={!organizations.loading && !organizations.error}
                       >
                         <p>
-                          No organizations are available for this session.
-                          Choose your organizations in IAM to continue.
+                          No organizations are available for this session. Sign
+                          in to an organization in IAM to continue.
                         </p>
                         <a
                           class="button primary"
@@ -299,21 +310,25 @@ export default function App() {
                 </Show>
               </main>
               <Show when={clean()} keyed>
-                {(id) => (
-                  <Confirm
-                    title="Clean this testing workspace?"
-                    message="All todos, projects, and activity in this testing workspace will be removed permanently. Its name and key remain."
-                    label="Clean workspace"
-                    close={() => setClean(undefined)}
-                    action={async () => {
-                      await api("/test-environments/" + id + "/clean", {
-                        method: "POST",
-                        body: {},
-                      });
-                      window.location.reload();
-                    }}
-                  />
-                )}
+                {(id) => {
+                  const original = captureContext();
+                  return (
+                    <Confirm
+                      title="Clean this testing workspace?"
+                      message="All todos, projects, and activity in this testing workspace will be removed permanently. Its name and key remain."
+                      label="Clean workspace"
+                      close={() => setClean(undefined)}
+                      action={async () => {
+                        await api("/test-environments/" + id + "/clean", {
+                          method: "POST",
+                          context: original,
+                          body: {},
+                        });
+                        window.location.reload();
+                      }}
+                    />
+                  );
+                }}
               </Show>
               <footer>
                 <span>Silicon Commit</span>
@@ -334,7 +349,103 @@ function Brand() {
     </a>
   );
 }
-function Login(p: { error?: unknown }) {
+function PopupSignIn() {
+  const [loginError, setLoginError] = createSignal<unknown>();
+  const [signingIn, setSigningIn] = createSignal(false);
+  const controller = new AbortController();
+  let activePopup: AbortController | undefined;
+  onCleanup(() => {
+    controller.abort();
+    activePopup?.abort();
+  });
+  async function signIn(kind: IdentityKind) {
+    if (signingIn()) return;
+    setSigningIn(true);
+    setLoginError(undefined);
+    if (environment() !== "production") setEnvironment("production");
+    const bound = captureContext();
+    const original = context();
+    const pending = new AbortController();
+    activePopup = pending;
+    const current = () =>
+      !controller.signal.aborted &&
+      !pending.signal.aborted &&
+      context() === original;
+    try {
+      const completed = await signInPopup(kind, pending.signal);
+      if (!current()) return;
+      const value = await request<Session>("/auth/session", { context: bound });
+      if (!current()) return;
+      if (
+        !value.authenticated ||
+        value.actor?.type !== kind ||
+        value.context_id !== completed
+      )
+        throw new Error(
+          "Your account did not match this sign-in. Please try again.",
+        );
+      setSession(value);
+      navigate("/todos");
+    } catch (error) {
+      if (current()) {
+        setLoginError(error);
+      }
+    } finally {
+      if (!controller.signal.aborted) setSigningIn(false);
+    }
+  }
+  return (
+    <>
+      <div class="actions">
+        <button
+          type="button"
+          class="button primary"
+          disabled={signingIn()}
+          onClick={() => void signIn("carbon")}
+        >
+          Continue as Carbon
+        </button>
+        <button
+          type="button"
+          class="button"
+          disabled={signingIn()}
+          onClick={() => void signIn("silicon")}
+        >
+          Continue as Silicon
+        </button>
+      </div>
+      <p class="muted">
+        Choose your account and organization in the IAM popup.
+      </p>
+      <ErrorBox error={loginError()} />
+      <p class="muted">Or sign in in this tab</p>
+      <div class="actions">
+        <For each={["carbon", "silicon"] as IdentityKind[]}>
+          {(kind) => (
+            <button
+              type="button"
+              class="button"
+              onClick={() => {
+                activePopup?.abort();
+                if (environment() !== "production")
+                  setEnvironment("production");
+                continueSignInHere(kind, controller.signal);
+              }}
+            >
+              Continue as {kind === "carbon" ? "Carbon" : "Silicon"} in this tab
+            </button>
+          )}
+        </For>
+      </div>
+    </>
+  );
+}
+
+function Login(p: {
+  error?: unknown;
+  selectContext: (id: string) => Promise<void>;
+}) {
+  const savedAction = useAction();
   return (
     <div class="login-layout">
       <section class="login-intro">
@@ -381,13 +492,21 @@ function Login(p: { error?: unknown }) {
               The login could not be completed. Continue with IAM to try again.
             </div>
           </Show>
-          <a
-            class="button primary full"
-            href="/auth/start"
-            onClick={() => setEnvironment("production")}
-          >
-            Continue with IAM <Icon name="arrow" />
-          </a>
+          <PopupSignIn />
+          <For each={session().contexts || []}>
+            {(saved) => (
+              <button
+                class="button full"
+                disabled={savedAction.busy()}
+                onClick={() =>
+                  void savedAction.run(() => p.selectContext(saved.context_id!))
+                }
+              >
+                {saved.actor?.public_id} · {saved.org_id}
+              </button>
+            )}
+          </For>
+          <ErrorBox error={savedAction.error()} />
           <TestingLogin />
           <p class="login-footnote">
             Identity and access are managed by Silicon IAM. Commit never asks

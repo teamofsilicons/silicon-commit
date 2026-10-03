@@ -8,7 +8,7 @@ A stateless client for the Silicon Commit work manager. Add it with
 use silicon_commit_client::Client;
 let client = Client::new("https://backend.commit.teamofsilicons.com")?;
 let iam = client.iam().await?;
-let session = client.login_with_slt("slt_from_iam").await?;
+let session = client.login_with_slt("oac_from_iam").await?;
 let client = client.with_bearer(session.access_token);
 let status = client.login_status().await?;
 # Ok(())
@@ -18,3 +18,12 @@ let status = client.login_status().await?;
 Methods cover sessions, todos, projects, notes, notifications, and test environments.
 See the [client guide](https://github.com/teamofsilicons/silicon-commit/blob/main/docs/CLIENT.md)
 and [API contract](https://github.com/teamofsilicons/silicon-commit/blob/main/openapi.yaml).
+
+IAM 5 login and refresh responses are checked for one canonical Carbon/Silicon,
+one organization, positive lifetime, Bearer credentials, and ordinary scopes.
+Use `.with_org_id("team")` when selecting a testing actor's organization. The
+selection is sent in the login body; existing bearer credentials are omitted
+from login and refresh. Callers must keep each actor + organization + testing
+plane in separate storage and compare returned actor/organization before
+replacing a saved refresh family. The client is stateless and does not infer
+other organization grants or migrate unscoped credentials.

@@ -36,7 +36,7 @@ def https_origin(value, name, allow_path=False):
 
 def valid_app_id(value):
     return isinstance(value, str) and re.fullmatch(
-        r"[a-z0-9][a-z0-9-]{0,63}>[a-z0-9][a-z0-9-]{0,63}", value
+        r"[a-z][a-z0-9_-]{0,79}", value
     ) is not None
 
 

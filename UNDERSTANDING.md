@@ -1,3 +1,7 @@
+
+# This file is only meant to be changed by carbons (humans), if you are an agent DONT EDIT THIS FILE.  
+
+
 # UNDERSTANIDNG.md - COMMIT
 
 This is understanding.md for Silicon Commit. Silicon commit is our very own work manager. This handles todo's for every carbon and silicon, and also manages projects for silicons. 
@@ -27,11 +31,11 @@ For each todo i can either assing it to any other carbon/silicon in the system, 
 
 For each todo list it's gonna be seperated in two sections tasks for me, and tasks delegated to others. For the tasks for me would be task with assigned_to to the given carbon/silicon, for each task it must also return who it was assigned by, for tasks created by the user themselves and for themselves it would have both assigned_to and assigned_by as the same contact so it must only be returned in the tasks for the user and not in the list of tasks delegated.
 
-For each todo the user can add notes to the todo, these are notes that are attached to the todo.
+For each todo the user can add notes to the todo, these are notes that are attached to the todo. Also for each todo it can have a project-id attached to it, this would be relevant if a task is relevant to the project. 
 
 ### Attachments
 
-For todo's it's also possible to attach attachments to the said todo, attachments is a list[] of attachment url's that can be used. Uploading or anything else, commit shouldn't be bothered by it.
+For todo's it's also possible to attach attachments to the said todo, attachments is a list[] of attachment url's that can be used. Commit shouldn't manage handling uploads.
 
 ### Todo Status
 
@@ -58,14 +62,35 @@ When a silicon subscribes to a set of changes, this subscription should be appli
 
 For everytime there's any update for a silicon's list of todo based on the scope they have subscribed to. Notify the silicon who assigned the todo via the set webhook url for that silicon. This should only happen for the todo's that silicon has assinged_by for, and assinged_to is not the same as assinged_by, in that case, assigned_by silicon should be notified. 
 
+# Email
+
+We use postmark as our mail provider. You have an email at [commit@teamofsilicons.com] use this email to send emails to users everytime the project has been completed, or if they want they can subscribe to more updates, everytime update happens, everytime a task gets completed, everytime i get a new task assigned to me, etc. 
+
+They should also be able to disable email notifications. Send these emails not to their carbon email but to the email they are using for the specific organisation. 
+
 
 # Projects
 
-Projects refer to the projects that silicon's take on, these would be created and managed by silicons, there can be multiple silicons that work on the same project, and projects are public. For each project there can be multiple states to it. And each project would have multiple subparts to it. 
+Projects refer to the projects that silicon's and/or carbon's take on, these would be created and managed by both silicons or carbons, there can be multiple silicons and carbons that work on the same project, and projects are public by default hence it's in the org scope and any org member would be able to see it. For each project there can be multiple states to it. And each project may have multiple subparts to it. 
 
-For each project it's UID would be: project_id:sid:dt. Project_id is the name set by the silicon at the time of creation. 
+Projects can also be made private, a project wont be private by default but can be made private at the time of creation. Even if a project is private it can later be made public and vice versa. 
+
+For private projects a set of carbon_id's, silicon_id's or tags would be able to see that project and edit the project. 
+
+For each project i should be able to define a description for it, attach a link of attachments for the project, and add tasks's and subtasks's for it. This can be managed by the carbons and silicons who have write access to it. As soon as a silicon or a carbon edits description, add/removes/marks a taks or subtasks they get marked as a collaborator on the project, for each project maintain the list of collaborators. At the time of creation of a task/subtask it should be possible to assign the task/subtask to a silicon/carbon and it would get added in their todo with the project_id attached to it. 
+
+At the time of creation as well i can optionally define the tasks and subtasks and the description, and if it's private who all would you like to invite. 
+
+For each task/subtask it is also possible that it isn't assigned to anyone and a silicon/carbon could take the task on and it would get assigned to them.
+
+For each project its UID would be `{project_id}:{public_identity_id}:{dt}`, where `public_identity_id` is the complete `si:{silicon_id}` or `c:{carbon_id}`, for example `launch:si:cos:{dt}` or `launch:c:saket:{dt}`. Treat the complete prefixed identity as one component rather than splitting on every colon. Project_id is the name set by the silicon/carbon at the time of creation. 
 
 Each project must have a name, uuid(slugified name is used as project_id). 
+
+
+### Versioning
+
+For each project maintain versioning for it, when a change happens, something gets added, removed, completed, updated, etc. Maintain the versioning upto last 1000. 
 
 ### Project States
 
@@ -85,53 +110,74 @@ Projects would have multiple subparts associated to them to actually make a proj
 4. Then there can be the completed, that's to mark the end of the project. Would have title and desc.
 
 
-# Testing
+# Backend Versioning
 
-We will have an test enviorment for commit itself, this would be an exact replica of the main application, so when the test enviorment is created it would be initiated empty, for the said test enviorment actions can be performed, as this is an exact same replica of the main prod.
+For versioning we have Contract Governance/API/service contract lifecycle management. We will have:
 
-Refer to this to know how to create testing enviorment compatible with iam. 
-https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html
+1) Contract versioning / API versioning
+2) Protocol Negotiation
+3) Backward compatibility
+4) Consumer-driven contract testing
+5) Deprecation and sunset management - if 0 requests for 7 days, sunset that version
+6) Compatibility matrix
+7) Version policy
 
-For creating a test enviorment on commit, it would require the name of the test enviorment and also the test enviroment key of iam, this test iam key would be used in the each request it sends to the IAm as this is in test enviorment, it would in no way be possible to send request to it without attaching the test enviorment. 
+# Testing Environment
 
-So commit testing wouldn't support commit testing on the prod IAm, it would only support it in the testing enviorment of IAm. 
+We will have a test environment for commit itself. This would work exactly like the main application, with the same functions, APIs, permission checks, and workflows, but with completely isolated data.
 
-Once the name and the test-key to silicon iam is given, the commit would also generate a test key, this test key can be used by any one to perform any action in silicon-commit. 
+When a test environment is created, it would start empty.
 
-For each testing enviorment they would be sharing a shared test database, this would just be an isolated table in the db storing the linking for all the test enviorments.
+Honeycomb manages environment creation and lifecycle. Commit prepares its own isolated data when instructed, while IAM still handles test identities, authentication and webhooks.
 
-A test enviorment is basically the exact same commit with all the functions and everything else, so this is the commit where i can test creating a todo, start a work, update, see if i can subscribe, etc. Basically test it all out. 
+A test environment is basically the same commit where I can test creating todo's, projects, assigning todo's, updates on projects, etc. It uses test IAM and test commit together, so the entire flow can be tested inside one sandbox.
+
+### Environment Lifecycle
+
+Commit would accept authenticated instructions from Honeycomb to prepare, update the key version, clean, disable, restore and permanently remove its test data. Use the shared environment_id, make operations safe to retry and report pending, completed or failed. These instructions must work even when test sessions are disabled.
+
+Cleaning clears the environment's todos, projects, notes, versions, subscriptions and queued notifications and other test records. Keep Commit linked to the environment so later deletion, restoration and permanent removal still reach it. Check the environment revision and cleaning generation so old requests or notification retries cannot recreate cleared tasks or deliver their updates. Report completion only after Commit's cleanup finishes.
+
+Only allow test access once shared readiness is confirmed, using IAM's current environment state where it enforces this. Disabling blocks access and deliveries immediately; restoring allows access again once ready and does not undo a clean. Report activity for retention decisions instead of independently retiring the environment.
+
+### Using a Test Environment
+
+In the client app, website, CLI, or API, passing the test environment’s `app_secret` would select that application’s test environment. No manual pairing or separately entering the environment root key should be needed. Commit should validate the secret with IAM and identify the correct environment automatically.
+
+For logging in, it would ask for an SLT. In a test environment, this can either be an IAM-issued test SLT or the public ID of an existing Carbon/Silicon in the test sandbox. Entering the ID would sign me in as that test user. Unknown or inactive identities should be rejected. This shortcut must never work in production.
+
+The environment root key gives administrative control over the test world. The application’s `app_secret` selects its sandbox. Once signed in as a particular user, actions must follow that user’s actual permissions. Possessing the secret must not make every signed-in user bypass permission checks.
+
+If an administrative or god view is provided, it should be separate and clearly labelled so it cannot be confused with testing what a normal user is allowed to do.
+
+### Website and CLI
+
+On the website, I should be able to enter the `app_secret` from settings or the sign-in screen. Without a selected test environment, the application would use production.
+
+When in a test environment, always show a banner at the top saying that I am currently in a test environment, along with its name, the signed-in test identity, and a button to exit testing mode.
+
+Production and testing sessions should remain separate. Exiting testing mode should return me to the production session or ask me to sign in.
+
+In the CLI, always display the selected test environment at the end, including when a command fails. This message should go to stderr so it does not interfere with JSON output, downloaded files, or commands used in scripts.
+
+### Isolation
+
+Everything belonging to a test environment must stay inside that environment, including files, permissions, versions, deleted items, search results, caches, notifications, background jobs, and audit logs.
+
+Production credentials must not work in testing, and credentials from one test environment must not work in another.
+
+If a supplied test secret is invalid, revoked, or belongs to an unavailable environment, return an error. Never silently continue in production.
+
+Test task and project notifications must stay within the environment, using test webhook destinations or simulated email delivery. Attachment links remain references; cleaning Commit does not delete files owned by another application.
 
 
-### Creating Test Env
+### Webhooks and External Actions
 
-For creating a test enviorment, it can be created by any carbon or silicon in the organisation and it would be owned by the organisation with the user marked as the creator of the test enviorment. The test enviorment is created at the silicon-commit level itself. For creating a test enviorment it would need the name, an optional description, and the iam test enviorment. 
+Test webhooks should follow IAM’s documented format. Verify the signature over the complete raw body, identify the correct test environment, and apply the event only there. Duplicate or out-of-order events must not corrupt the current state.
 
-In return it would return the key for the test enviorment, this key is what's gonna be used to be able to access that test enviorment, anyone with this key would be able to access the test enviorment as the god of the test enviorment, this key would be stored along side with the test enviorment, and can anytime be retrieved by the said carbon/silicon/org_admin/org_owner. The key would be 32 digit alpha numeric. 
+Test actions should not send real emails, SMS messages, payments, or other production effects. These should use test destinations or simulated delivery.
 
-### Rotate Key
-
-The creator of the test enviorment and org_admin/org_head should be able to rotate the key of the test enviroment, which would give them a new key to the test enviorment.  
-
-### Clean Test Enviorment
-
-There should be an option to clean the test enviorment, which would allow the test enviorment to be there, but would clear every signle data stored for the said test enviorment. Anyone with the key should be able to execute this action. 
-
-### Delete Test Env
-
-The org admins, owners or the creator should be able to delete the test enviorment, deleting a test enviorment would delete the key, and the instance that the test enviorment even existed. For all the logs it should also be limited to the test enviorment itself. Each deleted Test Env would have a ttl of 30 days before getting deleted permanently. From this point the test env should be recoverable.
-
-### Auto Delete Test Env
-
-If there's no new activity in the test enviorment for 15 days, auto delete the test enviorment. 
-
-### Using a Test Enviorment
-
-For using a test enviorment anyone with the key would have the god view for that test enviorment, they should be able to access commit as the signed in user from IAm, and now as the signed in user it should be able to perform the set of allowed actions, so this is an exact replica of how commit would have worked with the actual iam, instead it has the test commit and the test iam, so an sandboxed enviorment to test it all out. 
-
-A maximum of 10 projects and 100 todos can be created in test enviorment, be clear to mention this is just a test enviorment limitation. 
-
-Read [(https://github.com/teamofsilicons/silicon-iam/blob/main/docs/client/testing-environments.html)] to understand how exactly are webhooks gonna work for this, etc. 
+Secrets must not appear in URLs, logs, audit records, or stored webhook payloads.
 
 ---
 ---
@@ -180,32 +226,105 @@ And there should be an command to configure the home directory where the informa
 
 The default home dir is `~`.
 
-For both cli and client we would also package in an auto updater, the task of this auto updater is to compare the current version to the latest version in crates for them, and if there's a new verion auto update it to the said new version. By default auto update is on, users can specifically come and opt in to stop auto update. Which would stop auto updating the package. Auto updater check runs every single hour. Updates should be checked when the command is run and should happen every hour, so check for the last update check time and if it's past 1 hour old check for update and update after the command finishes running.
+The Rust client package remains a normal project dependency and does not update itself at runtime. CLI releases and updates follow the Updates section below.
 
 It should also expose these specific commands:
 1) `--help` which would give all the help documentation on how to use waveform. So the user should be able to run `commit --help` and get the help docs.
 2) `iam --json` the user should be able to run  `commit iam --json` which returns `app_id` alongside other information.
 3) `login status --json` the user should be able to run `commit login status --json`, reports successful authentication reports `authenticated: true`, alongside which carbon or silicon is it authenticated as.
 
-### Cli experience
 
-Cli is an interface on it's own, it's an interface used by our fellow dear agents, and sometimes humans. What we would want this interface to serve as is it should give the correct information at correct time, and can write texts to explain what exactly is happening. 
+# Cli experience
 
-A few things that would be needed to ensure good cli experience: the cli alone should have enough information to use commit correctly! Surfacing the right set of things when needed, giving suggestions at the correct times. Like for eg: when someone runs a command then show them the exact help for it if the information is not enough, and when the app has been created, show them the other related commands that they might need to run after it. For each command a good description, the entire docs, etc. 
+CLI is the primary way to interact with IAM Apps. It should be built for both Carbons & Silicons. Any other interface (like website) will be a subset of the CLI.
 
-So the overall cli experience needs to be super good. It needs to give the relevant informations, help should be detailed, and suggested commands, etc should also happen. 
+The cli should never ask for credentials from either silicon or carbon. it should just ask for short lived tokens that the user can generate from the official iam cli, or from the web where the the user is sent to auth concent screen.
+
+CLIs get SILICON_HOME env variable where it should store all the details. Its home, so you should use that as base, and make their own hidden folders to keep their information.
+
+Specific apps that could benefit from using ISI env variable should do that. eg: dm.
+
+ISI are internal silicons. If silicon is a brain, then isi are parts of the brain. store this inside metadata, or main data if its super useful. ISI may or may not be present. make sure to not rely on it in such a way that things break. consider ISI as useful additional information.
+
+every app cli must support the following commands:
+
+`app iam --json` gives {app_id: "...", ...}
+
+`app login "..."` takes in a short lived auth token generated by silicon interpretter.
+
+`app login status --json` tells if its {authenticated: true, ...}
+
+
+App Internals:
+All apps are suggested to make a rust library which is stateless. then 2 things that uses the rust library: always running daemon, and a cli interface that talks to the daemon.
+
+On the docs page, show `honeycomb install 'commit'` to install the CLI, followed by how to log in.
+
+CLI design should be focused on giving details and helping finding the right command to use. CLI will often have lots of commands and it should be like a tree that can be traversed using --help.
+
+CLI documentation should be bundled inside the cli itself. On each print of the cli documentation using --help or otherwise, it should show what this command is for, how its often used (perhaps in conjunction with other commands if applicable) and then a list of flags etc it takes in.
+
+Follow the CLI grammar. These CLIs can be used by humans, but more often than not, it'll be used by an agent who prefers to know why something broke and so it can figure out ways to fix it. Don't just say something went wrong... tell it exactly what & why.
+
+A good rule of thumb is: these CLIs are being made for someone who understands ins-and-outs of technology. Make like a programming language that gives very specific and helpful errors and outputs compared to a web interface where all errors are hidden until absolutely critical.
+
+All CLIs must have a report bug feature that also optionally takes in a PR ref if the agent did not just find a bug but also patched it. 
+
+commit report `<report-message>` --pr `<pr-link>` and if someone just reports the bug, without the pr, show them a message, you can also put a pr in the repo (`repo-link`). 
+
+Everytime a bug is reported use postmark to mail [saketdev12@gmail.com, shubhastro2@gmails.com, bugs@teamofsilicons.com]
+
+Since all TOS applications are open sourced, any bug can be discovered, replicated, patched and a pr can be raised. Allow all such edge cases be figured out by the agent instead of fixing it ourselves based on a bug report.
+
+Only a bug report submitting is possible, but its encouraged to give a lot more details and also attach a PR if possible.
+
+Give the information of the github repo, online docs, rust package, etc inside the cli itself.
+
+The CLI as i told before is a tree of documentation. Show possible paths, and then let someone go deeper along with documentation.
+
 
 # Docs
 
-The API, Rust-client, CLI, IAM integration, and testing-environment guides are
-maintained in [docs/].
+There are two kinds of documentations: informative & instructive.
 
-For the docs keep it as detailed and mention all the details, this is the only thing the other apps can use as their source of knowledge and how they can use commit exactly. 
+Always keep instructive documentation up front, easy to use, direct with clear instructions & link to informative documents to know why its done this way. Instructive documents should be the landing point of the product for both carbons & silicons.
 
-Write detailed guides.
+It can give carbon the instructions on how to install & use it, or how to ask their silicon to use it.
 
-Write very good detailed instructions on how test enviorment for silicon-commit works. Write docs on all 3 cli, api, client. Keep it segregated and clear. Write all the documentations in docs/ folder in the main directory of silicon-commit.  
+For silicons, it can be that, but also how to do a lot more with it. Esp. things like building on top of it. Make it very clear what is expected, what is mandatory and how does the system work.
 
-# Later to do
+Then the silicon can dig deeper into the informative documentation to know all the possible ways to do it, & why its done the way its done.
 
-commit report `<report-message>`, this should send an report message to the user. 
+While both carbons and silicons can read the documentation, it'll likely be more silicon. So design it for silicons. The more reasons you give, the better a silicon would be at making a judgement call of how to do something.
+
+Since all IAM apps can both be used as is, and also built on top of... its imp to write documentation for both. Usage docs & Development docs.
+
+# Telemetry
+
+All IAM apps use Space Station [https://spacestation.teamofsilicons.com/docs] for telemetry. Telemetry is opted-in by default but can be opted out from settings if the user wants.
+
+Space Station is also a rust package which can be used from within the backend, or daemon, or cli to send telemetry.
+
+Record as many things as you think might be useful to diagnose or follow traces later.
+
+Since space station is just an event store, make sure to include all the source, step, progress, etc information inside each event. some of the system information is automatically added to the metadata so you need not add that.
+
+push context-rich, self-contained events.
+
+Space Station also support web, for web it has 2 possible pathways: analytics & events. Most of the Analytics is self captured and you can define a seperate event store from the web.
+
+
+# Configurability
+
+We ship highly configurable apps with sensible defaults. Very much like VS Code. flags to toggle / customize behaviors.
+
+
+# Updates
+
+For each Commit app release, provide one .tar.gz with honeycomb.yaml at the archive root and the prebuilt commit CLI for Linux, Windows and macOS on x86_64 and aarch64. The manifest maps the commit command to each target's executable and uses the app release version. Run `honeycomb validate` and then `honeycomb pack`. Refer to [Honeycomb docs](https://docs.honeycomb.teamofsilicons.com/) for the package format. Honeycomb handles installation and updates; Commit must not independently replace a Honeycomb-managed CLI.
+
+# Identifier schema
+
+Silicon IDs use `si:{silicon_id}` (for example `si:cos`), Carbon IDs use `c:{carbon_id}` (for example `c:saket`), and application IDs use the bare `{app_id}` (for example `briefcase`). The components after `si:` and `c:` are handles; each prefix appears exactly once. Silicon IDs and application IDs do not contain an organisation component. Organisation membership and application ownership are stored separately under `org_id`.
+
+Outside the schema patterns above, fields and standalone placeholders named `silicon_id`, `sid`, `carbon_id`, or `cid` carry the complete prefixed public ID; `app_id` carries the bare application ID. This applies to authentication, API and CLI inputs and outputs, configuration, permissions, URLs, events and stored identity references. Where a CLI selector uses `@`, it precedes the complete ID, such as `@si:cos` or `@c:saket`.

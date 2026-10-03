@@ -1,5 +1,8 @@
 export type Actor = { id: string; type: "carbon" | "silicon" };
 export type Session = {
+  environment_id?: string;
+  context_id?: string;
+  contexts?: Session[];
   authenticated: boolean;
   environment_name?: string;
   actor?: { type: "carbon" | "silicon"; public_id: string };

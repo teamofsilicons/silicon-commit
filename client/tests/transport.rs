@@ -13,7 +13,7 @@ async fn login_uses_versioned_route_keeps_test_context_and_stable_retry_key()
         .and(header("x-testing-environment-key","abcdefghijklmnopqrstuvwxyz123456"))
         .and(header("idempotency-key","reusable-login-key-001"))
         .and(body_json(json!({"slt":"slt_one_time"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_secret","refresh_token":"ort_secret","token_type":"Bearer","expires_in":3600,"scope":"profile.read","actor":{},"org_id":"tos"}))).expect(2).mount(&server).await;
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_secret","refresh_token":"ort_secret","token_type":"Bearer","expires_in":3600,"scope":"profile.read","actor":{"type":"carbon","public_id":"c:person"},"org_id":"tos"}))).expect(2).mount(&server).await;
     let client = Client::new(&server.uri())?
         .with_test_key("abcdefghijklmnopqrstuvwxyz123456")?
         .with_mutation(Mutation::with_key("reusable-login-key-001")?);
@@ -186,5 +186,79 @@ async fn collaborative_consumer_negotiates_and_preserves_secret_selection()
         c.get_project("project").await,
         Err(Error::Invalid(_))
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn testing_login_sends_selected_org_without_an_existing_bearer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .and(body_json(json!({"slt":"si:helper","org_id":"team-b"})))
+        .and(header("x-org-id", "team-b"))
+        .and(header(
+            "x-testing-environment-key",
+            "abcdefghijklmnopqrstuvwxyz123456",
+        ))
+        .and(|r: &wiremock::Request| !r.headers.contains_key("authorization"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"access_token":"access", "refresh_token":"refresh",
+            "token_type":"Bearer","expires_in":3600,"scope":"self.identity.read",
+            "actor":{"type":"silicon","public_id":"si:helper"},"org_id":"team-b"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = Client::new(&server.uri())?
+        .with_bearer("old-credentials")
+        .with_test_key("abcdefghijklmnopqrstuvwxyz123456")?
+        .with_org_id("team-b")
+        .login_with_slt("si:helper")
+        .await?;
+    assert_eq!(tokens.org_id.as_deref(), Some("team-b"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_session_responses_are_rejected_for_login_and_refresh()
+-> Result<(), Box<dyn std::error::Error>> {
+    let baseline = json!({"access_token":"access", "refresh_token":"refresh", "token_type":"Bearer", "expires_in":3600,
+        "scope":"self.identity.read", "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"});
+    for (field, value) in [
+        ("org_id", json!(null)),
+        ("org_id", json!("ab")),
+        ("org_id", json!("a".repeat(51))),
+        ("org_id", json!("other")),
+        (
+            "actor",
+            json!({"type":"application","public_id":"c:person"}),
+        ),
+        ("actor", json!({"type":"carbon","id":"person"})),
+        ("actor", json!({"type":"carbon","public_id":"si:person"})),
+        ("scope", json!("self.identity.read obo:write")),
+        ("access_token", json!("")),
+        ("refresh_token", json!("")),
+        ("expires_in", json!(0)),
+        ("token_type", json!("Other")),
+    ] {
+        let server = MockServer::start().await;
+        let mut invalid = baseline.clone();
+        invalid[field] = value;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(invalid))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = Client::new(&server.uri())?.with_org_id("tos");
+        assert!(
+            client.login_with_slt("code").await.is_err(),
+            "login accepted {field}"
+        );
+        assert!(
+            client.refresh_session("refresh").await.is_err(),
+            "refresh accepted {field}"
+        );
+    }
     Ok(())
 }

@@ -3,16 +3,16 @@
 Create a shared environment and import Commit in [Honeycomb](https://honeycomb.teamofsilicons.com). Use the imported application's `app_secret` to select it. Commit discovers its environment ID and name from IAM automatically. You do not enter or pair the administrative root key.
 
 ```sh
-commit testing use '<ask_...>'
-commit login '<test-SLT-or-existing-Carbon/Silicon-public-ID>'
-commit --org-id your-test-org projects create --data '{"name":"Try a release"}'
-commit testing status
-commit testing exit
+commit --profile work testing use '<ask_...>'
+commit --profile work --org-id your-test-org login '<test-code-or-existing-canonical-public-ID>'
+commit --profile work projects create --data '{"name":"Try a release"}'
+commit --profile work testing status
+commit --profile work testing exit
 # Or select a sandbox for just one command:
 commit --test '<ask_...>' login status --json
 ```
 
-In the website, choose **Test environment** on sign-in or Settings, enter the app secret, then sign in with a test SLT or an existing sandbox identity's public ID. A banner shows the name and current identity and lets you exit. Production and test cookies and CLI sessions are separate. Exiting resumes production or its sign-in screen.
+In the website, choose **Test environment** on sign-in or Settings, enter the app secret, then sign in with a test SLT or an existing sandbox identity's public ID. A banner shows the name and current identity and lets you exit. Production and test cookies and CLI sessions are separate. Each named CLI profile also keeps its own selected sandbox and credentials; pass the same profile on testing and application commands. Exiting resumes production or its sign-in screen.
 
 ## API and Rust
 
@@ -20,7 +20,8 @@ Send `X-Testing-App-Secret: ask_...` on every sandbox request. `X-Testing-Enviro
 
 ```rust
 let sandbox = Client::new("https://backend.commit.teamofsilicons.com")?
-    .with_test_app_secret(app_secret)?;
+    .with_test_app_secret(app_secret)?
+    .with_org_id("sandbox-org");
 let metadata = sandbox.testing_context().await?;
 let session = sandbox.login_with_slt(test_slt_or_public_id).await?;
 let signed_in = sandbox.with_bearer(session.access_token).with_org_id("sandbox-org");

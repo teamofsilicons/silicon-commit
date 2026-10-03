@@ -20,7 +20,7 @@ pub const fn updates_enabled() -> bool {
 }
 pub fn configure_updates(enabled: bool) -> Result<(), Box<dyn std::error::Error>> {
     if enabled {
-        return Err("Honeycomb manages Commit updates. Use honeycomb install 'tos>commit'; configure updates in Honeycomb.".into());
+        return Err("Honeycomb manages Commit updates. Use honeycomb install 'commit'; configure updates in Honeycomb.".into());
     }
     runtime::private_write(&runtime::directory().join("auto-update"), b"off")?;
     println!("Commit self-updates are disabled. Honeycomb manages installation and updates.");
@@ -34,7 +34,7 @@ pub async fn command(command: &DaemonCommand) -> Result<(), Box<dyn std::error::
             println!("{}", serde_json::json!({"auto_update":false,"update_manager":"honeycomb","installed":service.as_ref().is_some_and(|p|p.exists()),"service_file":service}));
             Ok(())
         }
-        DaemonCommand::Install | DaemonCommand::Run { .. } => Err("Honeycomb manages Commit updates. Use honeycomb install 'tos>commit'. Remove an old updater with commit daemon uninstall.".into()),
+        DaemonCommand::Install | DaemonCommand::Run { .. } => Err("Honeycomb manages Commit updates. Use honeycomb install 'commit'. Remove an old updater with commit daemon uninstall.".into()),
     }
 }
 fn user_home() -> Result<PathBuf, Box<dyn std::error::Error>> {

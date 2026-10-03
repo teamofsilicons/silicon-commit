@@ -5,7 +5,7 @@ import {
   createResource,
   createSignal,
 } from "solid-js";
-import { api, context, enc, navigate, query, session } from "./api";
+import { bindApi, context, enc, navigate, query, session } from "./api";
 import type { Todo, TodoStatus, Page, Note } from "./types";
 import {
   Confirm,
@@ -17,6 +17,7 @@ import {
   Modal,
   Status,
   StatusSelect,
+  segmentKeys,
   Submit,
   date,
   label,
@@ -29,6 +30,7 @@ export function TodoForm(p: {
   close: () => void;
   saved: (t: Todo) => void;
 }) {
+  const api = bindApi();
   const [title, setTitle] = createSignal(p.todo?.title || ""),
     [description, setDescription] = createSignal(p.todo?.description || ""),
     [assigned, setAssigned] = createSignal(
@@ -119,7 +121,7 @@ export function TodoForm(p: {
               maxLength={255}
               value={assigned()}
               onInput={(e) => setAssigned(e.currentTarget.value)}
-              placeholder="e.g. engineer:tos"
+              placeholder="e.g. si:engineer"
             />
           </Field>
           <Field label="Status">
@@ -157,6 +159,7 @@ export function TodoForm(p: {
   );
 }
 export function Todos() {
+  const api = bindApi();
   const [view, setView] = createSignal("assigned_to_me"),
     [filters, setFilters] = createSignal<Record<string, string>>({}),
     [showFilters, setShowFilters] = createSignal(false),
@@ -231,6 +234,8 @@ export function Todos() {
                 <button
                   role="tab"
                   aria-selected={view() === value}
+                  tabIndex={view() === value ? 0 : -1}
+                  onKeyDown={segmentKeys}
                   class={view() === value ? "active" : ""}
                   onClick={() => setView(value)}
                 >
@@ -360,7 +365,7 @@ export function Todos() {
             }
           >
             <div class="table-wrap">
-              <table>
+              <table class="todo-table" aria-label="Todos">
                 <thead>
                   <tr>
                     <th>Work</th>
@@ -444,6 +449,7 @@ export function Todos() {
   );
 }
 export function TodoDetail(p: { id: string }) {
+  const api = bindApi();
   const [todo, { refetch }] = createResource(
     () => context() + p.id,
     () => api<Todo>("/todos/" + enc(p.id)),
@@ -598,6 +604,7 @@ export function TodoDetail(p: { id: string }) {
   );
 }
 function Notes(p: { todoId: string }) {
+  const api = bindApi();
   const [data, { refetch }] = createResource(
     () => p.todoId,
     () => api<Page<Note>>("/todos/" + p.todoId + "/notes"),

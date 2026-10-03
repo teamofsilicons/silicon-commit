@@ -1,4 +1,4 @@
-import { batch, createSignal } from "solid-js";
+import { batch, createSignal, untrack } from "solid-js";
 import type { Session } from "./types";
 const read = (key: string, fallback: string) => {
   try {
@@ -11,9 +11,30 @@ export const [org, setOrgValue] = createSignal(read("commit.organization", ""));
 export const [environment, setEnvironmentValue] = createSignal(
   read("commit.environment", "production"),
 );
-export const [session, setSession] = createSignal<Session>({
+const [sessionValue, setSessionValue] = createSignal<Session>({
   authenticated: false,
 });
+export const session = sessionValue;
+const planeSessions = new Map<string, Session>();
+export function setSession(value: Session) {
+  const plane = untrack(environment);
+  if (value.environment_id && value.environment_id !== plane) return;
+  planeSessions.set(plane, value);
+  batch(() => {
+    setSessionValue(value);
+    setOrgValue(value.org_id || "");
+  });
+}
+export type RequestContext = { environment: string; org: string; id?: string };
+export const captureContext = (production = false): RequestContext => {
+  const scope = production ? "production" : environment();
+  const value = scope === environment() ? session() : planeSessions.get(scope);
+  return {
+    environment: scope,
+    org: value?.org_id || "",
+    id: value?.context_id,
+  };
+};
 export const setOrg = (v: string) => {
   setOrgValue(v);
   localStorage.setItem("commit.organization", v);
@@ -21,11 +42,13 @@ export const setOrg = (v: string) => {
 export const setEnvironment = (v: string) => {
   batch(() => {
     setEnvironmentValue(v);
-    setSession({ authenticated: false });
+    setSessionValue({ authenticated: false });
+    setOrgValue("");
   });
   localStorage.setItem("commit.environment", v);
 };
-export const context = () => environment() + "|" + org();
+export const context = () =>
+  environment() + "|" + session().context_id + "|" + org();
 export class ApiError extends Error {
   status: number;
   code: string;
@@ -52,18 +75,42 @@ export async function request<T>(
     production?: boolean;
     testKey?: string;
     signal?: AbortSignal;
+    context?: RequestContext;
   } = {},
 ): Promise<T> {
+  const bound = options.context || captureContext(options.production);
+  const current = () => {
+    const value = captureContext(options.production);
+    return (
+      value.environment === bound.environment &&
+      value.id === bound.id &&
+      value.org === bound.org
+    );
+  };
+  if (options.context && !current())
+    throw new ApiError(
+      409,
+      {
+        error: {
+          code: "session_context_changed",
+          message:
+            "Return to the original workspace before retrying this action.",
+        },
+      },
+      new Headers(),
+    );
   const method = options.method || "GET",
-    scope = options.production ? "production" : environment(),
+    scope = bound.environment,
     body =
       options.body === undefined ? undefined : JSON.stringify(options.body),
-    fingerprint = [scope, org(), method, path, body].join("|");
+    fingerprint = [scope, bound.id, bound.org, method, path, body].join("|");
   const headers: Record<string, string> = {
     "X-Commit-Environment": scope,
     "X-Commit-Telemetry": read("commit.telemetry", "on"),
   };
-  if (path.startsWith("/api/") && org()) headers["X-Org-ID"] = org();
+  if (bound.id && path !== "/auth/session")
+    headers["X-Commit-Context"] = bound.id;
+  if (path.startsWith("/api/") && bound.org) headers["X-Org-ID"] = bound.org;
   if (method !== "GET") {
     headers["Content-Type"] = "application/json";
     if (!pending.has(fingerprint))
@@ -90,10 +137,31 @@ export async function request<T>(
     response.status === 204
       ? undefined
       : await response.json().catch(() => undefined);
+  if (path !== "/auth/session" && !current())
+    throw new ApiError(
+      409,
+      {
+        error: {
+          code: "session_context_changed",
+          message:
+            "The response belongs to the previous workspace. Return there before retrying.",
+        },
+      },
+      response.headers,
+    );
   if (!response.ok) {
-    if (response.status < 500 && response.status !== 429)
+    if (
+      response.status < 500 &&
+      ![403, 409, 412, 429].includes(response.status)
+    )
       pending.delete(fingerprint);
-    if (response.status === 401 && scope === environment() && !options.testKey)
+    if (
+      response.status === 401 &&
+      ["unauthenticated", "session_expired"].includes(data?.error?.code) &&
+      current() &&
+      scope === environment() &&
+      !options.testKey
+    )
       window.dispatchEvent(new Event("commit:expired"));
     throw new ApiError(response.status, data, response.headers);
   }
@@ -104,6 +172,11 @@ export const api = <T>(
   path: string,
   options: Parameters<typeof request>[1] = {},
 ) => request<T>("/api" + path, options);
+export function bindApi() {
+  const bound = captureContext();
+  return <T>(path: string, options: Parameters<typeof request>[1] = {}) =>
+    api<T>(path, { ...options, context: bound });
+}
 export const enc = encodeURIComponent;
 export function query(values: Record<string, string | undefined>) {
   const q = new URLSearchParams();

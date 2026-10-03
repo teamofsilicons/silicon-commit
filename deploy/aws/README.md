@@ -99,7 +99,7 @@ are not treated as Commit management capabilities.
    secret in sandbox requests. Supporting the new isolated application credentials
    needs an agreed provisioning contract and implementation; sandbox product login
    is not ready. Sandbox management and cleanup were verified independently.
-3. IAM's `tos>commit` webhook is `pending_review`, with pending URL
+3. IAM's `commit` webhook is `pending_review`, with pending URL
    `https://backend.commit.teamofsilicons.com/webhook/`. An eligible IAM operator
    must perform verified step-up approval. The existing signing secret is deployed.
 

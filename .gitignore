@@ -15,3 +15,6 @@ docs-site/dist/
 __pycache__/
 
 /dist/
+
+# Exclude dependency directories and local worktree dependency links.
+**/node_modules

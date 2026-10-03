@@ -234,19 +234,13 @@ async fn verify_pair(
         .as_ref()
         .ok_or(AppError::ProviderUnavailable)?;
     if credentials.app_id != service.app_id()
+        || !(1..=80).contains(&credentials.app_id.len())
         || !credentials
             .app_id
-            .split_once('>')
-            .is_some_and(|(org, app)| {
-                [org, app].into_iter().all(|part| {
-                    !part.is_empty()
-                        && part.bytes().all(|byte| {
-                            byte.is_ascii_lowercase()
-                                || byte.is_ascii_digit()
-                                || matches!(byte, b'-' | b'_')
-                        })
-                })
-            })
+            .starts_with(|c: char| c.is_ascii_lowercase())
+        || !credentials.app_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
     {
         return Err(AppError::Validation {
             details: serde_json::json!({"fields":[{"field":"iam_app_id","message":"must match this deployment's canonical IAM application ID"}]}),
@@ -482,7 +476,7 @@ mod tests {
     const ROTATED_SECRET: &str = "ask_imported_testing_application_secret_00000002";
 
     fn basic(secret: &str) -> String {
-        format!("Basic {}", STANDARD.encode(format!("tos>commit:{secret}")))
+        format!("Basic {}", STANDARD.encode(format!("commit:{secret}")))
     }
 
     fn pair_input(app_id: &str, secret: &str) -> StrictJson<IamCredentialsInput> {
@@ -526,14 +520,14 @@ mod tests {
             .is_err()
         );
         for value in [
-            json!({"iam_app_id":"tos>commit"}),
-            json!({"iam_app_id":"tos>commit","iam_app_secret":TEST_SECRET,"iam_test_key":IAM_KEY}),
+            json!({"iam_app_id":"commit"}),
+            json!({"iam_app_id":"commit","iam_app_secret":TEST_SECRET,"iam_test_key":IAM_KEY}),
         ] {
             assert!(serde_json::from_value::<IamCredentialsInput>(value).is_err());
         }
         let input: CreateInput = serde_json::from_value(json!({
             "name":"paired", "iam_test_key":IAM_KEY,
-            "iam_app_id":"tos>commit", "iam_app_secret":TEST_SECRET
+            "iam_app_id":"commit", "iam_app_secret":TEST_SECRET
         }))?;
         let debug = format!("{input:?}");
         assert!(!debug.contains(IAM_KEY));
@@ -580,11 +574,11 @@ mod tests {
             &IamSettings {
                 mode: AuthenticationMode::Iam,
                 base_url: server.uri().parse()?,
-                app_id: Some("tos>commit".to_owned()),
+                app_id: Some("commit".to_owned()),
                 app_secret: Some(SecretString::from(
                     "production-global-credential-must-never-reach-test-iam",
                 )),
-                audience: "tos>commit".to_owned(),
+                audience: "commit".to_owned(),
                 webhook_secret: None,
                 webhook_key_version: 1,
             },
@@ -624,7 +618,7 @@ mod tests {
             State(state.clone()),
             borrowed_test_owner,
             Path(environment),
-            pair_input("tos>commit", TEST_SECRET),
+            pair_input("commit", TEST_SECRET),
         ))
         .await;
         assert!(matches!(forbidden, Err(AppError::Forbidden)));
@@ -632,7 +626,7 @@ mod tests {
             State(state.clone()),
             control_headers(Uuid::new_v4(), "owner")?,
             Path(environment),
-            pair_input("tos>commit", TEST_SECRET),
+            pair_input("commit", TEST_SECRET),
         ))
         .await;
         assert!(matches!(wrong_owner, Err(AppError::NotFound)));
@@ -640,14 +634,14 @@ mod tests {
             State(state.clone()),
             control_headers(organization, "member")?,
             Path(environment),
-            pair_input("tos>commit", TEST_SECRET),
+            pair_input("commit", TEST_SECRET),
         ))
         .await;
         assert!(matches!(member, Err(AppError::Forbidden)));
         for (app_id, secret) in [
             ("another>app", TEST_SECRET),
-            ("tos>commit", "too-short"),
-            ("tos>commit", "ask_credential_contains_whitespace_here "),
+            ("commit", "too-short"),
+            ("commit", "ask_credential_contains_whitespace_here "),
         ] {
             let invalid = scoped(pair_iam_credentials(
                 State(state.clone()),
@@ -677,7 +671,7 @@ mod tests {
             State(state.clone()),
             owner_headers.clone(),
             Path(environment),
-            pair_input("tos>commit", wrong_secret),
+            pair_input("commit", wrong_secret),
         ))
         .await;
         assert!(matches!(invalid, Err(AppError::Unauthenticated)));
@@ -702,7 +696,7 @@ mod tests {
             State(state.clone()),
             owner_headers.clone(),
             Path(environment),
-            pair_input("tos>commit", TEST_SECRET),
+            pair_input("commit", TEST_SECRET),
         ))
         .await?
         .0;
@@ -712,7 +706,7 @@ mod tests {
         assert!(!response.contains("iam_app_secret"));
         let (stored_id, stored_secret, retained_root): (String, Vec<u8>, Vec<u8>) = sqlx::query_as("SELECT iam_app_id,iam_app_secret_ciphertext,iam_test_key_ciphertext FROM commit.testing_environments WHERE environment_id=$1")
             .bind(environment).fetch_one(&pool).await?;
-        assert_eq!(stored_id, "tos>commit");
+        assert_eq!(stored_id, "commit");
         assert_eq!(
             decrypt_iam_key(&stored_secret).as_deref(),
             Some(TEST_SECRET)
@@ -725,17 +719,29 @@ mod tests {
         assert_eq!(retained_root, encrypted_root);
 
         let principal = Uuid::new_v4();
-        let token_response = json!({"access_token":"oat_paired","refresh_token":"ort_paired","token_type":"Bearer","expires_in":3600,"scope":"","actor":{"principal_id":principal,"type":"silicon","public_id":"smoke:paired-org"}});
+        let token_response = json!({"access_token":"oat_paired","refresh_token":"ort_paired","token_type":"Bearer","expires_in":3600,"scope":"","org_id":"paired-org","actor":{"principal_id":principal,"type":"silicon","public_id":"si:paired"}});
         Mock::given(method("POST"))
             .and(path("/api/v1/app-auth/tokens"))
             .and(header("authorization", basic(TEST_SECRET)))
             .and(header("x-testing-environment-key", IAM_KEY))
-            .and(body_string_contains("app_id=tos%3Ecommit"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(token_response))
-            .expect(2)
+            .and(body_string_contains("app_id=commit"))
+            .and(body_string_contains("slt=si%3Apaired"))
+            .and(body_string_contains("org_id=paired-org"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(token_response.clone()))
+            .expect(1)
             .mount(&server)
             .await;
-        let snapshot = json!({"principal_id":principal,"actor_type":"silicon","public_id":"smoke:paired-org","organization_id":Uuid::new_v4(),"org_id":"paired-org","membership_id":"smoke:paired-org[paired-org]","membership_version":1,"authorization_epoch":1,"audience":"tos>commit","testing_environment_id":Uuid::new_v4(),"scopes":[],"org_role":"owner","tags":[]});
+        Mock::given(method("POST"))
+            .and(path("/api/v1/app-auth/tokens"))
+            .and(header("authorization", basic(TEST_SECRET)))
+            .and(header("x-testing-environment-key", IAM_KEY))
+            .and(body_string_contains("app_id=commit"))
+            .and(body_string_contains("refresh_token=ort_paired"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(token_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let snapshot = json!({"principal_id":principal,"actor_type":"silicon","public_id":"si:paired","organization_id":Uuid::new_v4(),"org_id":"paired-org","membership_id":"si:paired[paired-org]","membership_version":1,"authorization_epoch":1,"audience":"commit","testing_environment_id":Uuid::new_v4(),"scopes":[],"org_role":"owner","tags":[]});
         Mock::given(method("POST"))
             .and(path("/api/v1/oauth/introspect"))
             .and(header("authorization", basic(TEST_SECRET)))
@@ -743,7 +749,7 @@ mod tests {
             .and(body_string_contains("token=oat_paired"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(json!({"active":true,"authorizations":[snapshot]})),
+                    .set_body_json(json!({"active":true,"client_id":"commit","audience":"commit","expires_at":4_102_444_800_i64,"actor_type":"silicon","public_id":"si:paired","org_id":"paired-org","authorization":snapshot})),
             )
             .expect(2)
             .mount(&server)
@@ -760,11 +766,18 @@ mod tests {
         let login = scoped(sessions::login(
             State(state.clone()),
             test_headers.clone(),
-            StrictJson(serde_json::from_value(json!({"slt":"slt_paired"}))?),
+            StrictJson(serde_json::from_value(
+                json!({"slt":"si:paired","org_id":"paired-org"}),
+            )?),
         ))
         .await?
         .0;
         assert_eq!(login.access_token, "oat_paired");
+        assert_eq!(login.org_id.as_deref(), Some("paired-org"));
+        assert_eq!(
+            login.actor.as_ref().map(|actor| actor.public_id.as_str()),
+            Some("si:paired")
+        );
         let mut authenticated_headers = test_headers.clone();
         authenticated_headers.insert("authorization", "Bearer oat_paired".parse()?);
         let status = scoped(sessions::status(
@@ -774,6 +787,8 @@ mod tests {
         .await?
         .0;
         assert_eq!(status["authenticated"], true);
+        assert_eq!(status["org_id"], "paired-org");
+        assert_eq!(status["actor"], json!({"type":"silicon","id":"si:paired"}));
         let organizations = scoped(sessions::organizations(
             State(state.clone()),
             authenticated_headers,
@@ -793,6 +808,14 @@ mod tests {
         .await?
         .0;
         assert_eq!(refreshed.access_token, "oat_paired");
+        assert_eq!(refreshed.org_id.as_deref(), Some("paired-org"));
+        assert_eq!(
+            refreshed
+                .actor
+                .as_ref()
+                .map(|actor| actor.public_id.as_str()),
+            Some("si:paired")
+        );
         test_headers.insert("idempotency-key", "pairing-regression-logout".parse()?);
         assert_eq!(
             scoped(sessions::logout(
@@ -811,7 +834,7 @@ mod tests {
                 name: format!("paired-{environment}"),
                 description: None,
                 iam_test_key: SecretString::from(IAM_KEY),
-                iam_app_id: "tos>commit".to_owned(),
+                iam_app_id: "commit".to_owned(),
                 iam_app_secret: SecretString::from(TEST_SECRET),
             }),
         ))
@@ -829,7 +852,7 @@ mod tests {
             State(state.clone()),
             manager_headers,
             Path(environment),
-            pair_input("tos>commit", ROTATED_SECRET),
+            pair_input("commit", ROTATED_SECRET),
         ))
         .await?
         .0;
@@ -857,7 +880,7 @@ mod tests {
                 State(state.clone()),
                 owner_headers,
                 Path(environment),
-                pair_input("tos>commit", TEST_SECRET),
+                pair_input("commit", TEST_SECRET),
             )
             .await
         })
@@ -891,9 +914,9 @@ mod tests {
             &IamSettings {
                 mode: AuthenticationMode::Iam,
                 base_url: server.uri().parse()?,
-                app_id: Some("tos>commit".into()),
+                app_id: Some("commit".into()),
                 app_secret: Some(SecretString::from("production-secret-never-sent")),
-                audience: "tos>commit".into(),
+                audience: "commit".into(),
                 webhook_secret: None,
                 webhook_key_version: 1,
             },
@@ -905,7 +928,7 @@ mod tests {
             &Uuid::new_v4().simple().to_string()[..11]
         );
         let id = Uuid::new_v4();
-        let fixture = |version: i64, cleaned: Option<&str>| json!({"environment_id":id,"application":{"app_id":"tos>commit","base_url":"https://backend.commit.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":"Discovered sandbox","version":version,"key_generation":1,"cleaned_at":cleaned,"created_at":"2026-01-01T00:00:00Z","creator_type":"carbon","creator_id":"owner"},"webhook_key_digest":format!("{}{}",id.simple(),id.simple())});
+        let fixture = |version: i64, cleaned: Option<&str>| json!({"environment_id":id,"application":{"app_id":"commit","base_url":"https://backend.commit.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":"tos","name":"Discovered sandbox","version":version,"key_generation":1,"cleaned_at":cleaned,"created_at":"2026-01-01T00:00:00Z","creator_type":"carbon","creator_id":"owner"},"webhook_key_digest":format!("{}{}",id.simple(),id.simple())});
         Mock::given(method("GET"))
             .and(path("/api/v1/application/testing-context"))
             .and(header("x-testing-application", basic(&test_secret)))

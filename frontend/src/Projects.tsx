@@ -5,7 +5,7 @@ import {
   createResource,
   createSignal,
 } from "solid-js";
-import { api, context, enc, navigate, query, session } from "./api";
+import { bindApi, context, enc, navigate, query, session } from "./api";
 import type { Project, Task, Entry, Diary, Page, TodoStatus } from "./types";
 import {
   Confirm,
@@ -18,6 +18,7 @@ import {
   Modal,
   Status,
   StatusSelect,
+  segmentKeys,
   Submit,
   date,
   label,
@@ -29,6 +30,7 @@ export function ProjectForm(p: {
   close: () => void;
   saved: (v: Project) => void;
 }) {
+  const api = bindApi();
   const [name, setName] = createSignal(p.project?.name || ""),
     [members, setMembers] = createSignal(
       p.project?.silicon_ids.join("\n") ||
@@ -208,6 +210,7 @@ export function ProjectForm(p: {
   );
 }
 export function Projects() {
+  const api = bindApi();
   const [status, setStatus] = createSignal(""),
     [silicon, setSilicon] = createSignal(""),
     [filter, setFilter] = createSignal(""),
@@ -368,6 +371,7 @@ export function Projects() {
   );
 }
 export function ProjectDetail(p: { id: string }) {
+  const api = bindApi();
   const [data, { refetch }] = createResource(
     () => context() + p.id,
     () => api<Project>("/projects/" + enc(p.id)),
@@ -469,6 +473,8 @@ export function ProjectDetail(p: { id: string }) {
                     <button
                       role="tab"
                       aria-selected={tab() === key}
+                      tabIndex={tab() === key ? 0 : -1}
+                      onKeyDown={segmentKeys}
                       class={tab() === key ? "active" : ""}
                       onClick={() => setTab(key)}
                     >
@@ -532,6 +538,7 @@ function TaskForm(p: {
   close: () => void;
   saved: () => void;
 }) {
+  const api = bindApi();
   const [title, setTitle] = createSignal(p.task?.title || ""),
     [description, setDescription] = createSignal(p.task?.description || ""),
     [status, setStatus] = createSignal<TodoStatus>(
@@ -616,6 +623,7 @@ function TaskForm(p: {
   );
 }
 function Tasks(p: { project: Project }) {
+  const api = bindApi();
   const [data, { refetch }] = createResource(
     () => p.project.id,
     () => api<Page<Task>>("/projects/" + p.project.id + "/tasks"),
@@ -781,6 +789,7 @@ function Tasks(p: { project: Project }) {
   );
 }
 function DiaryPanel(p: { project: Project }) {
+  const api = bindApi();
   const [data, { refetch }] = createResource(
     () => p.project.id,
     () => api<Diary>("/projects/" + p.project.id + "/diary"),
@@ -920,6 +929,7 @@ function EntryForm(p: {
   close: () => void;
   saved: () => void;
 }) {
+  const api = bindApi();
   const [title, setTitle] = createSignal(""),
     [description, setDescription] = createSignal(""),
     [status, setStatus] = createSignal("open");
@@ -1027,6 +1037,7 @@ function Entries(p: {
   revision: number;
   add: (s: "blocker" | "update") => void;
 }) {
+  const api = bindApi();
   const [data, { refetch }] = createResource(
     () => p.project.id + "|" + p.revision,
     () => api<Page<Entry>>("/projects/" + p.project.id + "/entries"),
@@ -1112,6 +1123,7 @@ function Entries(p: {
 }
 
 function ProjectHistory(p: { id: string }) {
+  const api = bindApi();
   const [before, setBefore] = createSignal<number>(),
     [snapshot, setSnapshot] = createSignal<any>();
   const action = useAction();

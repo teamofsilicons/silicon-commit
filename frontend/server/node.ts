@@ -12,7 +12,7 @@ const api = apiHandler({
     "https://backend.commit.teamofsilicons.com",
   origin: process.env.FRONTEND_ORIGIN,
   iam: process.env.IAM_AUTH_ORIGIN || "https://iam.teamofsilicons.com",
-  appId: process.env.COMMIT_APP_ID || "tos>commit",
+  appId: process.env.COMMIT_APP_ID || "commit",
   key: process.env.SESSION_COOKIE_KEY,
 });
 const root = resolve(process.env.ASSET_DIR || "dist/client");

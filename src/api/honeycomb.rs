@@ -265,7 +265,7 @@ mod tests {
             operation_id: Uuid::new_v4(),
             environment_id: Uuid::new_v4(),
             org_id: "test-owner".into(),
-            app_id: "tos>commit".into(),
+            app_id: "commit".into(),
             environment_revision: 1,
             generation: 1,
             key_version: 1,
@@ -293,7 +293,7 @@ mod tests {
         let mut op = operation();
         assert!(
             op.validate(
-                "tos>commit",
+                "commit",
                 &(op.org_id.clone(), op.environment_id, op.operation_id)
             )
             .is_ok()
@@ -307,7 +307,7 @@ mod tests {
         );
         assert!(
             op.validate(
-                "tos>commit",
+                "commit",
                 &(op.org_id.clone(), op.environment_id, Uuid::new_v4())
             )
             .is_err()
@@ -315,7 +315,7 @@ mod tests {
         op.testing_key = "bad".into();
         assert!(
             op.validate(
-                "tos>commit",
+                "commit",
                 &(op.org_id.clone(), op.environment_id, op.operation_id)
             )
             .is_err()
@@ -495,11 +495,11 @@ mod tests {
             &IamSettings {
                 mode: AuthenticationMode::Iam,
                 base_url: server.uri().parse()?,
-                app_id: Some("tos>commit".into()),
+                app_id: Some("commit".into()),
                 app_secret: Some(SecretString::from(
                     "production-credential-must-stay-out-of-sandbox",
                 )),
-                audience: "tos>commit".into(),
+                audience: "commit".into(),
                 webhook_secret: None,
                 webhook_key_version: 1,
             },
@@ -526,7 +526,7 @@ mod tests {
         execute(&pool, &op).await?;
         let id = op.environment_id;
         let secret = format!("ask_{}{}", id.simple(), "z".repeat(11));
-        let body = json!({"environment_id":id,"application":{"app_id":"tos>commit","base_url":"https://backend.commit.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":op.org_id,"name":"Lifecycle sandbox","version":1,"key_generation":1,"cleaned_at":null,"created_at":"2026-01-01T00:00:00Z","creator_type":"carbon","creator_id":"owner"},"webhook_key_digest":test_environments::digest(&op.testing_key)});
+        let body = json!({"environment_id":id,"application":{"app_id":"commit","base_url":"https://backend.commit.teamofsilicons.com","app_scope":{"iam":[],"external":[]},"webhook_scope":[],"testing_idle_days":15},"environment":{"environment_id":id,"org_id":op.org_id,"name":"Lifecycle sandbox","version":1,"key_generation":1,"cleaned_at":null,"created_at":"2026-01-01T00:00:00Z","creator_type":"carbon","creator_id":"owner"},"webhook_key_digest":test_environments::digest(&op.testing_key)});
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&body))
             .mount(&server)

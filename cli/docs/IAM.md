@@ -12,7 +12,7 @@ IAM's application-scoped organization response deliberately omits `status`. Comm
 
 ## Required read grants
 
-For the complete Carbon/Silicon assignment and project workflow, request and approve the following IAM scopes for `tos>commit`, then obtain fresh user consent. Keep the existing `self.identity.read` and `self.profile.read` grants. These are read disclosures, not Commit management permissions or IAM administration access.
+For the complete Carbon/Silicon assignment and project workflow, request and approve the following IAM scopes for `commit`, then obtain fresh user consent. Keep the existing `self.identity.read` and `self.profile.read` grants. These are read disclosures, not Commit management permissions or IAM administration access.
 
 | Additional scope | Why Commit needs it |
 | --- | --- |
@@ -27,4 +27,6 @@ Production login and task authorization are separate: fixing the SLT format does
 
 The scoped organization decoder correction is needed alongside these grants: adding permissions cannot make an intentionally redacted field appear. See [IAM's scope catalog](https://github.com/teamofsilicons/silicon-iam/blob/fe2a08d9a39802ce738100016d8db5fa126ac275/docs/IAM_SCOPES.md) and [testing environments](TEST_ENVIRONMENTS.md).
 
-`GET /api/v1/auth/status` accepts a bearer token, optional `X-Org-ID`, and optional `X-Testing-Environment-Key`. It verifies current authorization using the official IAM SDK. Success returns `authenticated: true`, `app_id`, `actor: {type, id}`, `org_id`, and `organizations`. An explicit organization must match the live grant. Without one, status checks all selected active organizations; `org_id` is null if multiple are available. Missing/rejected credentials or no active organization grant return 401. IAM/network failures retain their error status. The response contains neither tokens nor internal principal IDs, and test requests use the linked IAM environment. The client and CLI map 401 to a JSON `authenticated: false` result.
+`GET /api/v1/auth/status` accepts a bearer token, optional matching `X-Org-ID`, and optional `X-Testing-Environment-Key`. It verifies one active IAM 5 organization grant using the official SDK and returns `authenticated: true`, `app_id`, `actor: {type, id}`, `org_id`, and a one-item `organizations` compatibility array. An explicit organization must match the live grant. Missing/rejected credentials or no active organization grant return 401; IAM/network failures retain their error status. The response contains neither tokens nor internal principal IDs. The client and CLI map 401 to a JSON `authenticated: false` result.
+
+Login accepts an optional `org_id`, required to disambiguate an existing sandbox actor's organization. Token responses carry a canonical `actor: {type, public_id}` and nonempty `org_id`. The client rejects missing identity, invalid token type/lifetime, empty credentials and OBO scopes in ordinary sessions. The CLI stores that identity in its selected `--profile` and checks it on every refresh. It never derives extra organization sessions from one token family. A changed profile cannot receive an automatic retry of an earlier account's command.
