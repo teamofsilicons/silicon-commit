@@ -14,9 +14,11 @@ const tokens = {
   refresh_token: "private-refresh",
   expires_in: 3600,
   actor,
+  org_id: "test-team",
 };
 const scope = "11111111-1111-4111-8111-111111111111";
 const session = (expires = Date.now() + 3600000, environmentKey?: string) => ({
+  contextId: "a".repeat(32),
   access: tokens.access_token,
   refresh: tokens.refresh_token,
   expires,
@@ -26,18 +28,39 @@ const session = (expires = Date.now() + 3600000, environmentKey?: string) => ({
   environmentKey,
 });
 const cookie = (value = session(), s = "production") =>
-  "__Host-commit_" + s + "=" + seal(value, config, s);
+  "__Host-commit_" +
+  s +
+  "=" +
+  value.contextId +
+  "; __Host-commit_" +
+  s +
+  "_ctx_" +
+  value.contextId +
+  "=" +
+  seal(value, config, s);
 function req(
   path: string,
   method = "GET",
   body?: unknown,
   headers: Record<string, string> = {},
 ) {
+  const selectedScope =
+    headers["x-commit-environment"] ||
+    new URL(path, config.origin).searchParams.get("environment") ||
+    "production";
+  const selected = (headers.cookie || "")
+    .split(";")
+    .map((p) => p.trim())
+    .find((p) => p.startsWith(`__Host-commit_${selectedScope}=`))
+    ?.split("=")[1];
   return new Request(config.origin + path, {
     method,
     headers: {
       origin: config.origin,
       "content-type": "application/json",
+      ...(selected && /^[a-f0-9]{32}$/.test(selected)
+        ? { "x-commit-context": selected }
+        : {}),
       ...headers,
     },
     body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
@@ -49,7 +72,7 @@ function gateway(
   return createGateway(config, ((url: any, init: any) =>
     Promise.resolve(handler(new URL(url), init))) as typeof fetch);
 }
-test("unscoped token login keeps tokens encrypted, HttpOnly, and out of browser JSON", async () => {
+test("single-organization token login keeps tokens encrypted, HttpOnly, and out of browser JSON", async () => {
   const g = gateway((u, i) => {
     assert.equal(u.pathname, "/api/v1/auth/login");
     assert.deepEqual(JSON.parse(i.body as string), { slt: "fixture" });
@@ -58,11 +81,11 @@ test("unscoped token login keeps tokens encrypted, HttpOnly, and out of browser 
   });
   const r = await g(req("/auth/login", "POST", { slt: "fixture" }));
   assert.equal(r.status, 200);
-  assert.deepEqual(await r.json(), {
-    authenticated: true,
-    actor,
-    org_id: "",
-  });
+  const data = await r.json();
+  assert.equal(data.authenticated, true);
+  assert.deepEqual(data.actor, actor);
+  assert.equal(data.org_id, "test-team");
+  assert.equal(data.contexts[0].context_id, data.context_id);
   const c = r.headers.get("set-cookie")!;
   assert.match(c, /HttpOnly; SameSite=Lax; Secure/);
   assert.ok(!c.includes(tokens.access_token));
@@ -96,7 +119,7 @@ test("cookies cannot be tampered with or reused across testing scopes", async ()
         }),
       )
     ).status,
-    401,
+    409,
   );
   assert.equal(
     (
@@ -230,47 +253,41 @@ test("unscoped IAM redirect binds callback to a browser state and fixed origin",
   );
   assert.equal(success.status, 303);
   assert.equal(success.headers.get("location"), "/#/todos");
-  assert.equal(success.headers.getSetCookie().length, 2);
-  const sessionCookie = success.headers.getSetCookie()[0].split(";")[0];
+  assert.equal(success.headers.getSetCookie().length, 3);
+  const sessionCookie = success.headers
+    .getSetCookie()
+    .slice(0, 2)
+    .map((c) => c.split(";")[0])
+    .join("; ");
   const restored = await g(
     req("/auth/session", "GET", undefined, { cookie: sessionCookie }),
   );
-  assert.deepEqual(await restored.json(), {
-    authenticated: true,
-    actor: { type: "carbon", public_id: "person" },
-    org_id: "",
+  const restoredState = await restored.json();
+  assert.equal(restoredState.authenticated, true);
+  assert.deepEqual(restoredState.actor, {
+    type: "carbon",
+    public_id: "person",
   });
+  assert.equal(restoredState.org_id, "test-team");
 });
-test("unscoped sessions select organization per workspace request after refresh", async () => {
+test("an organization override cannot reuse the selected account bearer", async () => {
   let reads = 0;
-  const g = gateway((u, i) => {
-    const h = new Headers(i.headers);
-    if (u.pathname.endsWith("/auth/refresh")) {
-      assert.equal(h.has("x-org-id"), false);
-      return Response.json(tokens);
-    }
+  const g = gateway(() => {
     reads++;
-    assert.equal(h.get("x-org-id"), "selected-team");
-    assert.equal(h.get("authorization"), "Bearer private-access");
     return Response.json({ items: [] });
   });
-  const headers = {
-    cookie: cookie({ ...session(Date.now() - 1000), org: "" }),
-  };
-  const restored = await g(req("/auth/session", "GET", undefined, headers));
-  assert.equal((await restored.json()).org_id, "");
-  assert.equal(
-    (await g(req("/api/todos", "GET", undefined, headers))).status,
-    400,
-  );
   const result = await g(
     req("/api/todos", "GET", undefined, {
-      ...headers,
+      cookie: cookie(),
       "x-org-id": "selected-team",
     }),
   );
-  assert.equal(result.status, 200);
-  assert.equal(reads, 1);
+  assert.equal(result.status, 409);
+  assert.equal(
+    (await result.json()).error.code,
+    "organization_context_mismatch",
+  );
+  assert.equal(reads, 0);
 });
 test("sandbox login requires a key and logout clears only its own session", async () => {
   const g = gateway((u, i) => {
@@ -307,7 +324,7 @@ test("sandbox login requires a key and logout clears only its own session", asyn
   assert.equal(r.status, 204);
   assert.match(
     r.headers.get("set-cookie")!,
-    new RegExp("__Host-commit_" + scope + "=;"),
+    new RegExp("__Host-commit_" + scope + "_ctx_" + "a".repeat(32) + "=;"),
   );
 });
 
@@ -326,13 +343,13 @@ test("organization discovery uses the session bearer without caller organization
   assert.equal((await g(req("/auth/organizations", "POST"))).status, 404);
   const r = await g(
     req("/auth/organizations", "GET", undefined, {
-      cookie: cookie({ ...session(), org: "" }),
+      cookie: cookie(),
       "x-org-id": "unselected-team",
       authorization: "Bearer forged",
     }),
   );
   assert.equal(r.status, 200);
-  assert.deepEqual(await r.json(), ["selected-team", "test-team"]);
+  assert.deepEqual(await r.json(), ["test-team"]);
   assert.equal(calls, 1);
 });
 
@@ -356,9 +373,12 @@ test("automatic sandbox selection encrypts its secret and never replaces product
   const body = await r.text();
   assert.ok(!body.includes(key));
   const selected = r.headers.get("set-cookie")!;
-  assert.ok(selected.startsWith("__Host-commit_" + scope + "="));
+  assert.ok(selected.startsWith("__Host-commit_" + scope + "_ctx_"));
   assert.ok(!selected.includes(key));
-  const selectedCookie = selected.split(";")[0];
+  const selectedCookie = r.headers
+    .getSetCookie()
+    .map((c) => c.split(";")[0])
+    .join("; ");
   const status = await g(
     req("/auth/session", "GET", undefined, {
       cookie: selectedCookie,
@@ -490,7 +510,7 @@ test("an early access rejection renews once and retries the exact scoped mutatio
   assert.ok(
     result.headers
       .get("set-cookie")
-      ?.startsWith("__Host-commit_" + scope + "="),
+      ?.startsWith("__Host-commit_" + scope + "_ctx_"),
   );
 });
 
@@ -577,4 +597,253 @@ test("test login replaces the short selection deadline with the full session dea
   const saved = open(value, config, scope)!;
   assert.ok(saved.deadline > Date.now() + 6 * 86400000);
   assert.equal(saved.environmentKey, secret);
+});
+
+function browserJar(initial = "") {
+  const values = new Map(
+    initial
+      .split(";")
+      .filter(Boolean)
+      .map((part) => {
+        const [key, ...value] = part.trim().split("=");
+        return [key, value.join("=")];
+      }),
+  );
+  return {
+    cookie: () =>
+      [...values].map(([key, value]) => `${key}=${value}`).join("; "),
+    apply(response: Response) {
+      for (const header of response.headers.getSetCookie()) {
+        const [key, ...value] = header.split(";")[0].split("=");
+        if (header.includes("Max-Age=0;")) values.delete(key);
+        else values.set(key, value.join("="));
+      }
+    },
+    selected: (s = "production") => values.get(`__Host-commit_${s}`),
+  };
+}
+
+test("saved Carbon and Silicon workspaces separate same-org accounts and test planes", async () => {
+  let logins = 0,
+    calls = 0;
+  const identities = [
+    { actor: { type: "carbon", public_id: "first" }, org_id: "test-team" },
+    { actor: { type: "carbon", public_id: "second" }, org_id: "test-team" },
+    { actor: { type: "silicon", public_id: "builder" }, org_id: "other-team" },
+  ];
+  const g = gateway((url, init) => {
+    calls++;
+    if (url.pathname.endsWith("/testing-context"))
+      return Response.json({ environment_id: scope, name: "Sandbox" });
+    if (url.pathname.endsWith("/auth/login"))
+      return Response.json({
+        ...tokens,
+        ...identities[logins++ % identities.length],
+        refresh_token: `family-${logins}`,
+      });
+    if (url.pathname.endsWith("/auth/logout"))
+      return new Response(null, { status: 204 });
+    return Response.json({
+      bearer: new Headers(init.headers).get("authorization"),
+    });
+  });
+  const jar = browserJar(),
+    ids: string[] = [];
+  for (let index = 0; index < 3; index++) {
+    const result = await g(
+      req(
+        "/auth/login",
+        "POST",
+        { slt: `login-${index}` },
+        { cookie: jar.cookie() },
+      ),
+    );
+    assert.equal(result.status, 200);
+    const data = await result.json();
+    assert.equal(data.contexts.length, index + 1);
+    ids.push(data.context_id);
+    jar.apply(result);
+  }
+  assert.equal(new Set(ids).size, 3);
+  const switched = await g(
+    req(
+      "/auth/context",
+      "POST",
+      { context_id: ids[0] },
+      { cookie: jar.cookie() },
+    ),
+  );
+  assert.equal(switched.status, 200);
+  assert.equal((await switched.json()).actor.public_id, "first");
+  jar.apply(switched);
+  const before = calls;
+  for (const [path, method] of [
+    ["/api/projects", "POST"],
+    ["/auth/logout", "POST"],
+    ["/auth/organizations", "GET"],
+  ]) {
+    const stale = await g(
+      req(
+        path,
+        method,
+        {},
+        { cookie: jar.cookie(), "x-commit-context": ids[2] },
+      ),
+    );
+    assert.equal(stale.status, 409);
+    assert.equal((await stale.json()).error.code, "session_context_changed");
+  }
+  assert.equal(calls, before);
+  const attached = await g(
+    req(
+      "/auth/testing",
+      "POST",
+      { app_secret: `ask_${"a".repeat(43)}` },
+      { cookie: jar.cookie() },
+    ),
+  );
+  jar.apply(attached);
+  const testLogin = await g(
+    req(
+      "/auth/login",
+      "POST",
+      { slt: "test-login" },
+      { cookie: jar.cookie(), "x-commit-environment": scope },
+    ),
+  );
+  jar.apply(testLogin);
+  assert.equal((await testLogin.json()).contexts.length, 1);
+  const foreign = await g(
+    req(
+      "/auth/context",
+      "POST",
+      { context_id: ids[1] },
+      { cookie: jar.cookie(), "x-commit-environment": scope },
+    ),
+  );
+  assert.equal(foreign.status, 404);
+  assert.equal(jar.selected(), ids[0]);
+  const logout = await g(
+    req("/auth/logout", "POST", {}, { cookie: jar.cookie() }),
+  );
+  jar.apply(logout);
+  const saved = await g(
+    req("/auth/session", "GET", undefined, { cookie: jar.cookie() }),
+  );
+  const state = await saved.json();
+  assert.equal(state.authenticated, false);
+  assert.equal(state.contexts.length, 2);
+});
+
+test("a delayed renewal or invalidation cannot replace a more recently selected account", async () => {
+  for (const expires of [false, true]) {
+    let release!: () => void, started!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const a = session(Date.now() - 1000),
+      b = {
+        ...session(),
+        contextId: "b".repeat(32),
+        actor: { type: "carbon", public_id: "other" },
+        refresh: "family-b",
+      };
+    const jar = browserJar(
+      cookie(a) +
+        "; " +
+        `__Host-commit_production_ctx_${b.contextId}=${seal(b, config, "production")}`,
+    );
+    const g = gateway(async (url) => {
+      if (url.pathname.endsWith("/auth/refresh")) {
+        started();
+        await wait;
+        return expires
+          ? Response.json({ error: { code: "invalid_grant" } }, { status: 401 })
+          : Response.json({
+              ...tokens,
+              access_token: "new-a",
+              refresh_token: "new-family-a",
+            });
+      }
+      return Response.json({ items: [] });
+    });
+    const pending = g(
+      req("/api/todos", "GET", undefined, { cookie: jar.cookie() }),
+    );
+    await entered;
+    const switched = await g(
+      req(
+        "/auth/context",
+        "POST",
+        { context_id: b.contextId },
+        { cookie: jar.cookie() },
+      ),
+    );
+    jar.apply(switched);
+    release();
+    const result = await pending;
+    assert.equal(result.status, expires ? 401 : 200);
+    assert.ok(
+      result.headers
+        .getSetCookie()
+        .every((header) =>
+          header.startsWith(`__Host-commit_production_ctx_${a.contextId}=`),
+        ),
+    );
+    jar.apply(result);
+    assert.equal(jar.selected(), b.contextId);
+    const active = await g(
+      req("/auth/session", "GET", undefined, { cookie: jar.cookie() }),
+    );
+    assert.equal((await active.json()).actor.public_id, "other");
+  }
+});
+
+test("refresh cannot change account kind, identity or organization", async () => {
+  for (const change of [
+    { actor: { ...actor, type: "carbon" } },
+    { actor: { ...actor, public_id: "someone-else" } },
+    { org_id: "another-org" },
+    { org_id: undefined },
+  ]) {
+    const keys: string[] = [];
+    const g = gateway((_url, init) => {
+      keys.push(new Headers(init.headers).get("idempotency-key")!);
+      return Response.json({ ...tokens, ...change });
+    });
+    for (let retry = 0; retry < 2; retry++) {
+      const result = await g(
+        req("/auth/session", "GET", undefined, {
+          cookie: cookie(session(Date.now() - 1000)),
+        }),
+      );
+      assert.equal(result.status, 502);
+      assert.equal(result.headers.has("set-cookie"), false);
+    }
+    assert.equal(keys[0], keys[1]);
+  }
+});
+
+test("legacy unscoped encrypted cookies require a new IAM login", async () => {
+  let calls = 0;
+  const old = { ...session() } as any;
+  delete old.contextId;
+  const g = gateway(() => {
+    calls++;
+    return Response.json({});
+  });
+  const result = await g(
+    req("/auth/session", "GET", undefined, {
+      cookie: `__Host-commit_production=${seal(old, config, "production")}`,
+    }),
+  );
+  assert.deepEqual(await result.json(), {
+    authenticated: false,
+    environment_id: "production",
+    contexts: [],
+  });
+  assert.equal(calls, 0);
 });

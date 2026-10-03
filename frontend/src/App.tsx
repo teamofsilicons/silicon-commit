@@ -11,6 +11,7 @@ import {
 } from "solid-js";
 import {
   api,
+  captureContext,
   context,
   environment,
   navigate,
@@ -39,7 +40,11 @@ export default function App() {
   );
   createEffect(() => {
     const s = auth();
-    if (s) {
+    if (
+      s &&
+      !auth.loading &&
+      (!s.environment_id || s.environment_id === environment())
+    ) {
       setSession(s);
     }
   });
@@ -51,21 +56,18 @@ export default function App() {
   onCleanup(() => window.removeEventListener("commit:expired", expire));
   const logout = useAction();
   const [organizations, { refetch: reloadOrganizations }] = createResource(
-    () =>
-      session().authenticated ? environment() + "|" + sessionEpoch() : false,
+    () => (session().authenticated ? context() + "|" + sessionEpoch() : false),
     () => request<string[]>("/auth/organizations"),
   );
-  createEffect(() => {
-    const choices = organizations();
-    if (
-      session().authenticated &&
-      choices &&
-      !organizations.loading &&
-      !organizations.error
-    ) {
-      if (!choices.includes(org())) setOrg(choices[0] || "");
-    }
-  });
+  const changeContext = useAction();
+  async function selectContext(contextId: string) {
+    await request<Session>("/auth/context", {
+      method: "POST",
+      body: { context_id: contextId },
+    });
+    await refetch();
+    setMobile(false);
+  }
   const route = () => path().split("?")[0].split("/").filter(Boolean),
     active = () => route()[0] || "todos";
   return (
@@ -85,7 +87,7 @@ export default function App() {
       >
         <Show
           when={session().authenticated}
-          fallback={<Login error={auth.error} />}
+          fallback={<Login error={auth.error} selectContext={selectContext} />}
         >
           <div class="app-shell">
             <a
@@ -111,32 +113,32 @@ export default function App() {
             >
               <Brand />
               <div class="org-picker">
-                <Field label="ORGANIZATION">
+                <Field label="ACCOUNT & ORGANIZATION">
                   <select
-                    aria-label="Organization"
-                    value={org()}
-                    disabled={
-                      organizations.loading ||
-                      !!organizations.error ||
-                      !organizations()?.length
+                    aria-label="Account and organization"
+                    value={session().context_id}
+                    disabled={changeContext.busy()}
+                    onChange={(e) =>
+                      void changeContext.run(() =>
+                        selectContext(e.currentTarget.value),
+                      )
                     }
-                    onChange={(e) => {
-                      setOrg(e.currentTarget.value);
-                      setMobile(false);
-                    }}
                   >
-                    <Show when={!organizations()?.length}>
-                      <option value="">
-                        {organizations.loading
-                          ? "Loading organizations…"
-                          : "No organizations available"}
-                      </option>
-                    </Show>
-                    <For each={organizations()}>
-                      {(id) => <option value={id}>{id}</option>}
+                    <For each={session().contexts || [session()]}>
+                      {(saved) => (
+                        <option value={saved.context_id}>
+                          {saved.actor?.public_id} · {saved.org_id}
+                        </option>
+                      )}
                     </For>
                   </select>
                 </Field>
+                <Show when={environment() === "production"}>
+                  <a class="text-button" href="/auth/start">
+                    Add an account or organization
+                  </a>
+                </Show>
+                <ErrorBox error={changeContext.error()} />
               </div>
               <nav aria-label="Main navigation">
                 <For
@@ -250,8 +252,8 @@ export default function App() {
                         when={!organizations.loading && !organizations.error}
                       >
                         <p>
-                          No organizations are available for this session.
-                          Choose your organizations in IAM to continue.
+                          No organizations are available for this session. Sign
+                          in to an organization in IAM to continue.
                         </p>
                         <a
                           class="button primary"
@@ -299,21 +301,25 @@ export default function App() {
                 </Show>
               </main>
               <Show when={clean()} keyed>
-                {(id) => (
-                  <Confirm
-                    title="Clean this testing workspace?"
-                    message="All todos, projects, and activity in this testing workspace will be removed permanently. Its name and key remain."
-                    label="Clean workspace"
-                    close={() => setClean(undefined)}
-                    action={async () => {
-                      await api("/test-environments/" + id + "/clean", {
-                        method: "POST",
-                        body: {},
-                      });
-                      window.location.reload();
-                    }}
-                  />
-                )}
+                {(id) => {
+                  const original = captureContext();
+                  return (
+                    <Confirm
+                      title="Clean this testing workspace?"
+                      message="All todos, projects, and activity in this testing workspace will be removed permanently. Its name and key remain."
+                      label="Clean workspace"
+                      close={() => setClean(undefined)}
+                      action={async () => {
+                        await api("/test-environments/" + id + "/clean", {
+                          method: "POST",
+                          context: original,
+                          body: {},
+                        });
+                        window.location.reload();
+                      }}
+                    />
+                  );
+                }}
               </Show>
               <footer>
                 <span>Silicon Commit</span>
@@ -334,7 +340,11 @@ function Brand() {
     </a>
   );
 }
-function Login(p: { error?: unknown }) {
+function Login(p: {
+  error?: unknown;
+  selectContext: (id: string) => Promise<void>;
+}) {
+  const savedAction = useAction();
   return (
     <div class="login-layout">
       <section class="login-intro">
@@ -388,6 +398,20 @@ function Login(p: { error?: unknown }) {
           >
             Continue with IAM <Icon name="arrow" />
           </a>
+          <For each={session().contexts || []}>
+            {(saved) => (
+              <button
+                class="button full"
+                disabled={savedAction.busy()}
+                onClick={() =>
+                  void savedAction.run(() => p.selectContext(saved.context_id!))
+                }
+              >
+                {saved.actor?.public_id} · {saved.org_id}
+              </button>
+            )}
+          </For>
+          <ErrorBox error={savedAction.error()} />
           <TestingLogin />
           <p class="login-footnote">
             Identity and access are managed by Silicon IAM. Commit never asks

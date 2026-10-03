@@ -13,6 +13,7 @@ export type Config = {
   key: string;
 };
 type Session = {
+  contextId: string;
   access: string;
   refresh: string;
   expires: number;
@@ -75,6 +76,8 @@ export function open(value: string, c: Config, scope: string): Session | null {
     return s &&
       typeof s.access === "string" &&
       typeof s.refresh === "string" &&
+      /^[a-f0-9]{32}$/.test(s.contextId) &&
+      (s.selectionOnly || validOrg(s.org)) &&
       s.deadline > Date.now()
       ? s
       : null;
@@ -85,16 +88,40 @@ export function open(value: string, c: Config, scope: string): Session | null {
 const summary = (s: Session | null) =>
   s
     ? {
+        context_id: s.contextId,
         authenticated: !s.selectionOnly,
         actor: s.selectionOnly ? undefined : s.actor,
         org_id: s.org,
         environment_name: s.environmentName,
       }
     : { authenticated: false };
+const contextName = (c: Config, scope: string, contextId: string) =>
+  `${cookieName(c, scope)}_ctx_${contextId}`;
 const sessionHeader = (s: Session, c: Config, scope: string) =>
-  `${cookieName(c, scope)}=${seal(s, c, scope)}; Max-Age=${Math.max(0, Math.floor((s.deadline - Date.now()) / 1000))}${options(c)}`;
-const clearHeader = (c: Config, scope: string) =>
-  `${cookieName(c, scope)}=; Max-Age=0${options(c)}`;
+  `${contextName(c, scope, s.contextId)}=${seal(s, c, scope)}; Max-Age=${Math.max(0, Math.floor((s.deadline - Date.now()) / 1000))}${options(c)}`;
+const selectedHeader = (s: Session, c: Config, scope: string) =>
+  `${cookieName(c, scope)}=${s.contextId}; Max-Age=${Math.max(0, Math.floor((s.deadline - Date.now()) / 1000))}${options(c)}`;
+const clearHeader = (c: Config, scope: string, contextId: string) =>
+  `${contextName(c, scope, contextId)}=; Max-Age=0${options(c)}`;
+function contexts(request: Request, c: Config, scope: string) {
+  const prefix = contextName(c, scope, ""),
+    result: Session[] = [];
+  for (const part of (request.headers.get("cookie") || "").split(";")) {
+    const name = part.trim().split("=")[0];
+    if (!name.startsWith(prefix)) continue;
+    const contextId = name.slice(prefix.length);
+    if (!/^[a-f0-9]{32}$/.test(contextId)) continue;
+    const value = open(cookie(request, name), c, scope);
+    if (value?.contextId === contextId) result.push(value);
+  }
+  return result;
+}
+function loginHeaders(s: Session, c: Config, scope: string) {
+  const h = new Headers();
+  h.append("set-cookie", sessionHeader(s, c, scope));
+  h.append("set-cookie", selectedHeader(s, c, scope));
+  return h;
+}
 // IAM keeps secret-bearing token responses replayable for at most ten minutes.
 // Commit's backend forwards expires_in without the replay marker or original issue
 // time. Subtract that bound so another gateway cannot extend a replayed credential.
@@ -113,12 +140,25 @@ function fromTokens(
     !t.refresh_token ||
     !["carbon", "silicon"].includes(t.actor?.type) ||
     typeof t.actor?.public_id !== "string" ||
+    !t.actor.public_id ||
+    !validOrg(t.org_id) ||
     !Number.isSafeInteger(t.expires_in) ||
     t.expires_in <= 0 ||
     !Number.isSafeInteger(startedAt + t.expires_in * 1000)
   )
     throw new Error("Invalid login response");
+  if (
+    previous &&
+    !previous.selectionOnly &&
+    (previous.actor.type !== t.actor.type ||
+      previous.actor.public_id !== t.actor.public_id ||
+      previous.org !== t.org_id)
+  )
+    throw new Error("The refreshed IAM context changed");
   return {
+    contextId: previous?.selectionOnly
+      ? randomBytes(16).toString("hex")
+      : previous?.contextId || randomBytes(16).toString("hex"),
     access: t.access_token,
     refresh: t.refresh_token,
     expires: startedAt + Math.max(0, t.expires_in * 1000 - tokenReplayWindow),
@@ -126,7 +166,7 @@ function fromTokens(
       ? Date.now() + 7 * 86400000
       : (previous?.deadline ?? Date.now() + 7 * 86400000),
     actor: t.actor,
-    org: validOrg(t.org_id) ? t.org_id : (previous?.org ?? ""),
+    org: t.org_id,
     environmentKey,
     environmentName: previous?.environmentName,
   };
@@ -248,7 +288,44 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         "Reload this page before continuing.",
         "origin_rejected",
       );
-    let session = open(cookie(request, cookieName(c, scope)), c, scope);
+    const saved = contexts(request, c, scope);
+    const selectedId = cookie(request, cookieName(c, scope));
+    let session = saved.find((s) => s.contextId === selectedId) || null;
+    const state = (current: Session | null) => ({
+      ...summary(current),
+      environment_id: scope,
+      contexts: saved
+        .filter((s) => !s.selectionOnly && s.contextId !== current?.contextId)
+        .concat(current && !current.selectionOnly ? [current] : [])
+        .map(summary),
+    });
+    const marker = request.headers.get("x-commit-context");
+    if (
+      ![
+        "/auth/start",
+        "/auth/callback",
+        "/auth/session",
+        "/auth/testing",
+      ].includes(path) &&
+      ((marker && marker !== session?.contextId) ||
+        (session && marker !== session.contextId))
+    )
+      return failure(
+        409,
+        "This workspace changed. Reload before continuing the original action.",
+        "session_context_changed",
+      );
+    if (
+      path.startsWith("/api/") &&
+      session &&
+      request.headers.has("x-org-id") &&
+      request.headers.get("x-org-id") !== session.org
+    )
+      return failure(
+        409,
+        "Sign in to that organization separately.",
+        "organization_context_mismatch",
+      );
     try {
       if (path === "/auth/start" && method === "GET") {
         const state = randomBytes(24).toString("base64url"),
@@ -294,8 +371,12 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
             headers: { location: "/#/login?error=login_failed" },
           });
         const s = fromTokens(await r.json(), startedAt);
-        const h = new Headers({ location: "/#/todos" });
-        h.append("set-cookie", sessionHeader(s, c, "production"));
+        s.contextId = createHmac("sha256", c.key)
+          .update("production|" + s.refresh)
+          .digest("hex")
+          .slice(0, 32);
+        const h = loginHeaders(s, c, "production");
+        h.set("location", "/#/todos");
         h.append("set-cookie", `commit_login=; Max-Age=0${options(c)}`);
         return new Response(null, { status: 303, headers: h });
       }
@@ -318,6 +399,10 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         )
           return failure(502, "IAM returned invalid testing metadata.");
         const selected: Session = {
+          contextId: createHmac("sha256", c.key)
+            .update(meta.environment_id + "|selector|" + input.app_secret)
+            .digest("hex")
+            .slice(0, 32),
           access: "",
           refresh: "",
           actor: { type: "carbon", public_id: "" },
@@ -329,9 +414,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           selectionOnly: true,
         };
         return Response.json(meta, {
-          headers: {
-            "set-cookie": sessionHeader(selected, c, meta.environment_id),
-          },
+          headers: loginHeaders(selected, c, meta.environment_id),
         });
       }
       if (path === "/auth/login" && method === "POST") {
@@ -377,10 +460,14 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           await r.json(),
           startedAt,
           scope === "production" ? undefined : selectedSecret,
-          session || undefined,
+          session ? { ...session, selectionOnly: true } : undefined,
         );
-        return Response.json(summary(session), {
-          headers: { "set-cookie": sessionHeader(session, c, scope) },
+        session.contextId = createHmac("sha256", c.key)
+          .update(scope + "|" + session.refresh)
+          .digest("hex")
+          .slice(0, 32);
+        return Response.json(state(session), {
+          headers: loginHeaders(session, c, scope),
         });
       }
       if (path === "/auth/session" && method === "GET") {
@@ -390,10 +477,25 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           session.expires < Date.now() + 30000
         )
           session = await refresh(session);
-        return Response.json(summary(session), {
+        return Response.json(state(session), {
           headers: session
             ? { "set-cookie": sessionHeader(session, c, scope) }
             : {},
+        });
+      }
+      if (path === "/auth/context" && method === "POST") {
+        const body = await request.json();
+        const selected = saved.find(
+          (s) => s.contextId === body?.context_id && !s.selectionOnly,
+        );
+        if (!selected)
+          return failure(
+            404,
+            "That saved workspace is unavailable in this environment.",
+            "context_not_found",
+          );
+        return Response.json(state(selected), {
+          headers: { "set-cookie": selectedHeader(selected, c, scope) },
         });
       }
       if (path === "/auth/logout" && method === "POST") {
@@ -415,7 +517,9 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         }
         return new Response(null, {
           status: 204,
-          headers: { "set-cookie": clearHeader(c, scope) },
+          headers: session
+            ? { "set-cookie": clearHeader(c, scope, session.contextId) }
+            : {},
         });
       }
       if (
@@ -459,6 +563,12 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           h.set("authorization", "Bearer " + session.access);
           if (!organizations) {
             const org = request.headers.get("x-org-id") || session.org;
+            if (org !== session.org)
+              return failure(
+                409,
+                "Sign in to that organization separately.",
+                "organization_context_mismatch",
+              );
             if (!validOrg(org))
               return failure(400, "Choose an organization first.");
             h.set("x-org-id", org);
@@ -502,6 +612,25 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
         }
         if (rotated && session)
           out.set("set-cookie", sessionHeader(session, c, scope));
+        if (organizations && r.ok) {
+          const choices = await r.json().catch(() => null);
+          if (
+            !Array.isArray(choices) ||
+            !session ||
+            !choices.includes(session.org)
+          )
+            return Response.json(
+              {
+                error: {
+                  code: "invalid_organization_context",
+                  message:
+                    "The organization does not match the selected IAM context.",
+                },
+              },
+              { status: 502, headers: out },
+            );
+          return Response.json([session.org], { headers: out });
+        }
         return new Response(r.body, { status: r.status, headers: out });
       }
       return failure(404, "Not found.");
@@ -509,13 +638,17 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
       if (error instanceof SessionExpired) {
         const response =
           path === "/auth/session"
-            ? Response.json({ authenticated: false })
+            ? Response.json(state(null))
             : failure(
                 401,
                 "Your session expired. Sign in again.",
                 "unauthenticated",
               );
-        response.headers.set("set-cookie", clearHeader(c, scope));
+        if (session)
+          response.headers.set(
+            "set-cookie",
+            clearHeader(c, scope, session.contextId),
+          );
         return response;
       }
       return failure(

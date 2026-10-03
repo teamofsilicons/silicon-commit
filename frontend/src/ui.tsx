@@ -119,20 +119,26 @@ export function Field(p: {
 }
 export function ErrorBox(p: { error: unknown; retry?: () => void }) {
   const e = () => p.error as ApiError;
+  const changedContext = () =>
+    ["session_context_changed", "organization_context_mismatch"].includes(
+      e()?.code,
+    );
   return (
     <Show when={p.error}>
       <div class="error-box" role="alert">
         <strong>
-          {e().status === 409
-            ? "This item changed"
-            : e().status === 403
-              ? "This action isn’t available to your account"
-              : e().status === 429
-                ? "Please wait a moment"
-                : "Something needs attention"}
+          {changedContext()
+            ? "Workspace changed"
+            : e().status === 409
+              ? "This item changed"
+              : e().status === 403
+                ? "This action isn’t available to your account"
+                : e().status === 429
+                  ? "Please wait a moment"
+                  : "Something needs attention"}
         </strong>
         <p>
-          {e().status === 409
+          {e().status === 409 && !changedContext()
             ? "Your draft is preserved. Reload the latest version before saving again."
             : e().message || String(p.error)}
         </p>
