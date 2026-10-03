@@ -1,4 +1,4 @@
-import { signInPopup, type IdentityKind } from "./popup";
+import { signInPopup, continueSignInHere, type IdentityKind } from "./popup";
 import {
   For,
   Match,
@@ -353,7 +353,11 @@ function PopupSignIn() {
   const [loginError, setLoginError] = createSignal<unknown>();
   const [signingIn, setSigningIn] = createSignal(false);
   const controller = new AbortController();
-  onCleanup(() => controller.abort());
+  let activePopup: AbortController | undefined;
+  onCleanup(() => {
+    controller.abort();
+    activePopup?.abort();
+  });
   async function signIn(kind: IdentityKind) {
     if (signingIn()) return;
     setSigningIn(true);
@@ -361,9 +365,14 @@ function PopupSignIn() {
     if (environment() !== "production") setEnvironment("production");
     const bound = captureContext();
     const original = context();
-    const current = () => !controller.signal.aborted && context() === original;
+    const pending = new AbortController();
+    activePopup = pending;
+    const current = () =>
+      !controller.signal.aborted &&
+      !pending.signal.aborted &&
+      context() === original;
     try {
-      const completed = await signInPopup(kind, controller.signal);
+      const completed = await signInPopup(kind, pending.signal);
       if (!current()) return;
       const value = await request<Session>("/auth/session", { context: bound });
       if (!current()) return;
@@ -378,7 +387,9 @@ function PopupSignIn() {
       setSession(value);
       navigate("/todos");
     } catch (error) {
-      if (current()) setLoginError(error);
+      if (current()) {
+        setLoginError(error);
+      }
     } finally {
       if (!controller.signal.aborted) setSigningIn(false);
     }
@@ -407,6 +418,23 @@ function PopupSignIn() {
         Choose your account and organization in the IAM popup.
       </p>
       <ErrorBox error={loginError()} />
+      <p class="muted">Or sign in in this tab</p>
+      <div class="actions">
+        <For each={["carbon", "silicon"] as IdentityKind[]}>
+          {(kind) => (
+            <button
+              type="button"
+              class="button"
+              onClick={() => {
+                activePopup?.abort();
+                continueSignInHere(kind, controller.signal);
+              }}
+            >
+              Continue as {kind === "carbon" ? "Carbon" : "Silicon"} in this tab
+            </button>
+          )}
+        </For>
+      </div>
     </>
   );
 }

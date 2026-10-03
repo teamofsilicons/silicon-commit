@@ -1017,3 +1017,76 @@ test("popup retry preserves the exact callback and exchange key across temporary
     assert.equal(keys[0], keys[1]);
   }
 });
+
+test("full-page sign-in binds kind and safe return path to the signed callback", async () => {
+  for (const kind of ["carbon", "silicon"]) {
+    const identity = { ...actor, type: kind };
+    const g = gateway((u) =>
+      u.pathname.endsWith("/auth/login")
+        ? Response.json({ ...tokens, actor: identity })
+        : Response.json({
+            authenticated: true,
+            app_id: "commit",
+            org_id: tokens.org_id,
+            actor: identity,
+          }),
+    );
+    const returnTo = "/#/projects/example?view=tasks";
+    const start = await g(
+      req(
+        `/auth/start?identity_kind=${kind}&return_to=${encodeURIComponent(returnTo)}`,
+      ),
+    );
+    assert.equal(start.status, 303);
+    const iam = new URL(start.headers.get("location")!);
+    assert.equal(iam.searchParams.get("identity_kind"), kind);
+    assert.equal(iam.searchParams.has("display"), false);
+    const callback = new URL(iam.searchParams.get("redirect_uri")!);
+    const headers = { cookie: start.headers.getSetCookie()[0].split(";")[0] };
+    assert.equal(
+      (
+        await g(
+          req(
+            "/auth/callback?state=wrong&slt=fixture",
+            "GET",
+            undefined,
+            headers,
+          ),
+        )
+      ).status,
+      400,
+    );
+    callback.searchParams.set("slt", "fixture");
+    callback.searchParams.set("return_to", "https://evil.test");
+    const result = await g(
+      req(callback.pathname + callback.search, "GET", undefined, headers),
+    );
+    assert.equal(result.status, 303);
+    assert.equal(result.headers.get("location"), returnTo);
+    assert.ok(
+      result.headers
+        .getSetCookie()
+        .some((c) => c.startsWith("__Host-commit_production=")),
+    );
+  }
+  const g = gateway(() => {
+    throw new Error("must not contact upstream");
+  });
+  for (const unsafe of [
+    "https://evil.test",
+    "//evil.test",
+    "/auth/callback",
+    "/#/todos\r\nLocation: https://evil.test",
+  ])
+    assert.equal(
+      (
+        await g(
+          req(
+            "/auth/start?identity_kind=silicon&return_to=" +
+              encodeURIComponent(unsafe),
+          ),
+        )
+      ).status,
+      400,
+    );
+});

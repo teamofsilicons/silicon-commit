@@ -65,3 +65,55 @@ test("aborted popup closes and ignores late completion", async (t) => {
   await assert.rejects(signInPopup("carbon", controller.signal), /cancelled/);
   assert.equal(closes, 1);
 });
+
+test("blocked popup offers an explicit typed full-page continuation without tokens", async (t) => {
+  const { signInPopup, continueSignInHere, PopupBlockedError } = await import(
+    "../src/popup.ts"
+  );
+  let assigned = "";
+  const before = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      open: () => null,
+      location: {
+        origin: "https://commit.test",
+        hash: "#/projects/project-a?view=tasks",
+        assign: (value: string) => {
+          assigned = value;
+        },
+      },
+    },
+  });
+  t.after(() =>
+    before
+      ? Object.defineProperty(globalThis, "window", before)
+      : Reflect.deleteProperty(globalThis, "window"),
+  );
+  await assert.rejects(signInPopup("silicon"), PopupBlockedError);
+  assert.equal(
+    assigned,
+    "",
+    "blocking does not navigate until the user chooses fallback",
+  );
+  continueSignInHere("silicon");
+  const target = new URL(assigned, "https://commit.test");
+  assert.equal(target.pathname, "/auth/start");
+  assert.equal(target.searchParams.get("identity_kind"), "silicon");
+  assert.equal(
+    target.searchParams.get("return_to"),
+    "/#/projects/project-a?view=tasks",
+  );
+  assert.deepEqual([...target.searchParams.keys()].sort(), [
+    "identity_kind",
+    "return_to",
+  ]);
+  const controller = new AbortController();
+  controller.abort();
+  assigned = "";
+  assert.throws(
+    () => continueSignInHere("carbon", controller.signal),
+    /cancelled/,
+  );
+  assert.equal(assigned, "");
+});

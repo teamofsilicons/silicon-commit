@@ -49,10 +49,17 @@ function cookie(r: Request, name: string) {
     .filter((x) => x.startsWith(name + "="));
   return values.length === 1 ? values[0].slice(name.length + 1) : "";
 }
+const validReturnTo = (value: unknown): value is string =>
+  typeof value === "string" &&
+  value.length <= 2048 &&
+  /^\/#\/(todos|projects|notifications|environments)(?:[/?][^\\\r\n]*)?$/.test(
+    value,
+  );
 type LoginAttempt = {
   state: string;
   kind: "carbon" | "silicon";
   attempt: string;
+  returnTo?: string;
 };
 function loginCookie(value: LoginAttempt, c: Config) {
   const data = Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -79,7 +86,8 @@ function readLoginCookie(value: string, c: Config): LoginAttempt | null {
     const result = JSON.parse(Buffer.from(data, "base64url").toString());
     return ["carbon", "silicon"].includes(result.kind) &&
       typeof result.state === "string" &&
-      typeof result.attempt === "string"
+      typeof result.attempt === "string" &&
+      (result.returnTo === undefined || validReturnTo(result.returnTo))
       ? result
       : null;
   } catch {
@@ -400,9 +408,11 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
       if (path === "/auth/start" && method === "GET") {
         const kind = url.searchParams.get("identity_kind") ?? "carbon";
         const popup = url.searchParams.get("display") === "popup";
+        const returnTo = url.searchParams.get("return_to") || "/#/todos";
         const attemptId = popup ? (url.searchParams.get("attempt") ?? "") : "";
         if (
           !["carbon", "silicon"].includes(kind) ||
+          !validReturnTo(returnTo) ||
           (popup && !/^[a-f0-9-]{36}$/.test(attemptId))
         )
           return failure(
@@ -422,7 +432,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           status: 303,
           headers: {
             location: login.href,
-            "set-cookie": `commit_login=${loginCookie({ state, kind: kind as "carbon" | "silicon", attempt: attemptId }, c)}; Max-Age=600${options(c)}`,
+            "set-cookie": `commit_login=${loginCookie({ state, kind: kind as "carbon" | "silicon", attempt: attemptId, returnTo }, c)}; Max-Age=600${options(c)}`,
           },
         });
       }
@@ -501,7 +511,7 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           .digest("hex")
           .slice(0, 32);
         const h = loginHeaders(s, c, "production");
-        h.set("location", "/#/todos");
+        h.set("location", attempt.returnTo || "/#/todos");
         h.append("set-cookie", `commit_login=; Max-Age=0${options(c)}`);
         if (attempt.attempt) {
           h.delete("location");

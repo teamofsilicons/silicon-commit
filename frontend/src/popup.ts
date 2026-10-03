@@ -1,4 +1,20 @@
 export type IdentityKind = "carbon" | "silicon";
+export class PopupBlockedError extends Error {
+  constructor() {
+    super("The sign-in popup was blocked. Continue in this tab instead.");
+    this.name = "PopupBlockedError";
+  }
+}
+export function continueSignInHere(kind: IdentityKind, signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error("Sign-in cancelled. Please try again.");
+  const start = new URL("/auth/start", window.location.origin);
+  start.searchParams.set("identity_kind", kind);
+  start.searchParams.set(
+    "return_to",
+    "/" + (window.location.hash || "#/todos"),
+  );
+  window.location.assign(start.pathname + start.search);
+}
 export function matchesSignIn(
   event: Pick<MessageEvent, "origin" | "source" | "data">,
   origin: string,
@@ -23,15 +39,17 @@ export function signInPopup(
   if (signal?.aborted)
     return Promise.reject(new Error("Sign-in cancelled. Please try again."));
   const attempt = crypto.randomUUID();
-  const popup = window.open(
-    `/auth/start?identity_kind=${kind}&display=popup&attempt=${attempt}`,
-    `commit-login-${attempt}`,
-    "popup,width=520,height=720",
-  );
-  if (!popup)
-    return Promise.reject(
-      new Error("Allow pop-ups for Commit, then try signing in again."),
+  let popup: Window | null;
+  try {
+    popup = window.open(
+      `/auth/start?identity_kind=${kind}&display=popup&attempt=${attempt}`,
+      `commit-login-${attempt}`,
+      "popup,width=520,height=720",
     );
+  } catch {
+    return Promise.reject(new PopupBlockedError());
+  }
+  if (!popup) return Promise.reject(new PopupBlockedError());
   return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
