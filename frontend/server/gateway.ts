@@ -533,7 +533,9 @@ export function createGateway(c: Config, transport: typeof fetch = fetch) {
           verified?.authenticated !== true ||
           verified.app_id !== c.appId ||
           verified.actor?.type !== attempt.kind ||
-          verified.actor?.public_id !== s.actor.public_id ||
+          // Commit's status DTO uses ActorRef {type, id}; IAM token responses
+          // use {type, public_id}. Compare across that explicit boundary.
+          verified.actor?.id !== s.actor.public_id ||
           (s.org && verified.org_id !== s.org)
         ) {
           const h = new Headers();

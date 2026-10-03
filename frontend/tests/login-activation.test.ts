@@ -22,9 +22,87 @@ const tokens = {
   access_token: "candidate-access",
   refresh_token: "candidate-refresh",
   expires_in: 3600,
-  actor: { type: "silicon", public_id: "s:test" },
+  actor: { type: "silicon", public_id: "si:test" },
   org_id: "org-two",
 };
+
+test("callback verifies Commit's status ActorRef id against the IAM token public_id", async () => {
+  for (const kind of ["carbon", "silicon"] as const) {
+    const actor = {
+      type: kind,
+      public_id: kind === "carbon" ? "c:owner" : "si:agent",
+    };
+    const status = {
+      authenticated: true,
+      app_id: "commit",
+      actor: { type: kind, id: actor.public_id },
+      org_id: "org-two",
+      organizations: ["org-two"],
+    };
+    for (const [label, verified, expected] of [
+      ["actual backend DTO", status, 200],
+      [
+        "token-shaped status is not the backend contract",
+        { ...status, actor },
+        401,
+      ],
+      [
+        "wrong actor",
+        {
+          ...status,
+          actor: { ...status.actor, id: "c:other", public_id: actor.public_id },
+        },
+        401,
+      ],
+      [
+        "wrong kind",
+        {
+          ...status,
+          actor: {
+            ...status.actor,
+            type: kind === "carbon" ? "silicon" : "carbon",
+          },
+        },
+        401,
+      ],
+      ["wrong organization", { ...status, org_id: "org-other" }, 401],
+      ["wrong app", { ...status, app_id: "another-app" }, 401],
+    ] as const) {
+      const g = createGateway(config, (async (input: string | URL) =>
+        new URL(input).pathname.endsWith("/auth/login")
+          ? Response.json({ ...tokens, actor })
+          : Response.json(verified)) as typeof fetch);
+      const started = await g(
+        new Request(
+          `${config.origin}/auth/start?identity_kind=${kind}&context_id=none`,
+        ),
+      );
+      const callback = new URL(
+        new URL(started.headers.get("location")!).searchParams.get(
+          "redirect_uri",
+        )!,
+      );
+      callback.searchParams.set("slt", "fixture-code");
+      const completed = await g(
+        new Request(callback, {
+          headers: { cookie: started.headers.getSetCookie()[0].split(";")[0] },
+        }),
+      );
+      assert.equal(completed.status, expected, `${kind}: ${label}`);
+      if (expected === 200) {
+        assert.equal(completed.headers.getSetCookie().length, 1);
+        assert.match(
+          completed.headers.getSetCookie()[0],
+          /^__Host-commit_production_ctx_/,
+        );
+        assert.match(await completed.text(), /data-page="true"/);
+      } else {
+        assert.equal(completed.headers.getSetCookie().length, 0);
+      }
+    }
+  }
+});
+
 function fixture(delay = false) {
   let release!: () => void;
   const hold = new Promise<void>((resolve) => {
@@ -62,7 +140,7 @@ function fixture(delay = false) {
     return Response.json({
       authenticated: true,
       app_id: "commit",
-      actor: tokens.actor,
+      actor: { type: tokens.actor.type, id: tokens.actor.public_id },
       org_id: tokens.org_id,
     });
   }) as typeof fetch);
