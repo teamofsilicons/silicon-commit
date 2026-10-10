@@ -181,7 +181,7 @@ pub(crate) async fn create_task(
 ) -> Result<Response, AppError> {
     let locator = parse_locator(&raw_locator)?;
     let actor = state
-        .authenticate(&headers, action::PROJECT_TASKS_CREATE, Some(raw_locator))
+        .authenticate_sensitive(&headers, action::PROJECT_TASKS_CREATE, Some(raw_locator))
         .await?;
     let request_id = required_request_id()?;
     let mutation = state
@@ -202,7 +202,7 @@ pub(crate) async fn update_task(
     let locator = parse_locator(&path.project_id)?;
     let resource = format!("{}/tasks/{}", path.project_id, path.task_id);
     let actor = state
-        .authenticate(&headers, action::PROJECT_TASKS_UPDATE, Some(resource))
+        .authenticate_sensitive(&headers, action::PROJECT_TASKS_UPDATE, Some(resource))
         .await?;
     let request_id = required_request_id()?;
     state

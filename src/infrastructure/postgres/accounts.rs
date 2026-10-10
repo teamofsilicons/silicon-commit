@@ -438,11 +438,11 @@ pub(crate) async fn apply_profile_update(
     let updated = sqlx::query(
         r"
         UPDATE commit.accounts
-           SET public_id = coalesce($2->>'id', public_id),
+           SET public_id = CASE WHEN refreshed_at <= $4 THEN coalesce($2->>'id', public_id) ELSE public_id END,
                display_name = coalesce($2->>'display_name', display_name),
                pfp_url = coalesce($2->>'pfp_url', pfp_url),
                email = CASE WHEN $2 ? 'email' THEN nullif($2->>'email', '') ELSE email END,
-               custodian_uuid = CASE WHEN kind = 'silicon' AND jsonb_typeof($2->'custodian') = 'object'
+               custodian_uuid = CASE WHEN refreshed_at <= $4 AND kind = 'silicon' AND jsonb_typeof($2->'custodian') = 'object'
                                      THEN coalesce($2->'custodian'->>'uuid', custodian_uuid)
                                      ELSE custodian_uuid END,
                accounts_version = $3,

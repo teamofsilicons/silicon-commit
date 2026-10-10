@@ -469,6 +469,15 @@ async fn upgrade_and_link(pool: &PgPool) -> anyhow::Result<()> {
         wrong_kind.is_err_and(|error| error.to_string().contains("a Carbon links to a Carbon")),
         "a Carbon must not link to a Silicon"
     );
+    let collapsed = link(
+        pool,
+        "iam_principal_id,accounts_uuid\nc:shubham,SaKet1\n",
+        false,
+    )
+    .await;
+    ensure!(
+        collapsed.is_err_and(|error| error.to_string().contains("different legacy identities"))
+    );
     let conflicting = link(
         pool,
         "iam_principal_id,accounts_uuid\nc:shubham,ShUbh3\nc:shubham,SaKet1\n",

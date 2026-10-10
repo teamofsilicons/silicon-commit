@@ -646,3 +646,9 @@ real stack Commit says `proof_invalid`, never `proof_wrong_receiver`; the stack 
 ten minutes (reuse each Carbon's first-party token for approvals, Silicon creation, id changes and transfers); STKs
 look like `stk-<hex>` (hyphen); `python3 -I` hides the user site-packages, so PyYAML is only in
 `/usr/local/bin/python3`; zsh has no `PIPESTATUS`.
+
+## Review fixes — 10 October 2026
+
+Closed the todo patch path that silently restored removed private-project members: implicit sharing now runs only when assignment/project changes, with fresh Accounts confirmation and project write authorization. Late profile events cannot revert a newer custodian transfer. Linking rejects different legacy public identities that collapse into one Accounts uuid. JWKS outage retries are bounded for aged caches. Added real PostgreSQL regression coverage for removed-member todo edits, late custodian profile events and ambiguous mappings. Full workspace tests passed except the migration refusal-message assertion; after correcting validation order, all three migration tests passed. `cargo clippy --locked --all-targets -- -D warnings` passed.
+
+Remaining review items include pre-first-use revocation events, stale custodians on ordinary reads, proof access removal, notification defaults/delivery mapping, operator/documentation checks and genuine local Accounts end-to-end validation. The new web directory is currently the shared kit skeleton, not a completed product.

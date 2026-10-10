@@ -129,6 +129,12 @@ impl AccountsIdentity {
         if let (Some(jwks), true) = (&cache.jwks, fresh) {
             return Ok(Arc::clone(jwks));
         }
+        if cache
+            .last_attempt
+            .is_some_and(|at| at.elapsed() < JWKS_REFETCH_INTERVAL)
+        {
+            return cache.jwks.clone().ok_or(ProviderError::Unavailable);
+        }
         match self.client.jwks().await {
             Ok(jwks) => {
                 let jwks = Arc::new(jwks);

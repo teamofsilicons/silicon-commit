@@ -1528,6 +1528,21 @@ async fn a_custodian_new_to_commit_can_use_it_right_after_a_transfer() -> anyhow
         moved.body
     );
 
+    // A profile event from before the transfer may have a higher profile version.
+    // Its embedded identity fields must not restore the former custodian.
+    let mut late = event(
+        "account.updated",
+        json!({"uuid": scout.uuid,
+        "account": {"uuid": scout.uuid, "membership_id":format!("commit:{}",scout.uuid),
+        "kind":"silicon", "id":scout.id, "display_name":"Scout revised", "pfp_url":"",
+        "version":99, "custodian":{"uuid":ada.uuid,"id":ada.id}}}),
+    );
+    late["occurred_at"] = json!(
+        (OffsetDateTime::now_utc() - time::Duration::minutes(1))
+            .format(&time::format_description::well_known::Rfc3339)?
+    );
+    ensure!(webhook(&app, &late, now(), WEBHOOK_SECRET).await?.status == StatusCode::OK);
+
     // Bea's first requests read that row: they must work, and keep working.
     let bea_token = accounts.token(&bea);
     accounts.userinfo(&bea_token, &bea).await;
@@ -1628,5 +1643,135 @@ async fn an_account_first_seen_while_silicon_accounts_fails_recovers() -> anyhow
     .fetch_one(&pool)
     .await?;
     ensure!(email == ada.email && finite, "{email:?} {finite}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn todo_edits_cannot_restore_or_widen_private_project_membership() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("todo-share-ada");
+    let bea = Account::carbon("todo-share-bea");
+    let cy = Account::carbon("todo-share-cy");
+    let accounts = Accounts::start(&[&ada, &bea, &cy]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let ada_token = accounts.token(&ada);
+    let bea_token = accounts.token(&bea);
+    for (account, token) in [(&ada, &ada_token), (&bea, &bea_token)] {
+        accounts.userinfo(token, account).await;
+        accounts.introspection(token, true).await;
+        ensure!(
+            call(
+                &app,
+                Method::GET,
+                "/api/v1/me",
+                Some(&bearer(token)),
+                None,
+                &[]
+            )
+            .await?
+            .status
+                == StatusCode::OK
+        );
+    }
+    let project = call(
+        &app,
+        Method::POST,
+        "/api/v1/projects",
+        Some(&bearer(&ada_token)),
+        Some(json!({"name":"Private planning", "private":true,"carbon_ids":[ada.id,bea.id]})),
+        &[],
+    )
+    .await?;
+    ensure!(
+        project.status == StatusCode::CREATED,
+        "project: {}",
+        project.body
+    );
+    let project_id = project.body["id"].as_str().context("project id")?;
+    let todo = call(
+        &app,
+        Method::POST,
+        "/api/v1/todos",
+        Some(&bearer(&bea_token)),
+        Some(json!({"title":"Bea's work", "assigned_to":bea.id,"project_id":project_id})),
+        &[],
+    )
+    .await?;
+    ensure!(todo.status == StatusCode::CREATED, "todo: {}", todo.body);
+    let todo_path = format!(
+        "/api/v1/todos/{}",
+        todo.body["id"].as_str().context("todo id")?
+    );
+    let removed = call(
+        &app,
+        Method::PATCH,
+        &format!("/api/v1/projects/{project_id}"),
+        Some(&bearer(&ada_token)),
+        Some(json!({"carbon_ids":[ada.id]})),
+        &[],
+    )
+    .await?;
+    ensure!(
+        removed.status == StatusCode::OK,
+        "removed: {}",
+        removed.body
+    );
+    let changed = call(
+        &app,
+        Method::PATCH,
+        &todo_path,
+        Some(&bearer(&bea_token)),
+        Some(json!({"title":"Still Bea's work"})),
+        &[],
+    )
+    .await?;
+    ensure!(
+        changed.status == StatusCode::OK,
+        "changed: {}",
+        changed.body
+    );
+    ensure!(
+        call(
+            &app,
+            Method::GET,
+            &format!("/api/v1/projects/{project_id}"),
+            Some(&bearer(&bea_token)),
+            None,
+            &[]
+        )
+        .await?
+        .status
+            == StatusCode::NOT_FOUND
+    );
+    let widened = call(
+        &app,
+        Method::PATCH,
+        &todo_path,
+        Some(&bearer(&bea_token)),
+        Some(json!({"assigned_to":cy.id})),
+        &[],
+    )
+    .await?;
+    ensure!(
+        widened.status == StatusCode::NOT_FOUND || widened.status == StatusCode::FORBIDDEN,
+        "{}",
+        widened.body
+    );
+    let unchanged = call(
+        &app,
+        Method::GET,
+        &todo_path,
+        Some(&bearer(&bea_token)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        unchanged.body["assigned_to"]["uuid"] == json!(bea.uuid),
+        "{}",
+        unchanged.body
+    );
     Ok(())
 }

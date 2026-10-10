@@ -440,6 +440,42 @@ pub async fn apply(
         }
     }
 
+    // Include unchanged existing mappings: a later file cannot silently merge a
+    // different person's data into an account linked by an earlier cutover run.
+    let mut account_sources: BTreeMap<&str, &str> = BTreeMap::new();
+    for link in &links {
+        let target = desired
+            .get(&(link.organization_id, link.iam_principal_id))
+            .map_or(link.accounts_uuid.as_ref(), |(target, _)| target.as_ref());
+        if let Some(target) = target {
+            let stored_kind: Option<String> =
+                sqlx::query_scalar("SELECT kind::text FROM commit.accounts WHERE uuid=$1")
+                    .bind(target)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            let target_kind = stored_kind
+                .as_deref()
+                .map(kind)
+                .transpose()?
+                .or_else(|| accounts.get(target).map(|account| account.kind));
+            if target_kind.is_some_and(|value| Some(value) != kind(&link.actor_type).ok()) {
+                bail!(
+                    "a Carbon links to a Carbon and a Silicon to a Silicon: {} and {target} have different kinds",
+                    link.iam_public_id
+                );
+            }
+        }
+        if let Some(target) = target
+            && let Some(previous) = account_sources.insert(target, &link.iam_public_id)
+            && !previous.eq_ignore_ascii_case(&link.iam_public_id)
+        {
+            bail!(
+                "account {target} is mapped from different legacy identities ({previous} and {}); nothing changed",
+                link.iam_public_id
+            );
+        }
+    }
+
     let mut changes = Vec::new();
     for link in &links {
         let Some((target, line)) = desired.get(&(link.organization_id, link.iam_principal_id))
