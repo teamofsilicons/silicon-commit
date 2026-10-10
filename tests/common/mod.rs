@@ -74,7 +74,7 @@ pub async fn test_pool() -> anyhow::Result<Option<PgPool>> {
 }
 
 /// A unique legacy Accounts identifier for backward-compatibility fixtures.
-/// Newly issued account IDs are canonical lowercase 128-bit UUIDv4 strings.
+/// Newly issued account IDs are canonical lowercase 128-bit `UUIDv4` strings.
 pub fn new_uuid() -> String {
     let raw = Uuid::new_v4().simple().to_string();
     // Mix case so tests prove uuids are compared exactly.
