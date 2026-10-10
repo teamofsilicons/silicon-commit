@@ -26,4 +26,14 @@ Rollback changes only the new deployment, new DNS alias and website promotion. N
 
 ## Build and inventory evidence
 
-The deployment runs from isolated migration branches and draft PRs; no production service or data migration has run. Read-only infrastructure, database provenance, Accounts configuration before-states and backup availability are recorded privately under the workspace `.migration/live/`. Optimized release builds run in GitHub Actions, and package publication remains coordinated with the platform rollout. The earlier local archives were development builds and are not the production artifacts.
+The deployment runs from isolated migration branches and draft PRs; the Accounts services are deployed against new empty databases while the existing IAM services and stores remain unchanged. Read-only infrastructure, database provenance, Accounts configuration before-states and backup availability are recorded privately under the workspace `.migration/live/`. Optimized release builds run in GitHub Actions, and package publication remains coordinated with the platform rollout. The earlier local archives were development builds and are not the production artifacts.
+
+## Verified production rollout (2026-10-10)
+
+The new API and public Accounts website are live. The old IAM API, its store, keys, clients and devices remain intact. No IAM identity or Silicon was imported. All new Accounts webhook signed ping deliveries were delivered. Anonymous protected calls and invalid bearer tokens return401.
+
+The website now uses official Silicon UI registry source at `https://ui.teamofsilicons.com/r/{name}.json`, with source hashes in `web/silicon-ui-registry.json`. App-owned numeric layout aliases preserve existing spacing; Commit and Hook also distinguish deliberate keyboard confirmation from pointer double-click suppression. Authenticated browser checks use genuine app CLI sessions wrapped in the existing encrypted BFF cookie format; this is separate from the verified hosted sign-in redirect contract.
+
+Optimized CLI archives were executed on all six native platforms (including Windows ARM and Intel Mac), with actual help, Accounts discovery, signed-out status and version output. Each GitHub release tag is pinned to its binary source; later website changes have a separate revision. Private source, archive, CI and deployment receipts are under `.migration/live/parallel/commit/` in the operator workspace. The earlier local development archives are not production releases.
+
+Production functional proof: Carbon assigned a todo to the new temporary Silicon. The authenticated browser added a note and deleted the fixture by keyboard confirmation, checked desktop/mobile and light/dark views, and had no page errors after stable UTC timestamp rendering. The BFF API base includes `/api`.
