@@ -24,7 +24,7 @@ fn discovery_commands_answer_signed_out_in_an_empty_home() {
         json!({
             "app_id": "commit",
             "accounts_url": "https://accounts.teamofsilicons.com",
-            "api_url": "https://backend.commit.teamofsilicons.com",
+            "api_url": "https://api.commit.teamofsilicons.com",
             "version": env!("CARGO_PKG_VERSION"),
             "command": "commit",
             "profile": "default",

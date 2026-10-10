@@ -14,7 +14,7 @@ token issued to Commit (app id `commit`):
 
 ```rust,ignore
 use silicon_commit_client::{Client, Mutation};
-let commit = Client::new("https://backend.commit.teamofsilicons.com")?.with_bearer(access_token);
+let commit = Client::new("https://api.commit.teamofsilicons.com")?.with_bearer(access_token);
 let todos = commit.list_todos(&[("status", "in_progress")]).await?;
 let create = commit.clone().with_mutation(Mutation::new());
 create.create_todo(&serde_json::json!({"title": "Ship it", "assigned_to": "si:builder"})).await?;
@@ -39,7 +39,7 @@ Accounts for a proof whose receiving app is `commit` and whose scopes are the ac
 (`commit.todos.list`, `commit.todos.create`, …; `accounts()` lists them all), then:
 
 ```rust,ignore
-let commit = Client::new("https://backend.commit.teamofsilicons.com")?.with_proof(proof)?;
+let commit = Client::new("https://api.commit.teamofsilicons.com")?.with_proof(proof)?;
 let todos = commit.list_todos(&[]).await?;
 ```
 

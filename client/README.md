@@ -22,7 +22,7 @@ Authenticate with a Silicon Accounts access token issued to Commit (app id `comm
 # async fn demo(access_token: String) -> Result<(), silicon_commit_client::Error> {
 use silicon_commit_client::{Client, Mutation};
 
-let commit = Client::new("https://backend.commit.teamofsilicons.com")?.with_bearer(access_token);
+let commit = Client::new("https://api.commit.teamofsilicons.com")?.with_bearer(access_token);
 let mine = commit.list_todos(&[("view", "assigned_to_me")]).await?;
 
 // Keep one Mutation per logical write and reuse it when you retry after an uncertain answer.
@@ -41,7 +41,7 @@ a proof for the receiving app `commit` with the scopes you need (each route's ac
 
 ```rust,no_run
 # async fn demo(proof: String) -> Result<(), silicon_commit_client::Error> {
-let commit = silicon_commit_client::Client::new("https://backend.commit.teamofsilicons.com")?.with_proof(proof)?;
+let commit = silicon_commit_client::Client::new("https://api.commit.teamofsilicons.com")?.with_proof(proof)?;
 let todos = commit.list_todos(&[]).await?;
 # Ok(()) }
 ```

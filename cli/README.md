@@ -39,7 +39,7 @@ Output is JSON on stdout; errors go to stderr with the HTTP status, a stable cod
 Every command explains itself: `commit --help`, then `commit <command> --help`. The guides are bundled:
 `commit docs start`, `commit docs cli`.
 
-Configuration: `COMMIT_API_URL` (default `https://backend.commit.teamofsilicons.com`), `ACCOUNTS_URL` (default
+Configuration: `COMMIT_API_URL` (default `https://api.commit.teamofsilicons.com`), `ACCOUNTS_URL` (default
 `https://accounts.teamofsilicons.com`), `COMMIT_PROFILE`, `COMMIT_ACCESS_TOKEN`, `COMMIT_TELEMETRY=off`.
 Plain `http://` URLs are accepted only for this machine.
 

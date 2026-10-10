@@ -5,7 +5,7 @@ token explicit. The same APIs back the CLI and browser. Store accounts by their 
 display data and can change.
 
 ```rust,ignore
-let client = silicon_commit_client::Client::new("https://backend.commit.teamofsilicons.com")?
+let client = silicon_commit_client::Client::new("https://api.commit.teamofsilicons.com")?
     .with_bearer(access_token);
 let projects = client.list_projects(&[]).await?;
 ```

@@ -17,7 +17,7 @@
 //! ```no_run
 //! # async fn demo(access_token: String) -> Result<(), silicon_commit_client::Error> {
 //! use silicon_commit_client::{Client, Mutation};
-//! let commit = Client::new("https://backend.commit.teamofsilicons.com")?.with_bearer(access_token);
+//! let commit = Client::new("https://api.commit.teamofsilicons.com")?.with_bearer(access_token);
 //! let mine = commit.list_todos(&[("view", "assigned_to_me")]).await?;
 //! let create = commit.with_mutation(Mutation::new());
 //! create
@@ -42,7 +42,7 @@ use url::Url;
 use uuid::Uuid;
 
 /// The production Commit API origin.
-pub const DEFAULT_API_URL: &str = "https://backend.commit.teamofsilicons.com";
+pub const DEFAULT_API_URL: &str = "https://api.commit.teamofsilicons.com";
 /// The API contract this client speaks (`X-Commit-API-Version`).
 pub const CONTRACT_VERSION: u16 = 2;
 /// Largest response body read (8 MiB).

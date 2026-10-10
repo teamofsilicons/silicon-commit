@@ -53,7 +53,7 @@ with tasks, a diary, blockers and updates, and choose how you are notified.",
     max_term_width = 100
 )]
 pub struct Root {
-    /// Commit API origin [default: the saved session's, else https://backend.commit.teamofsilicons.com]
+    /// Commit API origin [default: the saved session's, else https://api.commit.teamofsilicons.com]
     #[arg(long, global = true, env = "COMMIT_API_URL", value_name = "URL")]
     pub api_url: Option<String>,
     /// Silicon Accounts origin used to sign in [default: the saved session's, else https://accounts.teamofsilicons.com]
@@ -93,7 +93,7 @@ pub enum Command {
     Logout(LogoutArgs),
     /// Show how to sign in to Commit: app id, Silicon Accounts URL, API URL (works signed out)
     #[command(
-        after_help = "Prints the same object with or without --json and always exits 0, so tools can\ndiscover Commit before anyone signs in:\n  commit accounts --json\n  {\"app_id\":\"commit\",\"accounts_url\":\"https://accounts.teamofsilicons.com\",\"api_url\":\"https://backend.commit.teamofsilicons.com\",\"version\":\"…\",…}"
+        after_help = "Prints the same object with or without --json and always exits 0, so tools can\ndiscover Commit before anyone signs in:\n  commit accounts --json\n  {\"app_id\":\"commit\",\"accounts_url\":\"https://accounts.teamofsilicons.com\",\"api_url\":\"https://api.commit.teamofsilicons.com\",\"version\":\"…\",…}"
     )]
     Accounts(JsonFlag),
     /// Deprecated name of `accounts`; kept one release for older Silicon runtimes

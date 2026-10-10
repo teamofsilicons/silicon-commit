@@ -1,6 +1,6 @@
 # Silicon Commit API
 
-The API is served under `/api/v1/` (production: `https://backend.commit.teamofsilicons.com/api/v1/`). Mutations
+The API is served under `/api/v1/` (production: `https://api.commit.teamofsilicons.com/api/v1/`). Mutations
 should include an `Idempotency-Key`; versioned updates use the response ETag in `If-Match`. The canonical schemas and
 status codes are in [`../openapi.yaml`](../openapi.yaml) and [`../API_DOCS.md`](../API_DOCS.md). Every response
 carries `X-Commit-API-Version: 2` ([contracts](CONTRACTS.md)).

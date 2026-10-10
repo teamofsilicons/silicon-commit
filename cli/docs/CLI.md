@@ -36,7 +36,7 @@ never printed or logged. When Silicon Accounts refuses it, the error names the r
 ```json
 {"authenticated":true,"uuid":"zQo","id":"c:ada","kind":"carbon","display_name":"Ada",
  "expires_at":"2026-10-10T08:30:00Z","refresh_expires_at":"2029-03-25T02:33:57Z","verified":true,
- "profile":"default","api_url":"https://backend.commit.teamofsilicons.com","accounts_url":"https://accounts.teamofsilicons.com"}
+ "profile":"default","api_url":"https://api.commit.teamofsilicons.com","accounts_url":"https://accounts.teamofsilicons.com"}
 ```
 
 Signed out it prints `{"authenticated":false}`, with a `reason` when a session exists but cannot be used
@@ -72,7 +72,7 @@ commit --profile scout logout
 
 | Setting | Default |
 | --- | --- |
-| `--api-url` / `COMMIT_API_URL` | the saved session's, else `https://backend.commit.teamofsilicons.com` |
+| `--api-url` / `COMMIT_API_URL` | the saved session's, else `https://api.commit.teamofsilicons.com` |
 | `--accounts-url` / `ACCOUNTS_URL` | the saved session's, else `https://accounts.teamofsilicons.com` |
 | `--token` / `COMMIT_ACCESS_TOKEN` | a Silicon Accounts access token issued to `commit`, used as is (never saved or refreshed) |
 | `COMMIT_TELEMETRY=off` | diagnostics on ([telemetry](TELEMETRY.md)) |

@@ -787,8 +787,8 @@ mod tests {
     #[test]
     fn api_urls_compare_by_origin_with_or_without_the_api_path() {
         assert!(same_api(
-            "https://backend.commit.teamofsilicons.com",
-            "https://backend.commit.teamofsilicons.com/api/v1/"
+            "https://api.commit.teamofsilicons.com",
+            "https://api.commit.teamofsilicons.com/api/v1/"
         ));
         assert!(same_api(
             "http://127.0.0.1:4141/",

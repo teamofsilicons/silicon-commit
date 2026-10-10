@@ -14,6 +14,6 @@ Run `pnpm test`, `pnpm typecheck`, `pnpm lint`, and `pnpm build`. Playwright use
 
 ## Deploy
 
-Vercel project root: `web`; framework: Next.js; install/build commands are pinned in `vercel.json`. Set the same server environment with production origins and `APP_API_URL=https://backend.commit.teamofsilicons.com/api`. Do not prefix any secret with `NEXT_PUBLIC_`. Register the production callback before release, build and preview, then perform the coordinated app/Accounts cutover. No deployment is performed by these local commits.
+Vercel project root: `web`; framework: Next.js; install/build commands are pinned in `vercel.json`. Set the same server environment with production origins and `APP_API_URL=https://api.commit.teamofsilicons.com/api`. Do not prefix any secret with `NEXT_PUBLIC_`. Register the production callback before release, build and preview, then perform the coordinated app/Accounts cutover. No deployment is performed by these local commits.
 
 [DESIGN.md](DESIGN.md) records the inherited shared Silicon/Arc design. [../docs/migration/uuid128.md](../docs/migration/uuid128.md) describes the coordinated account-identity backfill.

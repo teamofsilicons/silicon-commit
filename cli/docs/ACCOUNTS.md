@@ -34,7 +34,7 @@ Plain `http://` is accepted only for `localhost`/`127.0.0.1` (a local Accounts s
 
 ## The account webhook
 
-Configure Commit's app webhook at Silicon Accounts with the URL `https://backend.commit.teamofsilicons.com/webhook/`
+Configure Commit's app webhook at Silicon Accounts with the URL `https://api.commit.teamofsilicons.com/webhook/`
 and the events `account.id_changed`, `account.updated`, `account.deleted`, `membership.signed_out`,
 `membership.access_removed` and `silicon.custodian_changed`. Commit answers 401 for a bad signature or a timestamp
 more than five minutes off, 400 for a body that is not an event, and 200 otherwise (repeated event ids are
