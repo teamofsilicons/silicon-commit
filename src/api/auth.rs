@@ -22,7 +22,10 @@ const MAX_CREDENTIAL_BYTES: usize = 8_192;
 
 /// Headers of the IAM era and of Honeycomb testing environments.
 const RETIRED_HEADERS: [(&str, &str); 6] = [
-    ("x-org-id", "Commit has no organizations any more"),
+    (
+        "x-org-id",
+        "the access token or proof alone says which account is calling",
+    ),
     (
         "x-app-id",
         "apps act for an account with Authorization: Proof <sap_…>",

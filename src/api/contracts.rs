@@ -33,7 +33,7 @@ fn select(headers: &HeaderMap) -> Result<(), &'static str> {
             };
             if !supported {
                 return Err(
-                    "This API serves contract 2 (Silicon Accounts sign-in, no organizations). Contract 1 (Silicon IAM) has ended; update the client and read /api/v1/contracts.",
+                    "This API serves contract 2 (Silicon Accounts sign-in). Contract 1 has ended; update the client to 0.5 or newer and read /api/v1/contracts.",
                 );
             }
         }
@@ -89,7 +89,7 @@ pub(super) async fn describe(
         ]
     };
     Ok(Json(
-        json!({"service":"silicon-commit","service_version":env!("CARGO_PKG_VERSION"),"current_contract":CURRENT,"contracts":versions,"compatibility":[{"contract":1,"clients":["0.1.x to 0.4.x (Silicon IAM sign-in, organizations)"],"cli":"0.4.x and older","status":"ended: these clients cannot sign in any more"},{"contract":2,"clients":["0.5.x (Silicon Accounts sign-in, no organizations)"],"cli":"0.5.x"}],"policy":{"breaking_changes":"new version; retain existing consumers","additive_changes":"optional fields and new endpoints","sunset":"deprecated versions retire after seven days without production requests; active versions never auto-retire"},"docs":"https://docs.commit.teamofsilicons.com/contracts/"}),
+        json!({"service":"silicon-commit","service_version":env!("CARGO_PKG_VERSION"),"current_contract":CURRENT,"contracts":versions,"compatibility":[{"contract":1,"clients":["0.1.x to 0.4.x (the previous sign-in system)"],"cli":"0.4.x and older","status":"ended: these clients cannot sign in any more"},{"contract":2,"clients":["0.5.x (Silicon Accounts sign-in, personal accounts)"],"cli":"0.5.x"}],"policy":{"breaking_changes":"new version; retain existing consumers","additive_changes":"optional fields and new endpoints","sunset":"deprecated versions retire after seven days without production requests; active versions never auto-retire"},"docs":"https://docs.commit.teamofsilicons.com/contracts/"}),
     ))
 }
 #[cfg(test)]

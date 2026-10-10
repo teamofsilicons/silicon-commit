@@ -60,7 +60,7 @@ pub enum RuntimeEnvironment {
 /// Process-specific configuration capability set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeProfile {
-    /// HTTP API and IAM capability set.
+    /// HTTP API and Silicon Accounts capability set.
     Api,
     /// Outbox worker capability set.
     Worker,
@@ -275,7 +275,7 @@ impl Settings {
 
     /// Loads and validates settings for the outbox worker process.
     ///
-    /// IAM, authentication, and HTTP-listener environment variables
+    /// Silicon Accounts, authentication, and HTTP-listener environment variables
     /// are deliberately not read by this profile.
     ///
     /// # Errors
