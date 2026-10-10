@@ -117,17 +117,22 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: frontend
+        working-directory: web
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm test
-      - run: npm run build
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm build
 
   docs:
     runs-on: ubuntu-latest
@@ -157,6 +162,7 @@ jobs:
       - run: python3 scripts/test_linux_abi.py
       - run: python3 scripts/test_package_apps.py
       - run: python3 scripts/test_dev_accounts.py
+      - run: python3 scripts/test_accounts_uuid128.py
       - run: >-
           python3 -m py_compile deploy/aws/bootstrap.py deploy/aws/deploy_docs.py deploy/aws/host.py
           deploy/aws/cutover.py scripts/package_apps.py scripts/check_linux_abi.py scripts/dev_accounts.py
