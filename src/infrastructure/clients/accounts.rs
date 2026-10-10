@@ -225,9 +225,15 @@ impl AccountsIdentity {
         Ok(active)
     }
 
-    async fn verify_proof(&self, token: &str) -> Result<Arc<ValidProof>, ProviderError> {
+    /// Verifies a proof at Silicon Accounts (cached briefly). `fresh` skips the cache: a
+    /// request that widens access must not rest on an answer from before a revocation.
+    async fn verify_proof(
+        &self,
+        token: &str,
+        fresh: bool,
+    ) -> Result<Arc<ValidProof>, ProviderError> {
         let key = digest(token);
-        {
+        if !fresh {
             let cache = self.proofs.lock().await;
             if let Some((proof, at)) = cache.get(&key)
                 && at.elapsed() < ONLINE_CHECK_TTL
@@ -397,7 +403,13 @@ impl AccountsIdentity {
             code: "token_missing_claim",
             message: "The access token names neither the account kind nor a c:/si: id.".to_owned(),
         })?;
-        if sensitive && !self.introspect_active(token, None).await? {
+        // A change that widens access asks every time: an answer cached from before a sign-out
+        // that just happened must not let it through.
+        if sensitive
+            && !self
+                .introspect_active(token, Some(OffsetDateTime::now_utc()))
+                .await?
+        {
             return Err(ProviderError::Rejected {
                 code: "token_revoked",
                 message: "Silicon Accounts says this access token is no longer active: the sign-in was ended or Commit's access was removed. Sign in to Commit again.".to_owned(),
@@ -413,8 +425,13 @@ impl AccountsIdentity {
         })
     }
 
-    async fn proof_subject(&self, token: &str, scope: &str) -> Result<Subject, ProviderError> {
-        let proof = self.verify_proof(token).await?;
+    async fn proof_subject(
+        &self,
+        token: &str,
+        scope: &str,
+        sensitive: bool,
+    ) -> Result<Subject, ProviderError> {
+        let proof = self.verify_proof(token, sensitive).await?;
         if proof.receiving_app.app_id != self.app_id {
             return Err(ProviderError::Rejected {
                 code: "proof_wrong_receiver",
@@ -757,8 +774,12 @@ impl IdentityProvider for AccountsIdentity {
                     .await?
             }
             InboundCredential::Proof(_) => {
-                self.proof_subject(request.credential.expose(), &request.scope)
-                    .await?
+                self.proof_subject(
+                    request.credential.expose(),
+                    &request.scope,
+                    request.sensitive,
+                )
+                .await?
             }
         };
         self.verified(subject).await

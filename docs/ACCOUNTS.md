@@ -22,12 +22,15 @@ Plain `http://` is accepted only for `localhost`/`127.0.0.1` (a local Accounts s
 1. Bearer tokens are verified locally against the JWKS (`GET /.well-known/jwks.json`, cached; an unknown key id
    refetches it at most every 30 seconds).
 2. Commit refuses a token issued before the account's last sign-out or access removal, and any token of a deleted
-   account.
+   account. A token from the same second as the sign-out is checked with Silicon Accounts (`iat` has whole seconds).
 3. Account details (current id, name, photo, custodian, shared email) are refreshed from `GET /v1/userinfo` at most
    every 10 minutes and from account lookups otherwise. Ids and uuids named in requests are resolved with lookups
    (cached for a minute).
 4. Proofs are verified with `POST /v1/proofs/verify` (cached up to 30 seconds), checked for the receiving app, the
    route's scope and an allowed issuer, then Commit acts as the account the proof speaks for.
+5. A change that widens who can see something (a project's visibility or members, a Silicon's allow-list) is
+   checked online every time, never from a cached answer: the access token with `POST /v1/oauth/introspect`
+   (401 `token_revoked` when its sign-in ended), a proof with a fresh verification.
 
 ## The account webhook
 

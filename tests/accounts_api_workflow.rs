@@ -1367,3 +1367,122 @@ async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() ->
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn changes_that_widen_access_never_rest_on_a_cached_answer() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("widen-ada");
+    let accounts = Accounts::start(&[&ada]).await;
+    let app = router(&pool, &accounts, "commit.projects.update=interface", true)?;
+    let token = accounts.token(&ada);
+    accounts.userinfo(&token, &ada).await;
+    let created = call(
+        &app,
+        Method::POST,
+        "/api/v1/projects",
+        Some(&bearer(&token)),
+        Some(json!({"name": "Widening"})),
+        &[],
+    )
+    .await?;
+    ensure!(created.status == StatusCode::CREATED, "{}", created.body);
+    let project = format!(
+        "/api/v1/projects/{}",
+        created.body["id"].as_str().unwrap_or_default()
+    );
+
+    // Silicon Accounts says the token is live once; then Ada signs out (no webhook cutoff for
+    // a sign-out Commit itself made), and it says the token is revoked.
+    Mock::given(method("POST"))
+        .and(path("/v1/oauth/introspect"))
+        .and(body_string_contains(token.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": true})))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&accounts.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/oauth/introspect"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": false})))
+        .with_priority(2)
+        .mount(&accounts.server)
+        .await;
+    let first = call(
+        &app,
+        Method::PATCH,
+        &project,
+        Some(&bearer(&token)),
+        Some(json!({"private": true})),
+        &[],
+    )
+    .await?;
+    ensure!(first.status == StatusCode::OK, "{}", first.body);
+    let second = call(
+        &app,
+        Method::PATCH,
+        &project,
+        Some(&bearer(&token)),
+        Some(json!({"private": false})),
+        &[],
+    )
+    .await?;
+    ensure!(
+        second.status == StatusCode::UNAUTHORIZED && second.code() == "token_revoked",
+        "the second change asked again: {} {}",
+        second.status,
+        second.body
+    );
+
+    // The same for a proof: valid once, then revoked.
+    let proof = "sap_widen_proof";
+    Mock::given(method("POST"))
+        .and(path("/v1/proofs/verify"))
+        .and(body_string_contains(proof))
+        .respond_with(ResponseTemplate::new(200).set_body_json(valid_proof(
+            "interface",
+            "commit",
+            &ada,
+            &["commit.projects.update"],
+        )))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&accounts.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/proofs/verify"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"valid": false, "expires_at": null})),
+        )
+        .with_priority(2)
+        .mount(&accounts.server)
+        .await;
+    let credential = format!("Proof {proof}");
+    let first = call(
+        &app,
+        Method::PATCH,
+        &project,
+        Some(&credential),
+        Some(json!({"private": true})),
+        &[],
+    )
+    .await?;
+    ensure!(first.status == StatusCode::OK, "{}", first.body);
+    let second = call(
+        &app,
+        Method::PATCH,
+        &project,
+        Some(&credential),
+        Some(json!({"private": false})),
+        &[],
+    )
+    .await?;
+    ensure!(
+        second.status == StatusCode::UNAUTHORIZED && second.code() == "proof_invalid",
+        "the second change verified again: {} {}",
+        second.status,
+        second.body
+    );
+    Ok(())
+}
