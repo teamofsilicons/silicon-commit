@@ -989,3 +989,15 @@ already shipped with the same toolchains, runs `--help`, `accounts --json` and `
 each target's own runner, packs with `silicon-apps validate` and `silicon-apps pack`, and publishes nothing; a
 Carbon uploads, releases and promotes with `silicon-apps`. Silicon Apps' updater is the only updater. Each call is
 in [`docs/migration/decisions.md`](docs/migration/decisions.md) (A-40 to A-54).
+
+## D-058 — Account data only moves forward, and access-widening checks are always online
+
+**Status:** Accepted (2026-10-10); refines D-056 (A-07 to A-09 in the migration decisions)
+
+Stored account details (id, custodian, profile) take an answer from Silicon Accounts only when it is at least as new
+as what is stored, so a cached lookup never undoes a webhook event; an account first seen through someone else's
+lookup reads its own view on its first sign-in. A token issued in the same second as a sign-out is decided by
+introspection, and changes that widen who can see something (project visibility or members, a Silicon's allow-list)
+check the token or proof online every time. The end-to-end run against a local Silicon Accounts stack found these;
+`scripts/e2e-accounts.sh` reruns it. Details in [`docs/migration/decisions.md`](docs/migration/decisions.md)
+(A-55 to A-64).

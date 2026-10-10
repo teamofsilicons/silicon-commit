@@ -628,8 +628,10 @@ CI tools steps replayed locally (py_compile of the new scripts, bash -n of the w
 Commits: `6af47a3` Keep account details from going backwards and read a new account's own view · `6c1b4ab` Refuse
 a token from the second of a sign-out once Silicon Accounts ended it · `777aa8b` Check with Silicon Accounts every
 time a change widens access · `2eed4a6` Run Commit against a local Silicon Accounts stack, end to end · `7a9efdd`
-Cover email defaults, transition aliases and contract checks end to end · then this folder (decisions A-55 to A-64,
-the UNDERSTANDING proposal's email question, the cutover rehearsal step, this log).
+Cover email defaults, transition aliases and contract checks end to end · `7ec3a99` Record the end-to-end stage
+(decisions A-55 to A-64, the UNDERSTANDING proposal's email question, the cutover rehearsal step, this log) ·
+Log the end-to-end stage's service decisions in the engineering record (root `decisions.md` D-058, with this
+line).
 
 Blocked on: nothing. No defect was found in Silicon Accounts or another app.
 
