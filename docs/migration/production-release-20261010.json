@@ -27,10 +27,10 @@
   "public_github_releases": [
     "https://github.com/teamofsilicons/silicon-commit/releases/tag/v0.5.0"
   ],
-  "crates_published": [
-    "silicon-commit-cli",
-    "silicon-commit-client"
-  ],
+  "crates_published": {
+    "silicon-commit-client": "0.5.0",
+    "silicon-commit-cli": "0.5.0"
+  },
   "authenticated_browser": {
     "keyboardConfirmation": true,
     "authenticated": true,
@@ -49,10 +49,21 @@
   "webhook_signed_ping": "delivered",
   "temporary_fixture": {
     "uuid": "6af7bf6a-2fec-4f09-a502-c11447b8f4ac",
-    "account_deletion": "held for coordinator-requested Remind verification",
-    "android_device": "removed; access revoked; session ended; owned emulator stopped"
+    "account_deletion": "Permanently deleted after DM/Extend/Commit/Hook and Remind verification; existing IAM accounts untouched",
+    "android_device": "removed; access revoked; session ended; owned emulator stopped",
+    "cleanup_receipt": ".migration/live/parallel/release-validation-cleanup.private.json",
+    "receiver": "Deleted after verified Remind timer delivery; subscription removed and reminder archived",
+    "revocation_proof": "Unexpired fixture Hook access token returns HTTP 401 after account deletion",
+    "dm_messages": "Both fixture messages replaced with tombstones; private local relay stopped"
   },
   "evidence_directory": ".migration/live/parallel/commit/",
   "pr": "https://github.com/teamofsilicons/silicon-commit/pull/11",
-  "merge": "pending final branch CI"
+  "post_release_backup": {
+    "identifier": "silicon-commit-accounts-live-20261010",
+    "status": "available",
+    "encrypted": true,
+    "restore_qualification": "RDS snapshot retained; this snapshot was not restored into a separate RDS instance during this release"
+  },
+  "optional_dependencies": {},
+  "merge_evidence_url": "https://github.com/teamofsilicons/silicon-commit/pull/11"
 }

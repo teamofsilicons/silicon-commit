@@ -106,7 +106,7 @@ pub fn parse_mapping(text: &str) -> anyhow::Result<Vec<MappingRow>> {
                     .any(|c| c.is_whitespace() || c.is_control() || c == ':'))
         {
             bail!(
-                "line {line}: `{uuid}` is not a Silicon Accounts uuid (a short case-sensitive value such as zQo; c:/si: ids are not uuids)"
+                "line {line}: `{uuid}` is not a Silicon Accounts uuid (a canonical lowercase UUID or a supported legacy alphanumeric key; c:/si: ids are not uuids)"
             );
         }
         let org_id = org_column
