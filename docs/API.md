@@ -26,25 +26,30 @@ Refusals are precise: 401 `unauthenticated`, `token_expired`, `token_wrong_audie
 `token_unknown_key`, `token_bad_signature`, `token_malformed`, `session_ended` (signed out after the token was issued),
 `account_deleted`, `proof_invalid`, `proof_wrong_receiver`; 403 `proof_scope_missing`, `proof_issuer_not_allowed`.
 Changing a project's visibility or members and changing a Silicon's allow-list also check the token online
-(`token_revoked`). Headers of the organisation era (`X-Org-ID`, `X-App-ID`, `X-IAM-OBO-…`, testing headers) answer
-400 `retired_header`.
+(`token_revoked`). Retired headers of the previous sign-in system (`X-Org-ID`, `X-App-ID`, the old delegation and
+testing headers) answer 400 `retired_header`.
 
-## Accounts, circles and sharing
+## Accounts, custodians and sharing
 
 Accounts are named by `c:`/`si:` id (case-insensitive) or uuid (exact). Responses describe an account as
 `{type, id, uuid}`; store the uuid, because ids can change. A deleted account keeps its uuid with an empty id.
 
-- **Todos** are visible to the circles of their owner (who created them) and their assignee, and to whoever can read
-  their project. The owner (or its custodian) changes content and deletes; the assignee (or its custodian) may also
+Below, the accounts *close to* a Carbon are the Silicons it looks after; the accounts close to a Silicon are its
+custodian and the custodian's other Silicons.
+
+- **Todos** are visible to their owner (who created them), their assignee, the accounts close to either, and whoever
+  can read their project. The owner (or its custodian) changes content and deletes; the assignee (or its custodian) may also
   change the status. `GET /todos?view=assigned_to_me|delegated_by_me|all`.
-- **Projects** are visible to the owner's circle, to their members and to the custodians of member Silicons;
+- **Projects** are visible to their owner and the accounts close to it, to their members and to the custodians of
+  member Silicons;
   `private: true` limits them to members (and those custodians). Members (and custodians of member Silicons) change
   them; other readers get 403 `project_not_writable`.
-- **Silicons are not open to the world**: a Silicon takes todos and project invitations only from its circle and from
+- **Silicons are not open to the world**: a Silicon takes todos and project invitations only from the accounts
+  close to it and from
   accounts on its allow-list, otherwise 403 `silicon_not_reachable`. The Silicon or its custodian manages the list:
   `GET /silicons/{silicon}/allowed-accounts`, `PUT|DELETE /silicons/{silicon}/allowed-accounts/{account}`.
-- A Carbon's circle is itself and its Silicons; a Silicon's circle is itself, its custodian and the custodian's other
-  Silicons. A custodian manages its Silicons' work in Commit as itself (history shows the custodian).
+- A custodian manages its Silicons' work in Commit as itself (history shows the custodian); it never acts as the
+  Silicon.
 
 ## Collaboration and history
 

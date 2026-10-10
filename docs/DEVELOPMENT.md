@@ -11,7 +11,10 @@ let projects = client.list_projects(&[]).await?;
 ```
 
 Another app that acts for an account sends `Authorization: Proof sap_…` instead (a User verification proof for
-`commit` with the scopes of the actions it performs); the deployment must allow that app in `COMMIT_PROOF_ISSUERS`.
+`commit` with the scopes of the actions it performs, `Client::with_proof`); the deployment must allow that app in
+`COMMIT_PROOF_ISSUERS`. A tool that signs Carbons and Silicons in by itself, like the CLI, uses
+`silicon_commit_client::auth` (device flow, short-lived tokens, refresh, sign-out; see the
+[Rust client](CLIENT.md#sign-in-from-a-tool)).
 
 Use a stable `Mutation::with_key` across retries. Expect 404 for resources you cannot see, 403 with a precise code
 when you can see but not change something (or a Silicon has not allowed you), 409 for a claim race or stale diary

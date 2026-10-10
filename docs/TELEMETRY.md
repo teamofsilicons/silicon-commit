@@ -12,4 +12,4 @@ The website's Notifications settings include a telemetry switch. Rust applicatio
 
 Production diagnostics are buffered in `commit.telemetry_events`. The worker uses the official `space-station` Rust package to export to the dedicated table. Configure its ingestion key as `COMMIT_TELEMETRY_TABLE_KEY`, and mount private durable storage at `COMMIT_TELEMETRY_HOME`. Keys stay server-side. Failed exports stay pending; stable `event_id` values allow queries to remove duplicates after ambiguous retries. Local diagnostics expire after 30 days.
 
-Test events carry their environment ID, stay in that environment's local storage, and are cleared with the sandbox. They never enter the production table. Telemetry failure does not change a completed API operation's result. Operational audit records and contract admission counters serve correctness and lifecycle management separately from optional telemetry.
+Telemetry failure does not change a completed API operation's result. Operational audit records and contract admission counters serve correctness and lifecycle management separately from optional telemetry.
