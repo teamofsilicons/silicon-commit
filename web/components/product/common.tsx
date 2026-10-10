@@ -13,7 +13,8 @@ import styles from "./product.module.css";
 export const enc=encodeURIComponent;
 export const lines=(text:string)=>[...new Set(text.split(/[\n,]/).map(x=>x.trim()).filter(Boolean))];
 export const label=(text:string)=>text.replaceAll("_"," ").replace(/^./,c=>c.toUpperCase());
-export const stamp=(text:string)=>new Date(text).toLocaleString();
+// Stable across server and browser locales during hydration; the zone is explicit.
+export const stamp=(text:string)=>new Date(text).toISOString().slice(0,16).replace("T"," ")+" UTC";
 export const call=request;
 const pending=new Map<string,string>();
 export async function mutate<T>(path:string,method:RequestOptions["method"],body?:unknown,version?:number):Promise<T>{
