@@ -7,47 +7,40 @@ use uuid::Uuid;
 use crate::{
     application::ports::{VerifiedActor, WebhookRoutingSnapshot},
     domain::{
-        ActorId, NotificationRule, NotificationScope, NotificationSettings,
-        NotificationSubscriptionLevel, NotificationVersion, OrganizationId, PrincipalId, Todo,
-        TodoId, TodoNotificationSubscription, TodoStatus, ValidatedNotificationSettingsUpdate,
+        AccountUuid, Actor, ActorId, NotificationRule, NotificationScope, NotificationSettings,
+        NotificationSubscriptionLevel, NotificationVersion, Todo, TodoId,
+        TodoNotificationSubscription, TodoStatus, ValidatedNotificationSettingsUpdate,
         ValidatedTodoNotificationSubscriptionUpdate, WebhookUrl,
     },
     error::AppError,
+    infrastructure::postgres::accounts::account_uuid,
 };
 
 /// Current assignment fields needed to authorize a per-todo subscription.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TodoNotificationTarget {
-    pub(crate) assigned_by_principal_id: PrincipalId,
-    pub(crate) assigned_to_principal_id: PrincipalId,
+    /// The todo's owner: the Silicon whose subscription this is.
+    pub(crate) assigned_by: Actor,
+    pub(crate) assigned_to: AccountUuid,
 }
 
-/// Serializes notification configuration and delivery decisions for one actor.
+/// Serializes notification configuration and delivery decisions for one Silicon.
 ///
 /// Todo mutation callers must lock their todo row before acquiring this lock.
 /// Per-todo configuration follows that same order; list-level configuration has
 /// no todo dependency and acquires only this lock.
 pub(crate) async fn lock_actor_notifications(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
-    silicon_principal_id: PrincipalId,
+    silicon: &AccountUuid,
 ) -> Result<(), AppError> {
     sqlx::query(
         r"
         SELECT pg_advisory_xact_lock(
-            hashtextextended(
-                jsonb_build_array(
-                    'commit.notifications',
-                    $1::uuid,
-                    $2::uuid
-                )::text,
-                0
-            )
+            hashtextextended(jsonb_build_array('commit.notifications', $1::text)::text, 0)
         )
         ",
     )
-    .bind(organization_id.into_uuid())
-    .bind(silicon_principal_id.into_uuid())
+    .bind(silicon.as_str())
     .execute(connection)
     .await?;
     Ok(())
@@ -56,7 +49,7 @@ pub(crate) async fn lock_actor_notifications(
 /// Selects and snapshots the effective rule for one already-locked delegated todo.
 ///
 /// The caller must hold the todo row lock before entering this function. The
-/// actor-scoped advisory lock serializes list settings with per-todo overrides,
+/// Silicon-scoped advisory lock serializes list settings with per-todo overrides,
 /// so the returned endpoint and rule versions remain one atomic decision until
 /// the caller commits its outbox insert.
 pub(crate) async fn effective_routing_snapshot(
@@ -64,12 +57,7 @@ pub(crate) async fn effective_routing_snapshot(
     todo: &Todo,
     resulting_status: Option<TodoStatus>,
 ) -> Result<Option<WebhookRoutingSnapshot>, AppError> {
-    lock_actor_notifications(
-        connection,
-        todo.organization_id,
-        todo.assigned_by.principal_id,
-    )
-    .await?;
+    lock_actor_notifications(connection, &todo.assigned_by.uuid).await?;
 
     let row = sqlx::query_as::<_, EffectiveRoutingRow>(
         r"
@@ -82,15 +70,12 @@ pub(crate) async fn effective_routing_snapshot(
                subscription.version AS todo_version
           FROM commit.silicon_notification_settings AS settings
           LEFT JOIN commit.todo_notification_subscriptions AS subscription
-            ON subscription.organization_id = settings.organization_id
-           AND subscription.silicon_principal_id = settings.silicon_principal_id
-           AND subscription.todo_id = $3
-         WHERE settings.organization_id = $1
-           AND settings.silicon_principal_id = $2
+            ON subscription.silicon_account = settings.silicon_account
+           AND subscription.todo_id = $2
+         WHERE settings.silicon_account = $1
         ",
     )
-    .bind(todo.organization_id.into_uuid())
-    .bind(todo.assigned_by.principal_id.into_uuid())
+    .bind(todo.assigned_by.uuid.as_str())
     .bind(todo.id.into_uuid())
     .fetch_optional(connection)
     .await?;
@@ -100,87 +85,61 @@ pub(crate) async fn effective_routing_snapshot(
         .map(Option::flatten)
 }
 
-/// Persists or verifies the authenticated Silicon's immutable IAM projection.
-pub(crate) async fn upsert_verified_actor(
-    connection: &mut PgConnection,
-    actor: &VerifiedActor,
-) -> Result<(), AppError> {
-    super::identity_projection::persist_identity(
-        connection,
-        actor.organization_id,
-        &actor.org_id,
-        &actor.membership_id,
-        &actor.actor,
-    )
-    .await
-}
-
-/// Reads Silicon-level settings without locking.
+/// Reads a Silicon's settings without locking.
 pub(crate) async fn get_settings(
     pool: &PgPool,
-    actor: &VerifiedActor,
+    silicon: &Actor,
 ) -> Result<Option<NotificationSettings>, AppError> {
     let row = sqlx::query_as::<_, SettingsRow>(SETTINGS_SELECT)
-        .bind(actor.organization_id.into_uuid())
-        .bind(actor.actor.principal_id.into_uuid())
+        .bind(silicon.uuid.as_str())
         .fetch_optional(pool)
         .await?;
-    row.map(|row| row.into_domain(&actor.actor.id)).transpose()
+    row.map(|row| row.into_domain(&silicon.id)).transpose()
 }
 
-/// Reads and row-locks Silicon-level settings.
+/// Reads and row-locks a Silicon's settings.
 pub(crate) async fn lock_settings(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
+    silicon: &Actor,
 ) -> Result<Option<NotificationSettings>, AppError> {
     let row = sqlx::query_as::<_, SettingsRow>(AssertSqlSafe(format!(
         "{SETTINGS_SELECT} FOR UPDATE OF settings"
     )))
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(silicon.uuid.as_str())
     .fetch_optional(connection)
     .await?;
-    row.map(|row| row.into_domain(&actor.actor.id)).transpose()
+    row.map(|row| row.into_domain(&silicon.id)).transpose()
 }
 
 /// Creates the first persisted Silicon-level settings resource at version one.
 pub(crate) async fn insert_settings(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
+    silicon: &Actor,
     desired: &ValidatedNotificationSettingsUpdate,
 ) -> Result<NotificationSettings, AppError> {
     let (scope, statuses) = rule_columns(desired.todo_list_subscription.as_ref());
     let row = sqlx::query_as::<_, SettingsRow>(
         r"
         INSERT INTO commit.silicon_notification_settings (
-            organization_id,
-            silicon_principal_id,
-            webhook_url,
-            todo_list_scope,
-            todo_list_statuses
+            silicon_account, webhook_url, todo_list_scope, todo_list_statuses
         )
-        VALUES ($1, $2, $3, $4::commit.notification_scope, $5)
-        RETURNING webhook_url,
-                  todo_list_scope,
-                  todo_list_statuses,
-                  version,
-                  updated_at
+        VALUES ($1, $2, $3::commit.notification_scope, $4)
+        RETURNING webhook_url, todo_list_scope, todo_list_statuses, version, updated_at
         ",
     )
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(silicon.uuid.as_str())
     .bind(desired.webhook_url.as_ref().map(WebhookUrl::as_str))
     .bind(scope)
     .bind(statuses)
     .fetch_one(connection)
     .await?;
-    row.into_domain(&actor.actor.id)
+    row.into_domain(&silicon.id)
 }
 
 /// Replaces a locked Silicon-level resource and advances its version once.
 pub(crate) async fn update_settings(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
+    silicon: &Actor,
     current_version: NotificationVersion,
     desired: &ValidatedNotificationSettingsUpdate,
 ) -> Result<Option<NotificationSettings>, AppError> {
@@ -188,69 +147,58 @@ pub(crate) async fn update_settings(
     let row = sqlx::query_as::<_, SettingsRow>(
         r"
         UPDATE commit.silicon_notification_settings
-           SET webhook_url = $3,
-               todo_list_scope = $4::commit.notification_scope,
-               todo_list_statuses = $5
-         WHERE organization_id = $1
-           AND silicon_principal_id = $2
-           AND version = $6
-        RETURNING webhook_url,
-                  todo_list_scope,
-                  todo_list_statuses,
-                  version,
-                  updated_at
+           SET webhook_url = $2,
+               todo_list_scope = $3::commit.notification_scope,
+               todo_list_statuses = $4
+         WHERE silicon_account = $1
+           AND version = $5
+        RETURNING webhook_url, todo_list_scope, todo_list_statuses, version, updated_at
         ",
     )
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(silicon.uuid.as_str())
     .bind(desired.webhook_url.as_ref().map(WebhookUrl::as_str))
     .bind(scope)
     .bind(statuses)
     .bind(current_version.get())
     .fetch_optional(connection)
     .await?;
-    row.map(|row| row.into_domain(&actor.actor.id)).transpose()
+    row.map(|row| row.into_domain(&silicon.id)).transpose()
 }
 
 /// Reads the active todo assignment needed by subscription authorization.
 pub(crate) async fn get_todo_notification_target(
     pool: &PgPool,
-    organization_id: OrganizationId,
     todo_id: TodoId,
 ) -> Result<Option<TodoNotificationTarget>, AppError> {
     let row = sqlx::query_as::<_, TodoTargetRow>(TODO_TARGET_SELECT)
-        .bind(organization_id.into_uuid())
         .bind(todo_id.into_uuid())
         .fetch_optional(pool)
         .await?;
-    Ok(row.map(TodoTargetRow::into_domain))
+    row.map(TodoTargetRow::into_domain).transpose()
 }
 
-/// Reads and row-locks the active todo before the actor notification lock.
+/// Reads and row-locks the active todo before the Silicon notification lock.
 pub(crate) async fn lock_todo_notification_target(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
 ) -> Result<Option<TodoNotificationTarget>, AppError> {
     let row = sqlx::query_as::<_, TodoTargetRow>(AssertSqlSafe(format!(
         "{TODO_TARGET_SELECT} FOR UPDATE OF todo"
     )))
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
     .fetch_optional(connection)
     .await?;
-    Ok(row.map(TodoTargetRow::into_domain))
+    row.map(TodoTargetRow::into_domain).transpose()
 }
 
 /// Reads one per-todo subscription resource without locking.
 pub(crate) async fn get_todo_subscription(
     pool: &PgPool,
-    actor: &VerifiedActor,
+    silicon: &AccountUuid,
     todo_id: TodoId,
 ) -> Result<Option<TodoNotificationSubscription>, AppError> {
     let row = sqlx::query_as::<_, TodoSubscriptionRow>(TODO_SUBSCRIPTION_SELECT)
-        .bind(actor.organization_id.into_uuid())
-        .bind(actor.actor.principal_id.into_uuid())
+        .bind(silicon.as_str())
         .bind(todo_id.into_uuid())
         .fetch_optional(pool)
         .await?;
@@ -260,14 +208,13 @@ pub(crate) async fn get_todo_subscription(
 /// Reads and row-locks one per-todo subscription resource.
 pub(crate) async fn lock_todo_subscription(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
+    silicon: &AccountUuid,
     todo_id: TodoId,
 ) -> Result<Option<TodoNotificationSubscription>, AppError> {
     let row = sqlx::query_as::<_, TodoSubscriptionRow>(AssertSqlSafe(format!(
         "{TODO_SUBSCRIPTION_SELECT} FOR UPDATE OF subscription"
     )))
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(silicon.as_str())
     .bind(todo_id.into_uuid())
     .fetch_optional(connection)
     .await?;
@@ -277,26 +224,19 @@ pub(crate) async fn lock_todo_subscription(
 /// Creates the first per-todo subscription resource at version one.
 pub(crate) async fn insert_todo_subscription(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
+    silicon: &AccountUuid,
     todo_id: TodoId,
     desired: &ValidatedTodoNotificationSubscriptionUpdate,
 ) -> Result<TodoNotificationSubscription, AppError> {
     let (scope, statuses) = rule_columns(desired.subscription.as_ref());
     let row = sqlx::query_as::<_, TodoSubscriptionRow>(
         r"
-        INSERT INTO commit.todo_notification_subscriptions (
-            organization_id,
-            silicon_principal_id,
-            todo_id,
-            scope,
-            statuses
-        )
-        VALUES ($1, $2, $3, $4::commit.notification_scope, $5)
+        INSERT INTO commit.todo_notification_subscriptions (silicon_account, todo_id, scope, statuses)
+        VALUES ($1, $2, $3::commit.notification_scope, $4)
         RETURNING todo_id, scope, statuses, version, updated_at
         ",
     )
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(silicon.as_str())
     .bind(todo_id.into_uuid())
     .bind(scope)
     .bind(statuses)
@@ -308,7 +248,7 @@ pub(crate) async fn insert_todo_subscription(
 /// Replaces a locked per-todo subscription and advances its version once.
 pub(crate) async fn update_todo_subscription(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
+    silicon: &AccountUuid,
     todo_id: TodoId,
     current_version: NotificationVersion,
     desired: &ValidatedTodoNotificationSubscriptionUpdate,
@@ -317,17 +257,15 @@ pub(crate) async fn update_todo_subscription(
     let row = sqlx::query_as::<_, TodoSubscriptionRow>(
         r"
         UPDATE commit.todo_notification_subscriptions
-           SET scope = $4::commit.notification_scope,
-               statuses = $5
-         WHERE organization_id = $1
-           AND silicon_principal_id = $2
-           AND todo_id = $3
-           AND version = $6
+           SET scope = $3::commit.notification_scope,
+               statuses = $4
+         WHERE silicon_account = $1
+           AND todo_id = $2
+           AND version = $5
         RETURNING todo_id, scope, statuses, version, updated_at
         ",
     )
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(silicon.as_str())
     .bind(todo_id.into_uuid())
     .bind(scope)
     .bind(statuses)
@@ -349,48 +287,17 @@ pub(crate) async fn insert_audit_event(
     change_summary: &serde_json::Value,
     audit_retention: std::time::Duration,
 ) -> Result<(), AppError> {
-    let retention_seconds = i64::try_from(audit_retention.as_secs()).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!(
-            "audit retention duration is too large: {error}"
-        ))
-    })?;
-    if retention_seconds == 0 {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "audit retention duration must be positive"
-        )));
-    }
-
-    sqlx::query(
-        r"
-        INSERT INTO commit.audit_events (
-            id,
-            organization_id,
-            actor_principal_id,
-            action,
-            resource_type,
-            resource_id,
-            request_id,
-            change_summary,
-            retain_until
-        )
-        VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
-            transaction_timestamp() + make_interval(secs => $9::double precision)
-        )
-        ",
+    super::todos::insert_audit_event(
+        connection,
+        actor,
+        action,
+        resource_type,
+        resource_id,
+        request_id,
+        change_summary,
+        audit_retention,
     )
-    .bind(Uuid::now_v7())
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
-    .bind(action)
-    .bind(resource_type)
-    .bind(resource_id)
-    .bind(request_id)
-    .bind(change_summary)
-    .bind(retention_seconds)
-    .execute(connection)
-    .await?;
-    Ok(())
+    .await
 }
 
 const SETTINGS_SELECT: &str = r"
@@ -400,16 +307,17 @@ const SETTINGS_SELECT: &str = r"
            settings.version,
            settings.updated_at
       FROM commit.silicon_notification_settings AS settings
-     WHERE settings.organization_id = $1
-       AND settings.silicon_principal_id = $2
+     WHERE settings.silicon_account = $1
 ";
 
 const TODO_TARGET_SELECT: &str = r"
-    SELECT todo.assigned_by_principal_id,
-           todo.assigned_to_principal_id
+    SELECT owner.uuid AS assigned_by_uuid,
+           owner.kind AS assigned_by_kind,
+           owner.public_id AS assigned_by_id,
+           todo.assigned_to_account
       FROM commit.todos AS todo
-     WHERE todo.organization_id = $1
-       AND todo.id = $2
+      JOIN commit.accounts AS owner ON owner.uuid = todo.assigned_by_account
+     WHERE todo.id = $1
        AND todo.deleted_at IS NULL
 ";
 
@@ -420,9 +328,8 @@ const TODO_SUBSCRIPTION_SELECT: &str = r"
            subscription.version,
            subscription.updated_at
       FROM commit.todo_notification_subscriptions AS subscription
-     WHERE subscription.organization_id = $1
-       AND subscription.silicon_principal_id = $2
-       AND subscription.todo_id = $3
+     WHERE subscription.silicon_account = $1
+       AND subscription.todo_id = $2
 ";
 
 #[derive(FromRow)]
@@ -474,8 +381,10 @@ impl TodoSubscriptionRow {
 
 #[derive(FromRow)]
 struct TodoTargetRow {
-    assigned_by_principal_id: Uuid,
-    assigned_to_principal_id: Uuid,
+    assigned_by_uuid: String,
+    assigned_by_kind: crate::domain::ActorType,
+    assigned_by_id: String,
+    assigned_to_account: String,
 }
 
 #[derive(FromRow)]
@@ -541,11 +450,15 @@ impl EffectiveRoutingRow {
 }
 
 impl TodoTargetRow {
-    fn into_domain(self) -> TodoNotificationTarget {
-        TodoNotificationTarget {
-            assigned_by_principal_id: PrincipalId::from_uuid(self.assigned_by_principal_id),
-            assigned_to_principal_id: PrincipalId::from_uuid(self.assigned_to_principal_id),
-        }
+    fn into_domain(self) -> Result<TodoNotificationTarget, AppError> {
+        Ok(TodoNotificationTarget {
+            assigned_by: Actor::new(
+                account_uuid(self.assigned_by_uuid)?,
+                self.assigned_by_kind,
+                ActorId::from_persisted(self.assigned_by_id),
+            ),
+            assigned_to: account_uuid(self.assigned_to_account)?,
+        })
     }
 }
 

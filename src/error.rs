@@ -17,6 +17,14 @@ pub enum AppError {
         /// Stable error code.
         code: Cow<'static, str>,
     },
+    /// The request is malformed, for a precise reason the caller can fix.
+    #[error("{message}")]
+    Invalid {
+        /// Stable error code.
+        code: Cow<'static, str>,
+        /// Exact reason and what to do.
+        message: String,
+    },
     /// Syntactically valid input violates domain validation.
     #[error("request validation failed")]
     Validation {
@@ -26,10 +34,26 @@ pub enum AppError {
     /// Credential is absent, invalid, expired, or revoked.
     #[error("authentication is required")]
     Unauthenticated,
+    /// A credential was presented but is not acceptable, for a precise reason.
+    #[error("{message}")]
+    Authentication {
+        /// Stable error code.
+        code: Cow<'static, str>,
+        /// Exact reason and what to do.
+        message: String,
+    },
     /// Authenticated actor lacks authority.
     #[error("the actor is not authorized for this action")]
     Forbidden,
-    /// Resource does not exist in the caller's organization-visible scope.
+    /// Authenticated actor lacks authority, for a precise reason.
+    #[error("{message}")]
+    Denied {
+        /// Stable error code.
+        code: Cow<'static, str>,
+        /// Exact reason and what to do.
+        message: String,
+    },
+    /// Resource does not exist or is not visible to the caller.
     #[error("resource was not found")]
     NotFound,
     /// Mutation conflicts with current state.
@@ -136,6 +160,9 @@ impl AppError {
                 Cow::Borrowed("The request is malformed."),
                 None,
             ),
+            Self::Invalid { code, message } => {
+                (StatusCode::BAD_REQUEST, code, Cow::Owned(message), None)
+            }
             Self::Validation { details } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Cow::Borrowed("validation_failed"),
@@ -145,15 +172,23 @@ impl AppError {
             Self::Unauthenticated => (
                 StatusCode::UNAUTHORIZED,
                 Cow::Borrowed("unauthenticated"),
-                Cow::Borrowed("Authentication is required."),
+                Cow::Borrowed(
+                    "Authentication is required: send Authorization: Bearer <Silicon Accounts access token for Commit>.",
+                ),
                 None,
             ),
+            Self::Authentication { code, message } => {
+                (StatusCode::UNAUTHORIZED, code, Cow::Owned(message), None)
+            }
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 Cow::Borrowed("forbidden"),
                 Cow::Borrowed("The actor is not authorized for this action."),
                 None,
             ),
+            Self::Denied { code, message } => {
+                (StatusCode::FORBIDDEN, code, Cow::Owned(message), None)
+            }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
                 Cow::Borrowed("not_found"),

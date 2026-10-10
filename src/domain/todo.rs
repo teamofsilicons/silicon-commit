@@ -5,7 +5,7 @@ use std::{fmt, str::FromStr};
 use super::{
     actor::{Actor, ActorRef, ActorType},
     attachment::AttachmentUrl,
-    ids::{ActorId, OrganizationId, PublicOrganizationId, TodoId, TodoNoteId},
+    ids::{ActorId, TodoId, TodoNoteId},
     pagination::{CreatedAtRange, Page, PageCursor, PageLimit},
     validation::{
         DomainLimits, LimitedText, RequiredText, ValidationError, ValidationErrorKind,
@@ -83,7 +83,8 @@ pub enum TodoView {
     AssignedToMe,
     /// Todos assigned by the current actor to somebody else.
     DelegatedByMe,
-    /// Every organization-visible todo.
+    /// All work visible to the caller: its own and delegated todos, those of
+    /// the accounts in its custodian circle, and todos of projects it can read.
     All,
 }
 
@@ -96,7 +97,7 @@ pub struct TodoCreate {
     /// Optional formatting-preserving description.
     #[serde(default)]
     pub description: Option<String>,
-    /// Public IAM ID of the requested assignee.
+    /// `c:`/`si:` id (or account uuid) of the requested assignee.
     pub assigned_to: ActorId,
     /// Initial lifecycle state.
     #[serde(default)]
@@ -104,7 +105,7 @@ pub struct TodoCreate {
     /// Canonical HTTPS attachment URLs from any image provider.
     #[serde(default)]
     pub attachments: Vec<AttachmentUrl>,
-    /// Related project, scoped to this todo's organization and environment.
+    /// Related project the caller can read.
     #[serde(default)]
     pub project_id: Option<super::ProjectId>,
 }
@@ -137,13 +138,13 @@ pub struct ValidatedTodoCreate {
     pub title: RequiredText,
     /// Bounded description, with `None` representing JSON absence.
     pub description: Option<LimitedText>,
-    /// IAM-resolved public assignee ID.
+    /// Requested assignee id, resolved through Silicon Accounts.
     pub assigned_to: ActorId,
     /// Initial status, defaulting to `yet_to_do`.
     pub status: TodoStatus,
     /// Canonical HTTPS attachment URLs.
     pub attachments: Vec<AttachmentUrl>,
-    /// Related project, scoped to this todo's organization and environment.
+    /// Related project.
     pub project_id: Option<super::ProjectId>,
 }
 
@@ -307,22 +308,18 @@ pub struct ValidatedTodoPatch {
     pub project_id: NullablePatch<super::ProjectId>,
 }
 
-/// Public todo aggregate with internal tenant and principal keys retained.
+/// Public todo aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Todo {
     /// `UUIDv7` resource ID.
     pub id: TodoId,
-    /// Authoritative internal tenant key.
-    pub organization_id: OrganizationId,
-    /// Public organization ID snapshot.
-    pub org_id: PublicOrganizationId,
     /// Validated title.
     pub title: RequiredText,
     /// Optional description.
     pub description: Option<LimitedText>,
-    /// IAM-resolved assignee.
+    /// Assignee account.
     pub assigned_to: Actor,
-    /// IAM-resolved assigner.
+    /// Owner: the account that created the todo.
     pub assigned_by: Actor,
     /// Current lifecycle state.
     pub status: TodoStatus,
@@ -332,15 +329,15 @@ pub struct Todo {
     pub created_at: OffsetDateTime,
     /// Last meaningful update timestamp.
     pub updated_at: OffsetDateTime,
-    /// Related project, scoped to this todo's organization and environment.
+    /// Related project.
     pub project_id: Option<super::ProjectId>,
 }
 
 impl Todo {
-    /// Reports whether work was delegated to a different IAM principal.
+    /// Reports whether work was delegated to a different account.
     #[must_use]
     pub fn is_delegated(&self) -> bool {
-        self.assigned_by.principal_id != self.assigned_to.principal_id
+        self.assigned_by.uuid != self.assigned_to.uuid
     }
 
     /// Applies the product rule for notifying a delegating Silicon.
@@ -357,12 +354,11 @@ impl Serialize for Todo {
     {
         #[derive(Serialize)]
         struct WireTodo<'a> {
-            project_id: Option<super::ProjectId>,
             id: TodoId,
-            org_id: &'a PublicOrganizationId,
+            project_id: Option<super::ProjectId>,
             title: &'a RequiredText,
             description: &'a Option<LimitedText>,
-            assigned_to: &'a ActorId,
+            assigned_to: ActorRef,
             assigned_by: ActorRef,
             status: TodoStatus,
             attachments: &'a [AttachmentUrl],
@@ -373,12 +369,11 @@ impl Serialize for Todo {
         }
 
         WireTodo {
-            project_id: self.project_id,
             id: self.id,
-            org_id: &self.org_id,
+            project_id: self.project_id,
             title: &self.title,
             description: &self.description,
-            assigned_to: &self.assigned_to.id,
+            assigned_to: self.assigned_to.public_ref(),
             assigned_by: self.assigned_by.public_ref(),
             status: self.status,
             attachments: &self.attachments,
@@ -425,7 +420,7 @@ pub struct TodoNote {
     pub todo_id: TodoId,
     /// Author-authored body.
     pub body: RequiredText,
-    /// IAM-resolved author, serialized as a public actor reference.
+    /// Author account.
     pub author: Actor,
     /// Creation timestamp.
     #[serde(with = "time::serde::rfc3339")]
@@ -441,9 +436,9 @@ pub struct TodoQuery {
     pub view: TodoView,
     /// Optional exact status filter.
     pub status: Option<TodoStatus>,
-    /// Optional public assignee ID filter.
+    /// Optional assignee filter: a `c:`/`si:` id or an account uuid.
     pub assigned_to: Option<ActorId>,
-    /// Optional public assigner ID filter.
+    /// Optional owner filter: a `c:`/`si:` id or an account uuid.
     pub assigned_by: Option<ActorId>,
     /// Inclusive creation lower bound.
     #[serde(default, with = "time::serde::rfc3339::option")]

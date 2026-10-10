@@ -1,148 +1,126 @@
-//! Exact-byte IAM signature verification and durable event deduplication.
+//! `POST /webhook/`: Silicon Accounts app-webhook deliveries.
+//!
+//! The signature is verified over the raw body bytes (HMAC-SHA256 with the
+//! `whsec_…` secret, 5-minute timestamp tolerance), the event is deduplicated
+//! on `event_id`, applied, and answered with 2xx. Bad signatures answer 401,
+//! bodies that are not Accounts events 400; event types Commit does not use
+//! are recorded and answered with 2xx.
 
-use super::AppState;
-use crate::{config::IamSettings, error::AppError, infrastructure::clients::ClientBuildError};
 use axum::{
+    Json,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use secrecy::ExposeSecret as _;
+use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use silicon_iam_client::webhook::{WebhookSecret, WebhookSecretKeyring, WebhookVerifier};
-use uuid::Uuid;
+use silicon_accounts_client::{
+    DEFAULT_WEBHOOK_TOLERANCE, SIGNATURE_HEADER, TIMESTAMP_HEADER, WebhookError, WebhookPayload,
+    verify_and_parse_webhook,
+};
 
-/// Constructs a verifier for the explicitly configured IAM key version.
-pub(crate) fn verifier(
-    settings: &IamSettings,
-) -> Result<Option<WebhookVerifier>, ClientBuildError> {
-    settings
-        .webhook_secret
-        .as_ref()
-        .map(|secret| {
-            let secret = WebhookSecret::new(secret.expose_secret())
-                .map_err(|_| ClientBuildError::InvalidCredential)?;
-            let keys = WebhookSecretKeyring::new(settings.webhook_key_version, secret)
-                .map_err(|_| ClientBuildError::InvalidCredential)?;
-            Ok(WebhookVerifier::new(keys))
-        })
-        .transpose()
-}
+use super::AppState;
+use crate::{application::accounts::AccountEvent, error::AppError};
 
 pub(crate) async fn receive(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, AppError> {
-    let verifier = state
-        .webhook_verifier
-        .as_ref()
-        .ok_or(AppError::ProviderUnavailable)?;
-    let delivery = verifier
-        .verify(&headers, &body)
-        .map_err(|_| AppError::Unauthenticated)?;
-    // A testing envelope must be routed and verified against its IAM test key;
-    // it may never fall through into the production inbox.
-    let environments: Vec<Option<(Uuid, i64)>> = if delivery.is_testing() {
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| AppError::BadGateway)?;
-        let key = envelope
-            .pointer("/test/testing_key")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(AppError::BadGateway)?;
-        let ids = sqlx::query_as::<_,(Uuid,i64)>("SELECT environment_id,version FROM commit.testing_environments WHERE iam_test_key_digest=$1 AND status='active'")
-            .bind(digest(key)).fetch_all(&state.pool).await.map_err(|e| AppError::Internal(e.into()))?;
-        if ids.is_empty() {
-            return Err(AppError::Unauthenticated);
-        }
-        ids.into_iter().map(Some).collect()
-    } else {
-        vec![None]
+) -> Result<Response, AppError> {
+    let Some(secret) = state.webhook_secret.as_ref() else {
+        return Err(AppError::ProviderUnavailable);
     };
-    let event = delivery.event();
-    let aggregate_id = event
-        .aggregate
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.is_empty() && id.len() <= 255 && !id.chars().any(char::is_control))
-        .ok_or(AppError::BadGateway)?;
-    let aggregate_version = event
-        .aggregate
-        .get("version")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or(AppError::BadGateway)?;
-    let mut payload =
-        serde_json::to_value(event).map_err(|error| AppError::Internal(error.into()))?;
-    redact_secrets(&mut payload);
-    let hash = hex::encode(Sha256::digest(&body));
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-    for environment in environments {
-        let environment_id = environment.map(|(id, _)| id);
-        if let Some((id, version)) = environment {
-            let control:Option<(String,bool,Option<time::OffsetDateTime>)>=sqlx::query_as("SELECT state,require_iam_clean,cleared_at FROM commit.honeycomb_environments WHERE environment_id=$1 FOR SHARE").bind(id).fetch_optional(&mut *tx).await?;
-            if control.is_some_and(|(state, clean, before)| {
-                state != "active" || (clean && before.is_some_and(|at| event.occurred_at <= at))
-            }) {
-                return Err(AppError::Unauthenticated);
-            }
-
-            let active: Option<Uuid> = sqlx::query_scalar("SELECT environment_id FROM commit.testing_environments WHERE environment_id=$1 AND version=$2 AND status='active' AND (iam_cleaned_at IS NULL OR iam_cleaned_at<$3) FOR SHARE").bind(id).bind(version).bind(event.occurred_at).fetch_optional(&mut *tx).await.map_err(|e| AppError::Internal(e.into()))?;
-            if active.is_none() {
-                return Err(AppError::Unauthenticated);
-            }
+    let timestamp = header_text(&headers, TIMESTAMP_HEADER);
+    let signature = header_text(&headers, SIGNATURE_HEADER);
+    let event = match verify_and_parse_webhook(
+        secret.expose_secret(),
+        &timestamp,
+        &signature,
+        &body,
+        DEFAULT_WEBHOOK_TOLERANCE,
+    ) {
+        Ok(event) => event,
+        Err(WebhookError::InvalidBody(reason)) => {
+            return Err(AppError::Invalid {
+                code: "invalid_webhook_body".into(),
+                message: format!("The body is not a Silicon Accounts event: {reason}"),
+            });
         }
-        let inserted = sqlx::query("INSERT INTO commit.iam_webhook_events (event_id,event_type,organization_id,aggregate_id,aggregate_version,payload,payload_sha256,environment_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (environment_id,event_id) DO NOTHING")
-            .bind(event.event_id).bind(&event.event_type).bind(event.organization_id).bind(aggregate_id).bind(aggregate_version).bind(&payload).bind(&hash).bind(environment_id)
-            .execute(&mut *tx).await.map_err(|e| AppError::Internal(e.into()))?;
-        if inserted.rows_affected() == 0 {
-            let original: String = sqlx::query_scalar("SELECT payload_sha256 FROM commit.iam_webhook_events WHERE event_id=$1 AND environment_id IS NOT DISTINCT FROM $2")
-                .bind(event.event_id).bind(environment_id).fetch_one(&mut *tx).await.map_err(|e| AppError::Internal(e.into()))?;
-            if original != hash {
-                return Err(AppError::Conflict {
-                    code: "webhook_event_id_reused".into(),
-                });
-            }
+        Err(error) => {
+            tracing::warn!(%error, "refused an Accounts webhook delivery");
+            return Err(AppError::Authentication {
+                code: "invalid_webhook_signature".into(),
+                message: error.to_string(),
+            });
         }
-    }
-    tx.commit()
-        .await
-        .map_err(|e| AppError::Internal(e.into()))?;
-    // Every product request introspects IAM live, so logout/removal becomes
-    // effective even before this durable notification has arrived.
-    Ok(StatusCode::NO_CONTENT)
+    };
+    let account_event = AccountEvent::from(&event.payload);
+    let digest = hex::encode(Sha256::digest(&body));
+    let outcome = state
+        .accounts
+        .apply_webhook(
+            &event.event_id,
+            &event.event_type,
+            event.occurred_at,
+            &account_event,
+            &digest,
+        )
+        .await?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "event_id": event.event_id,
+            "applied": outcome.applied,
+            "outcome": outcome.outcome,
+        })),
+    )
+        .into_response())
 }
 
-fn digest(key: &str) -> String {
-    hex::encode(Sha256::digest(key.as_bytes()))
+fn header_text(headers: &HeaderMap, name: &str) -> String {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
 }
 
-fn redact_secrets(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, value) in fields {
-                let key = key.to_ascii_lowercase();
-                if key.contains("secret")
-                    || key.contains("token")
-                    || matches!(
-                        key.as_str(),
-                        "testing_key" | "root_key" | "password" | "authorization"
-                    )
-                {
-                    *value = serde_json::Value::String("[redacted]".into());
-                } else {
-                    redact_secrets(value);
-                }
-            }
+impl From<&WebhookPayload> for AccountEvent {
+    fn from(payload: &WebhookPayload) -> Self {
+        match payload {
+            WebhookPayload::AccountIdChanged(change) => Self::IdChanged {
+                uuid: change.uuid.clone(),
+                new_id: change.new_id.clone(),
+            },
+            WebhookPayload::AccountUpdated(update) => match &update.account {
+                Some(account) => Self::Updated {
+                    uuid: update.uuid.clone(),
+                    version: account.version,
+                    account: serde_json::to_value(account).unwrap_or_default(),
+                },
+                None => Self::Unknown,
+            },
+            WebhookPayload::AccountDeleted(gone) => Self::Deleted {
+                uuid: gone.uuid.clone(),
+            },
+            WebhookPayload::MembershipSignedOut(signed_out) => Self::SignedOut {
+                uuid: signed_out.uuid.clone(),
+                reason: signed_out.reason.clone(),
+            },
+            WebhookPayload::MembershipAccessRemoved(removed) => Self::AccessRemoved {
+                uuid: removed.uuid.clone(),
+            },
+            WebhookPayload::CustodianChanged(change) => Self::CustodianChanged {
+                silicon: change.uuid.clone(),
+                to: change
+                    .to
+                    .as_ref()
+                    .map(|to| (to.uuid.clone(), to.id.clone())),
+            },
+            WebhookPayload::Ping => Self::Ping,
+            _ => Self::Unknown,
         }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                redact_secrets(value);
-            }
-        }
-        _ => {}
     }
 }

@@ -1,25 +1,26 @@
 //! Project application workflows.
 //!
 //! [`ProjectService`] is the use-case boundary used by the HTTP layer. It
-//! validates domain commands, resolves current Silicon participants through
-//! IAM, applies authorization against locked project state, and commits each
+//! validates domain commands, resolves members through Silicon Accounts,
+//! applies authorization against locked project state, and commits each
 //! mutation with its audit and (where contracted) replay record.
+//!
+//! Members (explicit shares) and the custodians of member Silicons read and
+//! change a project; a project that is not private is also readable by its
+//! owner's custodian circle. Adding a Silicon from outside the caller's circle
+//! needs that Silicon's allow-list.
 
 mod collaboration;
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{borrow::Cow, collections::HashSet, sync::Arc, time::Duration};
 
 use serde_json::{Map, Value, json};
 use sqlx::{PgConnection, PgPool};
 
 use super::{
+    accounts::{account_field_error, ensure_reachable, remember},
     idempotency::{IdempotencyKey, MutationIdentity, MutationResponse},
-    ports::{ActiveMember, IdentityProvider, ProviderError, VerifiedActor},
+    ports::{IdentityProvider, ResolvedAccount, VerifiedActor},
 };
 use crate::{
     domain::{
@@ -33,7 +34,7 @@ use crate::{
     infrastructure::postgres::projects as postgres,
 };
 
-/// Project use cases backed by PostgreSQL and Silicon IAM.
+/// Project use cases backed by PostgreSQL and Silicon Accounts.
 #[derive(Clone)]
 pub struct ProjectService {
     pool: PgPool,
@@ -62,11 +63,11 @@ impl ProjectService {
         }
     }
 
-    /// Lists organization-visible projects in stable keyset order.
+    /// Lists the projects the caller can read, in stable keyset order.
     ///
     /// # Errors
     ///
-    /// Returns an internal error when the organization-qualified read fails.
+    /// Returns an internal error when the read fails.
     pub async fn list_projects(
         &self,
         actor: &VerifiedActor,
@@ -89,24 +90,20 @@ impl ProjectService {
         Ok(ProjectPage::new(projects, next_cursor))
     }
 
-    /// Gets one organization-visible project by UUID or exact UID.
+    /// Gets one readable project by UUID or exact UID.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NotFound`] when the locator is absent in the actor's
-    /// organization, or an internal error when persistence fails.
+    /// Returns [`AppError::NotFound`] when the project does not exist or the
+    /// caller cannot read it, or an internal error when persistence fails.
     pub async fn get_project(
         &self,
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<Project, AppError> {
-        let project = postgres::get_project(&self.pool, actor.organization_id, locator)
+        postgres::get_project(&self.pool, locator, actor.uuid())
             .await?
-            .ok_or(AppError::NotFound)?;
-        if !super::authorization::can_mutate_project(actor, &project) {
-            return Err(AppError::NotFound);
-        }
-        Ok(project)
+            .ok_or(AppError::NotFound)
     }
 
     /// Creates a Silicon-owned project exactly once for an idempotency scope.
@@ -136,36 +133,26 @@ impl ProjectService {
         let command = request
             .validate(&self.limits, &actor.actor)
             .map_err(validation_error)?;
-        let mut participants = self
-            .resolve_members(actor, &command.silicon_ids, ActorType::Silicon)
+        let participants = self
+            .resolve_participants(actor, &command.silicon_ids, &command.details.carbon_ids)
             .await?;
-        participants.extend(
-            self.resolve_members(actor, &command.details.carbon_ids, ActorType::Carbon)
-                .await?,
-        );
         let seeds = self.prepare_seed_tasks(actor, &command.tasks).await?;
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
             transaction.commit().await?;
             return Ok(response);
         }
-        crate::infrastructure::postgres::testing::capacity(&mut transaction, true).await?;
-        postgres::upsert_verified_actor(&mut transaction, actor).await?;
+        remember(&mut transaction, actor, &participants).await?;
         for participant in &participants {
-            postgres::upsert_active_member(&mut transaction, participant).await?;
+            ensure_reachable(&mut transaction, actor, &participant.actor, "silicon_ids").await?;
         }
 
-        let created_at = postgres::next_project_created_at(
-            &mut transaction,
-            actor.organization_id,
-            &actor.actor,
-            &command.slug,
-        )
-        .await?;
+        let created_at =
+            postgres::next_project_created_at(&mut transaction, &actor.actor, &command.slug)
+                .await?;
         let uid = ProjectUid::new(&command.slug, &actor.actor.id, created_at);
         let project_id = crate::domain::ProjectId::new();
         let mut project = postgres::insert_project(
@@ -203,10 +190,9 @@ impl ProjectService {
             self.audit_retention,
         )
         .await?;
-        project =
-            postgres::fetch_project_by_id(&mut transaction, actor.organization_id, project.id)
-                .await?
-                .ok_or(AppError::NotFound)?;
+        project = postgres::fetch_project_by_id(&mut transaction, project.id)
+            .await?
+            .ok_or(AppError::NotFound)?;
         let response = created_response(&project, 201)?;
         postgres::save_idempotency(
             &mut transaction,
@@ -248,55 +234,48 @@ impl ProjectService {
         }
 
         let command = request.validate(&self.limits).map_err(validation_error)?;
-        let authorization_snapshot = self.authorize_existing_project(actor, locator).await?;
-        ensure_project_remains_terminal(authorization_snapshot.status, &command)?;
-        let participants = if command.silicon_ids.is_some() || command.carbon_ids.is_some() {
-            let silicon_ids = command.silicon_ids.clone().unwrap_or_else(|| {
-                authorization_snapshot
-                    .silicons
+        let snapshot = self.get_project(actor, locator).await?;
+        ensure_project_remains_terminal(snapshot.status, &command)?;
+        let (participants, newly_resolved) =
+            if command.silicon_ids.is_some() || command.carbon_ids.is_some() {
+                let mut newly_resolved = Vec::new();
+                let mut members = Vec::new();
+                for (requested, kind) in [
+                    (command.silicon_ids.as_ref(), ActorType::Silicon),
+                    (command.carbon_ids.as_ref(), ActorType::Carbon),
+                ] {
+                    if let Some(ids) = requested {
+                        let resolved = self.resolve_members(actor, ids, kind).await?;
+                        newly_resolved.extend(resolved.iter().cloned());
+                        members.extend(resolved);
+                    } else {
+                        members.extend(
+                            snapshot
+                                .members
+                                .iter()
+                                .filter(|member| member.actor_type == kind)
+                                .map(|member| ResolvedAccount::known(member.clone(), None)),
+                        );
+                    }
+                }
+                ensure_unique_members(&members)?;
+                if !members
                     .iter()
-                    .filter(|a| a.is_silicon())
-                    .map(|a| a.id.clone())
-                    .collect()
-            });
-            let carbon_ids = command
-                .carbon_ids
-                .clone()
-                .unwrap_or_else(|| authorization_snapshot.details.carbon_ids.clone());
-            let creator_ids = if authorization_snapshot.created_by.is_silicon() {
-                &silicon_ids
+                    .any(|member| member.actor.uuid == snapshot.owner.uuid)
+                {
+                    return Err(AppError::Validation {
+                        details: json!({ "participants": format!(
+                            "must keep the project owner {} as a member",
+                            snapshot.owner.id
+                        ) }),
+                    });
+                }
+                (Some(members), newly_resolved)
             } else {
-                &carbon_ids
+                (None, Vec::new())
             };
-            if !creator_ids.contains(&authorization_snapshot.created_by.id) {
-                return Err(field_validation(
-                    "participants",
-                    "must retain the project creator",
-                ));
-            }
-            let mut members = self
-                .resolve_members(actor, &silicon_ids, ActorType::Silicon)
-                .await?;
-            members.extend(
-                self.resolve_members(actor, &carbon_ids, ActorType::Carbon)
-                    .await?,
-            );
-            if !members
-                .iter()
-                .any(|m| m.actor.principal_id == authorization_snapshot.created_by.principal_id)
-            {
-                return Err(field_validation(
-                    "participants",
-                    "must retain the project creator",
-                ));
-            }
-            Some(members)
-        } else {
-            None
-        };
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
@@ -307,17 +286,17 @@ impl ProjectService {
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?;
         ensure_project_remains_terminal(locked_project.status, &command)?;
-        postgres::upsert_verified_actor(&mut transaction, actor).await?;
-        if let Some(participants) = &participants {
-            for participant in participants {
-                postgres::upsert_active_member(&mut transaction, participant).await?;
+        remember(&mut transaction, actor, &newly_resolved).await?;
+        for member in &newly_resolved {
+            if !snapshot.has_member(&member.actor.uuid) {
+                ensure_reachable(&mut transaction, actor, &member.actor, "silicon_ids").await?;
             }
         }
 
         let _project = postgres::update_project(
             &mut transaction,
             actor,
-            locked_project,
+            &locked_project,
             &command,
             participants.as_deref(),
         )
@@ -333,16 +312,16 @@ impl ProjectService {
             json!({
                 "name_changed": command.name.is_some(),
                 "status_changed": command.status.is_some(),
+                "visibility_changed": command.private.is_some_and(|private| private != locked_project.private),
                 "participants_replaced": participants.is_some(),
                 "participant_count": participants.as_ref().map(Vec::len),
             }),
             self.audit_retention,
         )
         .await?;
-        let project =
-            postgres::fetch_project_by_id(&mut transaction, actor.organization_id, project_id)
-                .await?
-                .ok_or(AppError::NotFound)?;
+        let project = postgres::fetch_project_by_id(&mut transaction, project_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
         let response = created_response(&project, 200)?;
         postgres::save_idempotency(
             &mut transaction,
@@ -361,15 +340,15 @@ impl ProjectService {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NotFound`] for an unknown organization-qualified
-    /// project, or an internal error when the required diary cannot be loaded.
+    /// Returns [`AppError::NotFound`] for an unknown or unreadable project, or an
+    /// internal error when the required diary cannot be loaded.
     pub async fn get_diary(
         &self,
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<Diary, AppError> {
         let project_id = self.get_project(actor, locator).await?.id;
-        postgres::get_diary(&self.pool, actor.organization_id, project_id)
+        postgres::get_diary(&self.pool, project_id)
             .await?
             .ok_or_else(|| {
                 AppError::Internal(anyhow::anyhow!("project exists without its required diary"))
@@ -393,13 +372,12 @@ impl ProjectService {
         validate_request_id(request_id)?;
         let command = request.validate().map_err(validation_error)?;
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let project_id = self
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?
             .id;
-        postgres::upsert_verified_actor(&mut transaction, actor).await?;
-        let current = postgres::lock_diary(&mut transaction, actor.organization_id, project_id)
+        remember(&mut transaction, actor, &[]).await?;
+        let current = postgres::lock_diary(&mut transaction, project_id)
             .await?
             .ok_or_else(|| {
                 AppError::Internal(anyhow::anyhow!("project exists without its required diary"))
@@ -438,7 +416,7 @@ impl ProjectService {
         Ok(diary)
     }
 
-    /// Lists all tasks and subtasks for an organization-visible project.
+    /// Lists all tasks and subtasks of a project the caller can read.
     ///
     /// # Errors
     ///
@@ -452,14 +430,13 @@ impl ProjectService {
     ) -> Result<Page<ProjectTask>, AppError> {
         let limit = query.limit;
         let project_id = self.get_project(actor, locator).await?.id;
-        let tasks =
-            postgres::list_tasks(&self.pool, actor.organization_id, project_id, query).await?;
+        let tasks = postgres::list_tasks(&self.pool, project_id, query).await?;
         Ok(Page::from_window(tasks, limit, |task| {
             PageCursor::new(task.created_at, task.id.into_uuid())
         }))
     }
 
-    /// Lists blockers, updates, and completion entries for an organization-visible project.
+    /// Lists blockers, updates, and completion entries of a project the caller can read.
     ///
     /// # Errors
     ///
@@ -473,8 +450,7 @@ impl ProjectService {
     ) -> Result<Page<ProjectEntry>, AppError> {
         let limit = query.limit;
         let project_id = self.get_project(actor, locator).await?.id;
-        let entries =
-            postgres::list_entries(&self.pool, actor.organization_id, project_id, query).await?;
+        let entries = postgres::list_entries(&self.pool, project_id, query).await?;
         Ok(Page::from_window(entries, limit, |entry| {
             PageCursor::new(entry.created_at, entry.id.into_uuid())
         }))
@@ -511,7 +487,6 @@ impl ProjectService {
             .resolve_task_assignee(actor, command.assigned_to.as_ref())
             .await?;
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
@@ -522,15 +497,9 @@ impl ProjectService {
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?
             .id;
-        postgres::upsert_verified_actor(&mut transaction, actor).await?;
+        remember(&mut transaction, actor, &[]).await?;
         if let Some(parent_task_id) = command.parent_task_id
-            && !postgres::parent_task_exists(
-                &mut transaction,
-                actor.organization_id,
-                project_id,
-                parent_task_id,
-            )
-            .await?
+            && !postgres::parent_task_exists(&mut transaction, project_id, parent_task_id).await?
         {
             return Err(field_validation(
                 "parent_task_id",
@@ -544,14 +513,9 @@ impl ProjectService {
             self.assign_task(&mut transaction, actor, project_id, task_id, Some(assignee))
                 .await?;
         }
-        let task = postgres::fetch_task_by_id(
-            &mut transaction,
-            actor.organization_id,
-            project_id,
-            task_id,
-        )
-        .await?
-        .ok_or(AppError::NotFound)?;
+        let task = postgres::fetch_task_by_id(&mut transaction, project_id, task_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
         let response = created_response(&task, 201)?;
         postgres::insert_audit(
             &mut transaction,
@@ -604,20 +568,14 @@ impl ProjectService {
             crate::domain::NullablePatch::Absent => None,
         };
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let project_id = self
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?
             .id;
-        let previous = postgres::fetch_task_by_id(
-            &mut transaction,
-            actor.organization_id,
-            project_id,
-            task_id,
-        )
-        .await?
-        .ok_or(AppError::NotFound)?;
-        postgres::upsert_verified_actor(&mut transaction, actor).await?;
+        let previous = postgres::fetch_task_by_id(&mut transaction, project_id, task_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        remember(&mut transaction, actor, &[]).await?;
         if let Some(assignee) = &assignment {
             self.assign_task(
                 &mut transaction,
@@ -628,17 +586,13 @@ impl ProjectService {
             )
             .await?;
         }
-        let task = postgres::update_task(&mut transaction, actor, project_id, task_id, &command)
+        let task = postgres::update_task(&mut transaction, project_id, task_id, &command)
             .await?
             .ok_or(AppError::NotFound)?;
         if let Some(todo_id) = task.todo_id {
-            let todo = crate::infrastructure::postgres::todos::lock_todo(
-                &mut transaction,
-                actor.organization_id,
-                todo_id,
-            )
-            .await?
-            .ok_or(AppError::NotFound)?;
+            let todo = crate::infrastructure::postgres::todos::lock_todo(&mut transaction, todo_id)
+                .await?
+                .ok_or(AppError::NotFound)?;
             if todo.should_notify_assigner() {
                 let status_changed = previous.status != task.status;
                 let event = if previous.assigned_to != task.assigned_to {
@@ -815,7 +769,6 @@ impl ProjectService {
         audit_action: &'static str,
     ) -> Result<MutationResponse, AppError> {
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         if let Some(response) =
             postgres::acquire_idempotency(&mut transaction, actor, &identity).await?
         {
@@ -826,11 +779,10 @@ impl ProjectService {
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?;
         let project_id = locked_project.id;
-        postgres::upsert_verified_actor(&mut transaction, actor).await?;
+        remember(&mut transaction, actor, &[]).await?;
         if command.entry_type == ProjectEntryType::Completion
             && (locked_project.status == crate::domain::ProjectStatus::Completed
-                || postgres::completion_exists(&mut transaction, actor.organization_id, project_id)
-                    .await?)
+                || postgres::completion_exists(&mut transaction, project_id).await?)
         {
             return Err(AppError::Conflict {
                 code: Cow::Borrowed("project_already_completed"),
@@ -886,25 +838,24 @@ impl ProjectService {
         Ok((identity, replay))
     }
 
-    async fn authorize_existing_project(
-        &self,
-        actor: &VerifiedActor,
-        locator: &ProjectLocator,
-    ) -> Result<Project, AppError> {
-        let project = self.get_project(actor, locator).await?;
-        Ok(project)
-    }
-
-    async fn authorize_locked_project(
+    /// Locks a project the caller may change. A readable project the caller may
+    /// not change answers 403; an invisible one 404.
+    pub(super) async fn authorize_locked_project(
         &self,
         connection: &mut PgConnection,
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<postgres::LockedProject, AppError> {
-        let project = postgres::lock_project(connection, actor.organization_id, locator)
+        let project = postgres::lock_project(connection, locator)
             .await?
             .ok_or(AppError::NotFound)?;
-        if !postgres::can_access(connection, actor, project.id).await? {
+        if !postgres::can_write(connection, actor.uuid(), project.id).await? {
+            if postgres::can_read(connection, actor.uuid(), project.id).await? {
+                return Err(AppError::Denied {
+                    code: "project_not_writable".into(),
+                    message: "Only the project's members (and the custodians of member Silicons) can change it. Ask a member to add you.".to_owned(),
+                });
+            }
             return Err(AppError::NotFound);
         }
         Ok(project)
@@ -916,103 +867,83 @@ impl ProjectService {
         identity: &MutationIdentity,
     ) -> Result<Option<MutationResponse>, AppError> {
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         let response = postgres::acquire_idempotency(&mut transaction, actor, identity).await?;
         transaction.commit().await?;
         Ok(response)
     }
 
-    async fn resolve_members(
+    /// Resolves the Silicon and Carbon members a creator names (the caller is added by validation).
+    async fn resolve_participants(
         &self,
         actor: &VerifiedActor,
         silicon_ids: &[ActorId],
+        carbon_ids: &[ActorId],
+    ) -> Result<Vec<ResolvedAccount>, AppError> {
+        let mut members = self
+            .resolve_members(actor, silicon_ids, ActorType::Silicon)
+            .await?;
+        members.extend(
+            self.resolve_members(actor, carbon_ids, ActorType::Carbon)
+                .await?,
+        );
+        ensure_unique_members(&members)?;
+        Ok(members)
+    }
+
+    /// Resolves member ids of one kind; the caller itself needs no lookup.
+    pub(super) async fn resolve_members(
+        &self,
+        actor: &VerifiedActor,
+        ids: &[ActorId],
         kind: ActorType,
-    ) -> Result<Vec<ActiveMember>, AppError> {
-        let lookup_ids = silicon_ids
+    ) -> Result<Vec<ResolvedAccount>, AppError> {
+        let field = match kind {
+            ActorType::Silicon => "silicon_ids",
+            ActorType::Carbon => "carbon_ids",
+        };
+        let is_caller = |id: &ActorId| {
+            actor.actor.actor_type == kind
+                && (id.as_str() == actor.uuid().as_str()
+                    || (!actor.actor.id.as_str().is_empty()
+                        && id.as_str().eq_ignore_ascii_case(actor.actor.id.as_str())))
+        };
+        let lookup_ids = ids
             .iter()
-            .filter(|silicon_id| actor.actor.actor_type != kind || &actor.actor.id != *silicon_id)
+            .filter(|id| !is_caller(id))
             .cloned()
             .collect::<Vec<_>>();
-        let resolved = if lookup_ids.is_empty() {
+        let mut resolved = if lookup_ids.is_empty() {
             Vec::new()
         } else {
             self.identity_provider
-                .resolve_active_members(&actor.org_id, &lookup_ids, Some(kind))
+                .resolve_accounts(&lookup_ids, Some(kind))
                 .await
-                .map_err(directory_error)?
+                .map_err(|error| account_field_error(field, error))?
         };
-        if resolved.len() != lookup_ids.len() {
-            return Err(AppError::BadGateway);
+        if ids.iter().any(is_caller) {
+            resolved.insert(
+                0,
+                ResolvedAccount::known(actor.actor.clone(), actor.custodian.clone()),
+            );
         }
-
-        let expected_ids = lookup_ids.iter().cloned().collect::<HashSet<_>>();
-        let mut resolved_by_id = HashMap::with_capacity(resolved.len());
-        for member in resolved {
-            if !expected_ids.contains(&member.actor.id)
-                || !valid_resolved_member(actor, &member.actor.id, &member, kind)
-                || resolved_by_id
-                    .insert(member.actor.id.clone(), member)
-                    .is_some()
-            {
-                return Err(AppError::BadGateway);
-            }
-        }
-        if resolved_by_id.len() != lookup_ids.len() {
-            return Err(AppError::BadGateway);
-        }
-
-        let mut participants = Vec::with_capacity(silicon_ids.len());
-        let mut principal_ids = HashSet::with_capacity(silicon_ids.len());
-        let mut membership_ids = HashSet::with_capacity(silicon_ids.len());
-
-        for silicon_id in silicon_ids {
-            let member = if actor.actor.actor_type == kind && actor.actor.id == *silicon_id {
-                ActiveMember {
-                    organization_id: actor.organization_id,
-                    org_id: actor.org_id.clone(),
-                    membership_id: actor.membership_id.clone(),
-                    actor: actor.actor.clone(),
-                }
-            } else {
-                resolved_by_id
-                    .remove(silicon_id)
-                    .ok_or(AppError::BadGateway)?
-            };
-
-            if !valid_resolved_member(actor, silicon_id, &member, kind) {
-                return Err(AppError::BadGateway);
-            }
-            if !principal_ids.insert(member.actor.principal_id)
-                || !membership_ids.insert(member.membership_id.clone())
-            {
-                return Err(AppError::BadGateway);
-            }
-            participants.push(member);
-        }
-
-        Ok(participants)
+        Ok(resolved)
     }
 }
 
-fn valid_resolved_member(
-    caller: &VerifiedActor,
-    expected_actor_id: &ActorId,
-    member: &ActiveMember,
-    kind: ActorType,
-) -> bool {
-    member.organization_id == caller.organization_id
-        && member.org_id == caller.org_id
-        && member.actor.actor_type == kind
-        && member.actor.id == *expected_actor_id
-        && !member.organization_id.as_uuid().is_nil()
-        && member.membership_id
-            == format!("{}[{}]", member.actor.id.as_str(), member.org_id.as_str())
-        && !member.actor.principal_id.as_uuid().is_nil()
-}
-
-#[cfg(test)]
-fn has_project_authority(actor: &VerifiedActor, participates: bool) -> bool {
-    actor.manages_projects() || participates
+/// Two ids (for example an old and a new id, or an id and a uuid) may name the same account.
+fn ensure_unique_members(members: &[ResolvedAccount]) -> Result<(), AppError> {
+    let mut seen = HashSet::with_capacity(members.len());
+    for member in members {
+        if !seen.insert(member.actor.uuid.clone()) {
+            return Err(AppError::Validation {
+                details: json!({ "participants": format!(
+                    "{} is listed more than once (two ids or a uuid name the same account)",
+                    member.actor.id
+                ) }),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn ensure_project_remains_terminal(
@@ -1083,29 +1014,6 @@ fn field_validation(field: &'static str, message: &'static str) -> AppError {
     }
 }
 
-fn directory_error(error: ProviderError) -> AppError {
-    match error {
-        ProviderError::NotFound => field_validation(
-            "silicon_ids",
-            "must identify current Silicons in the organization",
-        ),
-        ProviderError::RateLimited { retry_after } => AppError::RateLimited {
-            retry_after_seconds: retry_after.map_or(1, duration_ceiling_seconds),
-        },
-        ProviderError::InvalidResponse | ProviderError::Conflict => AppError::BadGateway,
-        ProviderError::Unauthenticated | ProviderError::Forbidden | ProviderError::Unavailable => {
-            AppError::ProviderUnavailable
-        }
-    }
-}
-
-fn duration_ceiling_seconds(duration: Duration) -> u64 {
-    duration
-        .as_secs()
-        .saturating_add(u64::from(duration.subsec_nanos() != 0))
-        .max(1)
-}
-
 fn locator_value(locator: &ProjectLocator) -> String {
     match locator {
         ProjectLocator::Id(id) => id.to_string(),
@@ -1155,57 +1063,10 @@ fn completion_fingerprint(request: &ProjectCompletionCreate) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use secrecy::SecretString;
     use serde_json::json;
-    use uuid::Uuid;
 
-    use super::{project_patch_fingerprint, valid_resolved_member, validate_request_id};
-    use crate::{
-        application::ports::{
-            ActiveMember, CapabilitySet, InboundCredential, OrganizationRole,
-            PROJECT_MANAGE_CAPABILITY, VerifiedActor,
-        },
-        domain::{
-            Actor, ActorId, ActorType, OrganizationId, PrincipalId, ProjectPatch,
-            PublicOrganizationId,
-        },
-    };
-
-    fn verified_actor(capability: bool) -> Option<VerifiedActor> {
-        let actor_id = ActorId::new("silicon:one").ok()?;
-        let org_id = PublicOrganizationId::new("org-one").ok()?;
-        let capabilities = if capability {
-            CapabilitySet::try_from_names([PROJECT_MANAGE_CAPABILITY]).ok()?
-        } else {
-            CapabilitySet::default()
-        };
-        Some(VerifiedActor::new(
-            OrganizationId::from_uuid(Uuid::from_u128(1)),
-            org_id.clone(),
-            format!("{}[{}]", actor_id.as_str(), org_id.as_str()),
-            Actor::new(
-                PrincipalId::from_uuid(Uuid::from_u128(3)),
-                ActorType::Silicon,
-                actor_id,
-            ),
-            OrganizationRole::Member,
-            capabilities,
-            InboundCredential::Bearer(SecretString::from("opaque-token".to_owned())),
-        ))
-    }
-
-    #[test]
-    fn project_authority_requires_participation_or_explicit_capability() {
-        let Some(participant) = verified_actor(false) else {
-            return;
-        };
-        let Some(manager) = verified_actor(true) else {
-            return;
-        };
-        assert!(super::has_project_authority(&participant, true));
-        assert!(!super::has_project_authority(&participant, false));
-        assert!(super::has_project_authority(&manager, false));
-    }
+    use super::{project_patch_fingerprint, validate_request_id};
+    use crate::domain::ProjectPatch;
 
     #[test]
     fn patch_fingerprint_distinguishes_absent_from_explicit_fields() {
@@ -1224,65 +1085,5 @@ mod tests {
         assert!(validate_request_id("").is_err());
         assert!(validate_request_id(" request-123").is_err());
         assert!(validate_request_id("request\n123").is_err());
-    }
-
-    #[test]
-    fn resolved_participants_require_canonical_membership_and_non_nil_principal() {
-        let Some(caller) = verified_actor(false) else {
-            return;
-        };
-        let actor_id = ActorId::new("silicon:two");
-        let Ok(actor_id) = actor_id else {
-            return;
-        };
-        let valid_member = ActiveMember {
-            organization_id: caller.organization_id,
-            org_id: caller.org_id.clone(),
-            membership_id: format!("{}[{}]", actor_id.as_str(), caller.org_id.as_str()),
-            actor: Actor::new(
-                PrincipalId::from_uuid(Uuid::from_u128(5)),
-                ActorType::Silicon,
-                actor_id.clone(),
-            ),
-        };
-        assert!(valid_resolved_member(
-            &caller,
-            &actor_id,
-            &valid_member,
-            ActorType::Silicon
-        ));
-
-        for membership_id in [
-            String::new(),
-            Uuid::from_u128(4).to_string(),
-            "silicon:two[another-org]".to_owned(),
-            "another-silicon[org-one]".to_owned(),
-        ] {
-            let invalid_membership = ActiveMember {
-                membership_id,
-                ..valid_member.clone()
-            };
-            assert!(!valid_resolved_member(
-                &caller,
-                &actor_id,
-                &invalid_membership,
-                ActorType::Silicon
-            ));
-        }
-
-        let nil_principal = ActiveMember {
-            actor: Actor::new(
-                PrincipalId::from_uuid(Uuid::nil()),
-                ActorType::Silicon,
-                actor_id.clone(),
-            ),
-            ..valid_member
-        };
-        assert!(!valid_resolved_member(
-            &caller,
-            &actor_id,
-            &nil_principal,
-            ActorType::Silicon
-        ));
     }
 }

@@ -12,8 +12,8 @@ pub mod validation;
 pub use actor::{Actor, ActorRef, ActorType, ParseActorTypeError};
 pub use attachment::{AttachmentUrl, AttachmentUrlError, MAX_ATTACHMENT_URL_BYTES};
 pub use ids::{
-    ActorId, MAX_PUBLIC_ID_CHARS, OrganizationId, PrincipalId, ProjectEntryId, ProjectId,
-    ProjectTaskId, PublicIdError, PublicOrganizationId, TodoId, TodoNoteId,
+    AccountUuid, AccountUuidError, ActorId, MAX_ACCOUNT_UUID_BYTES, MAX_PUBLIC_ID_CHARS,
+    ProjectEntryId, ProjectId, ProjectTaskId, PublicIdError, TodoId, TodoNoteId,
 };
 pub use notification::{
     ExpectedNotificationVersion, ExpectedNotificationVersionError, MAX_WEBHOOK_URL_BYTES,

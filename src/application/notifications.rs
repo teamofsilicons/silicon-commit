@@ -1,70 +1,89 @@
-//! Silicon-owned notification settings and per-todo subscription workflows.
+//! Silicon notification settings and per-todo subscription workflows.
+//!
+//! A Silicon's webhook settings are managed by the Silicon itself or by its
+//! custodian (who acts as itself: audit rows name the custodian).
 
-use std::{borrow::Cow, time::Duration};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use serde_json::json;
 use sqlx::PgPool;
 
 use crate::{
-    application::ports::VerifiedActor,
+    application::{
+        accounts::{managed_silicon, remember},
+        ports::{IdentityProvider, ResolvedAccount, VerifiedActor},
+    },
     domain::{
-        ExpectedNotificationVersion, NotificationSettings, NotificationSettingsUpdate,
+        ActorId, ExpectedNotificationVersion, NotificationSettings, NotificationSettingsUpdate,
         NotificationVersion, TodoId, TodoNotificationSubscription,
         TodoNotificationSubscriptionUpdate,
     },
     error::AppError,
-    infrastructure::postgres::notifications as store,
+    infrastructure::postgres::{notifications as store, todos as todo_store},
 };
 
-/// Self-scoped notification configuration use cases for authenticated Silicons.
+/// Notification configuration use cases for Silicons and their custodians.
 #[derive(Clone)]
 pub struct NotificationSettingsService {
     pool: PgPool,
+    identity: Arc<dyn IdentityProvider>,
     audit_retention: Duration,
 }
 
 impl NotificationSettingsService {
     /// Creates the notification settings service.
     #[must_use]
-    pub const fn new(pool: PgPool, audit_retention: Duration) -> Self {
+    pub fn new(
+        pool: PgPool,
+        identity: Arc<dyn IdentityProvider>,
+        audit_retention: Duration,
+    ) -> Self {
         Self {
             pool,
+            identity,
             audit_retention,
         }
     }
 
-    /// Reads the caller's Silicon-level settings, returning virtual version zero when absent.
+    async fn subject(
+        &self,
+        actor: &VerifiedActor,
+        silicon: Option<&ActorId>,
+    ) -> Result<ResolvedAccount, AppError> {
+        managed_silicon(self.identity.as_ref(), actor, silicon).await
+    }
+
+    /// Reads a Silicon's settings, returning virtual version zero when absent.
     pub async fn get_settings(
         &self,
         actor: &VerifiedActor,
+        silicon: Option<&ActorId>,
     ) -> Result<NotificationSettings, AppError> {
-        authorize_silicon(actor)?;
-        Ok(store::get_settings(&self.pool, actor)
+        let subject = self.subject(actor, silicon).await?;
+        Ok(store::get_settings(&self.pool, &subject.actor)
             .await?
             .unwrap_or_else(NotificationSettings::empty))
     }
 
-    /// Replaces the caller's complete Silicon-level settings under optimistic concurrency.
+    /// Replaces a Silicon's complete settings under optimistic concurrency.
     pub async fn replace_settings(
         &self,
         actor: &VerifiedActor,
+        silicon: Option<&ActorId>,
         request: NotificationSettingsUpdate,
         expected_version: ExpectedNotificationVersion,
         request_id: &str,
     ) -> Result<NotificationSettings, AppError> {
-        authorize_silicon(actor)?;
+        let subject = self.subject(actor, silicon).await?;
         validate_request_id(request_id)?;
-        let desired = request.validate(&actor.actor.id).map_err(AppError::from)?;
+        let desired = request
+            .validate(&subject.actor.id)
+            .map_err(AppError::from)?;
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
-        store::lock_actor_notifications(
-            transaction.as_mut(),
-            actor.organization_id,
-            actor.actor.principal_id,
-        )
-        .await?;
-        let current = store::lock_settings(transaction.as_mut(), actor).await?;
+        remember(transaction.as_mut(), actor, std::slice::from_ref(&subject)).await?;
+        store::lock_actor_notifications(transaction.as_mut(), &subject.actor.uuid).await?;
+        let current = store::lock_settings(transaction.as_mut(), &subject.actor).await?;
 
         let settings = if let Some(current) = current {
             match replacement_decision(
@@ -75,12 +94,11 @@ impl NotificationSettingsService {
                 ReplacementDecision::ReturnCurrent => current,
                 ReplacementDecision::Conflict => return Err(version_conflict()),
                 ReplacementDecision::Replace => {
-                    store::upsert_verified_actor(transaction.as_mut(), actor).await?;
                     let from_version = current.version;
                     let changed_fields = changed_settings_fields(&current, &desired);
                     let updated = store::update_settings(
                         transaction.as_mut(),
-                        actor,
+                        &subject.actor,
                         current.version,
                         &desired,
                     )
@@ -91,9 +109,10 @@ impl NotificationSettingsService {
                         actor,
                         "notification_settings.updated",
                         "notification_settings",
-                        actor.actor.principal_id.into_uuid(),
+                        subject.actor.uuid.resource_id(),
                         request_id,
                         &json!({
+                            "silicon": subject.actor.public_ref(),
                             "changed_fields": changed_fields,
                             "from_version": from_version.get(),
                             "to_version": updated.version.get(),
@@ -110,16 +129,17 @@ impl NotificationSettingsService {
             if expected_version.get() != 0 {
                 return Err(version_conflict());
             }
-            store::upsert_verified_actor(transaction.as_mut(), actor).await?;
-            let inserted = store::insert_settings(transaction.as_mut(), actor, &desired).await?;
+            let inserted =
+                store::insert_settings(transaction.as_mut(), &subject.actor, &desired).await?;
             store::insert_audit_event(
                 transaction.as_mut(),
                 actor,
                 "notification_settings.created",
                 "notification_settings",
-                actor.actor.principal_id.into_uuid(),
+                subject.actor.uuid.resource_id(),
                 request_id,
                 &json!({
+                    "silicon": subject.actor.public_ref(),
                     "changed_fields": ["webhook_url", "todo_list_subscription"],
                     "from_version": 0,
                     "to_version": inserted.version.get(),
@@ -143,23 +163,25 @@ impl NotificationSettingsService {
         todo_id: TodoId,
     ) -> Result<TodoNotificationSubscription, AppError> {
         let mut connection = self.pool.acquire().await?;
-        super::todos::authorize_related_project(&mut connection, actor, todo_id, false).await?;
+        if !todo_store::can_see(&mut connection, todo_id, actor.uuid()).await? {
+            return Err(AppError::NotFound);
+        }
         drop(connection);
-        authorize_silicon(actor)?;
-        let target =
-            store::get_todo_notification_target(&self.pool, actor.organization_id, todo_id)
-                .await?
-                .ok_or(AppError::NotFound)?;
-        authorize_todo_target(actor, target)?;
-
-        Ok(store::get_todo_subscription(&self.pool, actor, todo_id)
+        let target = store::get_todo_notification_target(&self.pool, todo_id)
             .await?
-            .unwrap_or_else(|| TodoNotificationSubscription::empty(todo_id)))
+            .ok_or(AppError::NotFound)?;
+        authorize_todo_target(actor, &target)?;
+
+        Ok(
+            store::get_todo_subscription(&self.pool, &target.assigned_by.uuid, todo_id)
+                .await?
+                .unwrap_or_else(|| TodoNotificationSubscription::empty(todo_id)),
+        )
     }
 
     /// Replaces one delegated todo's override under optimistic concurrency.
     ///
-    /// The todo is locked before the actor notification lock. Todo mutation
+    /// The todo is locked before the Silicon notification lock. Todo mutation
     /// producers use the same order, preventing a settings/delivery deadlock.
     pub async fn replace_todo_subscription(
         &self,
@@ -169,28 +191,22 @@ impl NotificationSettingsService {
         expected_version: ExpectedNotificationVersion,
         request_id: &str,
     ) -> Result<TodoNotificationSubscription, AppError> {
-        authorize_silicon(actor)?;
         validate_request_id(request_id)?;
         let desired = request.validate().map_err(AppError::from)?;
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
-        super::todos::authorize_related_project(&mut transaction, actor, todo_id, true).await?;
-        let target = store::lock_todo_notification_target(
-            transaction.as_mut(),
-            actor.organization_id,
-            todo_id,
-        )
-        .await?
-        .ok_or(AppError::NotFound)?;
-        authorize_todo_target(actor, target)?;
-        store::lock_actor_notifications(
-            transaction.as_mut(),
-            actor.organization_id,
-            actor.actor.principal_id,
-        )
-        .await?;
-        let current = store::lock_todo_subscription(transaction.as_mut(), actor, todo_id).await?;
+        let target = store::lock_todo_notification_target(transaction.as_mut(), todo_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        if !todo_store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+            return Err(AppError::NotFound);
+        }
+        authorize_todo_target(actor, &target)?;
+        let silicon = target.assigned_by.uuid.clone();
+        remember(transaction.as_mut(), actor, &[]).await?;
+        store::lock_actor_notifications(transaction.as_mut(), &silicon).await?;
+        let current =
+            store::lock_todo_subscription(transaction.as_mut(), &silicon, todo_id).await?;
 
         let subscription = if let Some(current) = current {
             match replacement_decision(
@@ -201,11 +217,10 @@ impl NotificationSettingsService {
                 ReplacementDecision::ReturnCurrent => current,
                 ReplacementDecision::Conflict => return Err(version_conflict()),
                 ReplacementDecision::Replace => {
-                    store::upsert_verified_actor(transaction.as_mut(), actor).await?;
                     let from_version = current.version;
                     let updated = store::update_todo_subscription(
                         transaction.as_mut(),
-                        actor,
+                        &silicon,
                         todo_id,
                         current.version,
                         &desired,
@@ -220,6 +235,7 @@ impl NotificationSettingsService {
                         todo_id.into_uuid(),
                         request_id,
                         &json!({
+                            "silicon": target.assigned_by.public_ref(),
                             "changed_fields": ["subscription"],
                             "from_version": from_version.get(),
                             "to_version": updated.version.get(),
@@ -235,9 +251,8 @@ impl NotificationSettingsService {
             if expected_version.get() != 0 {
                 return Err(version_conflict());
             }
-            store::upsert_verified_actor(transaction.as_mut(), actor).await?;
             let inserted =
-                store::insert_todo_subscription(transaction.as_mut(), actor, todo_id, &desired)
+                store::insert_todo_subscription(transaction.as_mut(), &silicon, todo_id, &desired)
                     .await?;
             store::insert_audit_event(
                 transaction.as_mut(),
@@ -247,6 +262,7 @@ impl NotificationSettingsService {
                 todo_id.into_uuid(),
                 request_id,
                 &json!({
+                    "silicon": target.assigned_by.public_ref(),
                     "changed_fields": ["subscription"],
                     "from_version": 0,
                     "to_version": inserted.version.get(),
@@ -304,25 +320,30 @@ fn changed_settings_fields(
     fields
 }
 
-fn authorize_silicon(actor: &VerifiedActor) -> Result<(), AppError> {
-    if actor.actor.is_silicon() {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden)
-    }
-}
-
+/// Only the Silicon that delegated the todo (or its custodian) subscribes to it.
 fn authorize_todo_target(
     actor: &VerifiedActor,
-    target: store::TodoNotificationTarget,
+    target: &store::TodoNotificationTarget,
 ) -> Result<(), AppError> {
-    if target.assigned_by_principal_id == actor.actor.principal_id
-        && target.assigned_to_principal_id != target.assigned_by_principal_id
-    {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden)
+    if !target.assigned_by.is_silicon() {
+        return Err(AppError::Denied {
+            code: "subscription_needs_delegating_silicon".into(),
+            message: "Per-todo subscriptions belong to the Silicon that delegated the todo; this todo's owner is a Carbon.".to_owned(),
+        });
     }
+    if target.assigned_to == target.assigned_by.uuid {
+        return Err(AppError::Denied {
+            code: "subscription_needs_delegated_todo".into(),
+            message: "The todo is not delegated (owner and assignee are the same Silicon), so it never notifies.".to_owned(),
+        });
+    }
+    if !actor.acts_for(&target.assigned_by.uuid) {
+        return Err(AppError::Denied {
+            code: "not_todo_owner".into(),
+            message: "Only the Silicon that delegated this todo, or its custodian, manages its subscription.".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_request_id(request_id: &str) -> Result<(), AppError> {

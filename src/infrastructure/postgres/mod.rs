@@ -11,20 +11,11 @@ use sqlx::{
 
 use crate::config::DatabaseSettings;
 
-mod identity_projection;
-pub(crate) use identity_projection::resolve_actor_storage_key;
+pub mod accounts;
+pub mod identity_links;
 pub mod notifications;
 pub mod projects;
 pub mod todos;
-
-/// Fails closed if an IAM-authenticated identity contradicts retained mapping
-/// history in either the internal-ID or public-ID direction.
-pub async fn assert_identity_consistency(
-    pool: &PgPool,
-    actor: &crate::application::ports::VerifiedActor,
-) -> Result<(), crate::error::AppError> {
-    identity_projection::assert_consistent(pool, actor).await
-}
 
 /// Creates and verifies a bounded PostgreSQL pool.
 ///
@@ -200,5 +191,3 @@ pub async fn ready(pool: &PgPool) -> bool {
         .await
         .is_ok()
 }
-
-pub mod testing;

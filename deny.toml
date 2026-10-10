@@ -1,6 +1,14 @@
 [advisories]
 unmaintained = "workspace"
 yanked = "deny"
+ignore = [
+  # RUSTSEC-2023-0071 (Marvin): timing side channel in RSA private-key operations.
+  # `rsa` arrives through jsonwebtoken (silicon-accounts-client). Commit only verifies
+  # Silicon Accounts EdDSA access tokens with public keys (other algorithms are refused
+  # before any key is used) and never loads or uses an RSA private key, so the affected
+  # code path is unreachable. No fixed release of `rsa` exists; revisit when one ships.
+  { id = "RUSTSEC-2023-0071", reason = "EdDSA public-key verification only; no RSA private-key operations" },
+]
 
 [bans]
 multiple-versions = "warn"

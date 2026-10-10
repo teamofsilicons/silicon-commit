@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Maximum length of a public IAM identifier stored as a snapshot.
+/// Maximum length of a public account identifier stored as a snapshot.
 pub const MAX_PUBLIC_ID_CHARS: usize = 255;
 
 /// Failure to parse or normalize an opaque public identifier.
@@ -108,14 +108,6 @@ uuid_id!(
     ProjectEntryId,
     "Unique persistent identifier for a project blocker, update, or completion entry."
 );
-uuid_id!(
-    PrincipalId,
-    "Private Commit row key for an authenticated Carbon or Silicon."
-);
-uuid_id!(
-    OrganizationId,
-    "Internal IAM identifier used as the authoritative tenant key."
-);
 
 macro_rules! new_commit_id {
     ($name:ident) => {
@@ -141,10 +133,108 @@ new_commit_id!(ProjectId);
 new_commit_id!(ProjectTaskId);
 new_commit_id!(ProjectEntryId);
 
-/// Public IAM actor ID exposed by the v1 API.
+/// Maximum length of a Silicon Accounts uuid (placeholders for IAM-era principals are longer).
+pub const MAX_ACCOUNT_UUID_BYTES: usize = 160;
+
+/// Permanent Silicon Accounts account identifier: the access token `sub`.
 ///
-/// This canonical IAM identity is resolved to a private [`PrincipalId`] row key
-/// for local relationships; IAM no longer supplies that row key.
+/// Accounts uuids are short, case-sensitive strings such as `zQo`, not RFC 4122
+/// UUIDs: they are compared exactly and never lowercased. Rows created before
+/// the move to Silicon Accounts belong to placeholders named
+/// `iam:<organization>:<principal>` until an operator links them.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, sqlx::Type)]
+#[serde(transparent)]
+#[sqlx(transparent)]
+pub struct AccountUuid(String);
+
+/// Invalid account uuid.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AccountUuidError {
+    /// The value is empty.
+    #[error("account uuid must not be empty")]
+    Empty,
+    /// The value is longer than any account uuid.
+    #[error("account uuid must contain at most {MAX_ACCOUNT_UUID_BYTES} bytes")]
+    TooLong,
+    /// Whitespace and control characters never occur in account uuids.
+    #[error("account uuid must not contain whitespace or control characters")]
+    InvalidCharacter,
+}
+
+impl AccountUuid {
+    /// Validates an exact (untrimmed, case-preserved) account uuid.
+    pub fn new(value: impl Into<String>) -> Result<Self, AccountUuidError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(AccountUuidError::Empty);
+        }
+        if value.len() > MAX_ACCOUNT_UUID_BYTES {
+            return Err(AccountUuidError::TooLong);
+        }
+        if value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(AccountUuidError::InvalidCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the exact uuid.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the uuid.
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    /// Reports whether this is an unlinked IAM-era placeholder, which can never sign in.
+    #[must_use]
+    pub fn is_placeholder(&self) -> bool {
+        self.0.starts_with("iam:")
+    }
+
+    /// A stable UUID naming this account as an audited resource (`UUIDv5` of the uuid).
+    #[must_use]
+    pub fn resource_id(&self) -> Uuid {
+        // Fixed namespace for Commit account resources; never change it.
+        const NAMESPACE: Uuid = Uuid::from_u128(0x5c0a_7c11_2b6e_4f0e_9d1a_0c0f_ac0c_0a75);
+        Uuid::new_v5(&NAMESPACE, self.0.as_bytes())
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountUuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for AccountUuid {
+    type Err = AccountUuidError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl fmt::Display for AccountUuid {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Public `c:`/`si:` account id, or (in requests) an account uuid.
+///
+/// Ids are display data: they can change, and the account uuid is what Commit
+/// stores. A deleted account's id is empty in responses.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, sqlx::Type)]
 #[serde(transparent)]
 #[sqlx(transparent)]
@@ -154,6 +244,25 @@ impl ActorId {
     /// Validates and normalizes a public actor ID.
     pub fn new(value: impl Into<String>) -> Result<Self, PublicIdError> {
         normalize_public_id(value.into()).map(Self)
+    }
+
+    /// Wraps an id read back from Commit's own storage; a deleted account's id is empty.
+    #[must_use]
+    pub fn from_persisted(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The account kind named by a `c:` or `si:` prefix, if any.
+    #[must_use]
+    pub fn prefixed_kind(&self) -> Option<super::actor::ActorType> {
+        let lower = self.0.to_ascii_lowercase();
+        if lower.starts_with("c:") {
+            Some(super::actor::ActorType::Carbon)
+        } else if lower.starts_with("si:") {
+            Some(super::actor::ActorType::Silicon)
+        } else {
+            None
+        }
     }
 
     /// Borrows the normalized public ID.
@@ -196,63 +305,6 @@ impl FromStr for ActorId {
 }
 
 impl fmt::Display for ActorId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Public organization ID supplied in `X-Org-ID` and verified with IAM.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, sqlx::Type)]
-#[serde(transparent)]
-#[sqlx(transparent)]
-pub struct PublicOrganizationId(String);
-
-impl PublicOrganizationId {
-    /// Validates and normalizes a public organization ID.
-    pub fn new(value: impl Into<String>) -> Result<Self, PublicIdError> {
-        normalize_public_id(value.into()).map(Self)
-    }
-
-    /// Borrows the normalized public ID.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Consumes the ID.
-    #[must_use]
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for PublicOrganizationId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Self::new(raw).map_err(serde::de::Error::custom)
-    }
-}
-
-impl TryFrom<String> for PublicOrganizationId {
-    type Error = PublicIdError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl FromStr for PublicOrganizationId {
-    type Err = PublicIdError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
-}
-
-impl fmt::Display for PublicOrganizationId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }

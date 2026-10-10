@@ -12,76 +12,24 @@ use uuid::Uuid;
 use crate::domain::{
     NotificationScope, NotificationSubscriptionLevel, NotificationVersion, WebhookUrl,
     actor::{Actor, ActorType},
-    ids::{ActorId, OrganizationId, PublicOrganizationId},
+    ids::{AccountUuid, ActorId},
 };
 
-// Retained for backwards-compatible IAM child-proof clients. Commit no longer
-// exposes a Briefcase capability or invokes this scope.
-const BRIEFCASE_AUDIENCE: &str = "silicon-briefcase";
-const BRIEFCASE_TEMPORARY_URL_ACTION: &str = "briefcase.file.temporary_url";
-
-/// IAM capability which grants organization-wide todo management.
-pub const TODO_MANAGE_CAPABILITY: &str = "commit.todos.manage";
-/// IAM capability which grants organization-wide project management.
-pub const PROJECT_MANAGE_CAPABILITY: &str = "commit.projects.manage";
-
-/// A single credential accepted at Commit's public authentication boundary.
-///
-/// The bearer and OBO variants are mutually exclusive by construction. The
-/// trusted variant is reserved for the explicitly configured development/test
-/// identity provider and must never be accepted in production.
+/// The one credential accepted at Commit's public authentication boundary.
 #[derive(Clone)]
 pub enum InboundCredential {
-    /// Opaque IAM access token.
+    /// `Authorization: Bearer <Silicon Accounts access token issued to Commit>`.
     Bearer(SecretString),
-    /// Reusable OBO access token presented by an upstream application.
-    Obo {
-        /// Immediate application caller in the approved delegation chain.
-        app_id: String,
-        /// Opaque reusable OBO access token.
-        proof: SecretString,
-    },
-    /// Explicit non-production identity supplied through trusted headers.
-    Trusted(TrustedIdentity),
+    /// `Authorization: Proof sap_…`: a User verification proof issued by another app for one account.
+    Proof(SecretString),
 }
 
 impl InboundCredential {
-    /// Builds exactly one public credential from parsed HTTP authentication
-    /// values.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no complete credential, more than one credential,
-    /// or only half of the OBO pair is present.
-    pub fn from_external_parts(
-        bearer: Option<SecretString>,
-        obo_app_id: Option<String>,
-        obo_proof: Option<SecretString>,
-    ) -> Result<Self, CredentialError> {
-        if bearer.is_some() && (obo_app_id.is_some() || obo_proof.is_some()) {
-            return Err(CredentialError::Multiple);
+    /// Exposes the raw token only to the identity adapter.
+    pub(crate) fn expose(&self) -> &str {
+        match self {
+            Self::Bearer(token) | Self::Proof(token) => token.expose_secret(),
         }
-
-        match (bearer, obo_app_id, obo_proof) {
-            (Some(token), None, None) => {
-                validate_secret(&token)?;
-                Ok(Self::Bearer(token))
-            }
-            (None, Some(app_id), Some(proof)) => {
-                validate_app_id(&app_id)?;
-                validate_secret(&proof)?;
-                Ok(Self::Obo { app_id, proof })
-            }
-            (None, None, None) => Err(CredentialError::Missing),
-            (None, _, _) => Err(CredentialError::IncompleteObo),
-            (Some(_), _, _) => Err(CredentialError::Multiple),
-        }
-    }
-
-    /// Creates an explicitly trusted development/test identity credential.
-    #[must_use]
-    pub const fn trusted(identity: TrustedIdentity) -> Self {
-        Self::Trusted(identity)
     }
 }
 
@@ -89,194 +37,105 @@ impl fmt::Debug for InboundCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bearer(_) => formatter.write_str("Bearer([REDACTED])"),
-            Self::Obo { app_id, .. } => formatter
-                .debug_struct("Obo")
-                .field("app_id", app_id)
-                .field("proof", &"[REDACTED]")
-                .finish(),
-            Self::Trusted(identity) => formatter.debug_tuple("Trusted").field(identity).finish(),
+            Self::Proof(_) => formatter.write_str("Proof([REDACTED])"),
         }
     }
 }
 
-/// Invalid public authentication-header combination.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum CredentialError {
-    /// Neither authentication mechanism was supplied.
-    #[error("one authentication credential is required")]
-    Missing,
-    /// Bearer and OBO credentials were supplied together.
-    #[error("bearer and OBO credentials are mutually exclusive")]
-    Multiple,
-    /// OBO authentication requires both application ID and access token.
-    #[error("OBO authentication requires both application ID and access token")]
-    IncompleteObo,
-    /// An opaque credential is empty or contains whitespace.
-    #[error("the authentication credential is malformed")]
-    Malformed,
-}
-
-/// Organization authorization tier reported by IAM.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum OrganizationRole {
-    /// Sole organization owner.
-    Owner,
-    /// Administrator whose authority is limited to explicit capabilities.
-    Admin,
-    /// Regular Carbon or Silicon member.
-    Member,
-}
-
-/// Validated IAM capability names.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CapabilitySet(BTreeSet<String>);
-
-impl CapabilitySet {
-    /// Validates a provider capability collection.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed or duplicate capability values.
-    pub fn try_from_names<I, S>(names: I) -> Result<Self, CapabilityError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut capabilities = BTreeSet::new();
-        for name in names {
-            let name = name.into();
-            if !valid_capability(&name) {
-                return Err(CapabilityError::Malformed);
-            }
-            if !capabilities.insert(name) {
-                return Err(CapabilityError::Duplicate);
-            }
-        }
-        Ok(Self(capabilities))
-    }
-
-    /// Reports whether IAM explicitly granted a capability.
-    #[must_use]
-    pub fn contains(&self, capability: &str) -> bool {
-        self.0.contains(capability)
-    }
-
-    /// Iterates over capability names in deterministic order.
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
-        self.0.iter().map(String::as_str)
-    }
-}
-
-/// Invalid IAM capability collection.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum CapabilityError {
-    /// A capability does not use the bounded IAM name format.
-    #[error("IAM returned a malformed capability")]
-    Malformed,
-    /// A capability occurred more than once.
-    #[error("IAM returned a duplicate capability")]
-    Duplicate,
-}
-
-/// Identity accepted only by the trusted-header provider in development/test.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TrustedIdentity {
-    /// Stable IAM-compatible organization UUID supplied by the test harness.
-    pub organization_id: OrganizationId,
-    /// Requested public organization handle.
-    pub org_id: PublicOrganizationId,
-    /// Canonical IAM membership ID, formatted as `actor_id[org_id]`.
-    pub membership_id: String,
-    /// Carbon or Silicon identity.
-    pub actor: Actor,
-    /// Organization authorization tier.
-    pub organization_role: OrganizationRole,
-    /// Explicit Commit capabilities.
-    pub capabilities: CapabilitySet,
-}
-
-/// Action and resource against which an inbound grant is verified.
+/// Verified request authentication input.
 #[derive(Clone, Debug)]
 pub struct AuthenticationRequest {
     /// Exactly one inbound credential.
     pub credential: InboundCredential,
-    /// Untrusted public organization requested by the caller.
-    pub org_id: PublicOrganizationId,
-    /// Commit action the request intends to perform.
-    pub action: String,
-    /// Optional organization-qualified Commit resource identifier.
-    pub resource: Option<String>,
+    /// Commit action the request performs; also the proof scope it needs.
+    pub scope: String,
+    /// The route changes who can see or reach something: check revocation online.
+    pub sensitive: bool,
 }
 
-/// Fully verified identity and current organization authorization.
+/// How the caller authenticated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Grant {
+    /// The caller's own Silicon Accounts access token for Commit.
+    Bearer {
+        /// Token issue time (unix seconds), compared with the account's revocation cutoff.
+        issued_at: Option<i64>,
+        /// Sign-in (token family) the token belongs to.
+        family: Option<String>,
+    },
+    /// Another app acting for the account with a User verification proof.
+    Proof {
+        /// The app that issued the proof (e.g. `interface`).
+        issuing_app: String,
+        /// Proof family id.
+        proof_id: String,
+        /// Scopes the proof grants.
+        scopes: Vec<String>,
+    },
+}
+
+/// The authenticated account and what Commit knows about its custodian circle.
 #[derive(Clone)]
 pub struct VerifiedActor {
-    /// IAM's internal organization UUID used by persistent relationships.
-    pub organization_id: OrganizationId,
-    /// Immutable public organization handle.
-    pub org_id: PublicOrganizationId,
-    /// IAM's canonical `actor_id[org_id]` membership ID.
-    pub membership_id: String,
-    /// Resolved Carbon or Silicon principal.
+    /// The account the request acts as.
     pub actor: Actor,
-    /// Current organization role.
-    pub organization_role: OrganizationRole,
-    /// Current explicit IAM capabilities.
-    pub capabilities: CapabilitySet,
-    /// Live IAM membership tags; never supplied by a request header.
-    pub tags: BTreeSet<String>,
-    grant: InboundCredential,
+    /// For a Silicon: its custodian.
+    pub custodian: Option<AccountUuid>,
+    /// For a Carbon: the Silicons it is custodian of (as known to Commit). The
+    /// custodian rule lets it read and manage their work in Commit.
+    pub managed_silicons: BTreeSet<AccountUuid>,
+    /// How the request authenticated.
+    pub grant: Grant,
 }
 
 impl VerifiedActor {
-    /// Creates a verified identity while retaining its opaque grant solely for
-    /// a subsequent IAM child-proof exchange.
+    /// Creates a verified account for a bearer-token caller.
     #[must_use]
-    pub fn new(
-        organization_id: OrganizationId,
-        org_id: PublicOrganizationId,
-        membership_id: String,
-        actor: Actor,
-        organization_role: OrganizationRole,
-        capabilities: CapabilitySet,
-        grant: InboundCredential,
-    ) -> Self {
+    pub fn new(actor: Actor, grant: Grant) -> Self {
         Self {
-            organization_id,
-            org_id,
-            membership_id,
             actor,
-            organization_role,
-            capabilities,
-            tags: BTreeSet::new(),
+            custodian: None,
+            managed_silicons: BTreeSet::new(),
             grant,
         }
     }
 
-    /// Attaches tags obtained from the same verified IAM authorization.
+    /// Records the Silicon's custodian.
     #[must_use]
-    pub fn with_tags(mut self, tags: BTreeSet<String>) -> Self {
-        self.tags = tags;
+    pub fn with_custodian(mut self, custodian: Option<AccountUuid>) -> Self {
+        self.custodian = custodian;
         self
     }
 
-    /// Returns whether the actor has organization-wide todo management power.
+    /// Records the Silicons this Carbon is custodian of.
     #[must_use]
-    pub fn manages_todos(&self) -> bool {
-        self.organization_role == OrganizationRole::Owner
-            || self.capabilities.contains(TODO_MANAGE_CAPABILITY)
+    pub fn with_managed_silicons(mut self, silicons: BTreeSet<AccountUuid>) -> Self {
+        self.managed_silicons = silicons;
+        self
     }
 
-    /// Returns whether the actor has organization-wide project management power.
+    /// The account uuid the request acts as.
     #[must_use]
-    pub fn manages_projects(&self) -> bool {
-        self.organization_role == OrganizationRole::Owner
-            || self.capabilities.contains(PROJECT_MANAGE_CAPABILITY)
+    pub const fn uuid(&self) -> &AccountUuid {
+        &self.actor.uuid
     }
 
-    /// Borrows the redacted actor grant for an IAM-only child exchange.
-    pub(crate) const fn grant(&self) -> &InboundCredential {
-        &self.grant
+    /// True when the caller is `subject` or is the custodian of the Silicon `subject`.
+    ///
+    /// A custodian manages its Silicons' work in Commit but always acts as itself:
+    /// notes, audit rows and history name the custodian, never the Silicon.
+    #[must_use]
+    pub fn acts_for(&self, subject: &AccountUuid) -> bool {
+        &self.actor.uuid == subject || self.managed_silicons.contains(subject)
+    }
+
+    /// The app acting for the account, when the request carries a proof.
+    #[must_use]
+    pub fn via_app(&self) -> Option<&str> {
+        match &self.grant {
+            Grant::Proof { issuing_app, .. } => Some(issuing_app),
+            Grant::Bearer { .. } => None,
+        }
     }
 }
 
@@ -284,126 +143,124 @@ impl fmt::Debug for VerifiedActor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedActor")
-            .field("organization_id", &self.organization_id)
-            .field("org_id", &self.org_id)
-            .field("membership_id", &self.membership_id)
             .field("actor", &self.actor)
-            .field("organization_role", &self.organization_role)
-            .field("capabilities", &self.capabilities)
-            .field("tags", &self.tags)
-            .field("grant", &"[REDACTED]")
+            .field("custodian", &self.custodian)
+            .field("managed_silicons", &self.managed_silicons)
+            .field("grant", &self.grant)
             .finish()
     }
 }
 
-/// Current IAM directory member suitable for a persistent relationship.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ActiveMember {
-    /// IAM's internal organization UUID.
-    pub organization_id: OrganizationId,
-    /// Immutable public organization handle.
-    pub org_id: PublicOrganizationId,
-    /// IAM's canonical `actor_id[org_id]` membership ID.
-    pub membership_id: String,
-    /// Resolved Carbon or Silicon principal.
-    pub actor: Actor,
+/// Account lifecycle state reported by Silicon Accounts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountStatus {
+    /// A usable account.
+    Active,
+    /// Imported but never signed in.
+    Unclaimed,
+    /// A Silicon waiting for its custodian.
+    PendingCustodian,
+    /// Deleted; its id is empty.
+    Deleted,
 }
 
-/// Requested child OBO proof scope.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ChildProofRequest {
-    /// Target service audience.
-    pub audience: String,
-    /// One action delegated to the target service.
-    pub action: String,
-    /// Exact target-service resource ID.
-    pub resource: String,
-}
-
-impl ChildProofRequest {
-    /// Creates the fixed Briefcase temporary-URL delegation scope.
+impl AccountStatus {
+    /// Parses the Accounts spelling; unknown future values are treated as not active.
     #[must_use]
-    pub fn briefcase_temporary_url(entry_id: Uuid) -> Self {
-        Self {
-            audience: BRIEFCASE_AUDIENCE.to_owned(),
-            action: BRIEFCASE_TEMPORARY_URL_ACTION.to_owned(),
-            resource: entry_id.hyphenated().to_string(),
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" | "" => Some(Self::Active),
+            "unclaimed" => Some(Self::Unclaimed),
+            "pending_custodian" => Some(Self::PendingCustodian),
+            "deleted" => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+
+    /// Storage spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Unclaimed => "unclaimed",
+            Self::PendingCustodian => "pending_custodian",
+            Self::Deleted => "deleted",
         }
     }
 }
 
-/// Newly exchanged proof which can be sent only to its target service.
-#[derive(Clone)]
-#[allow(dead_code)]
-pub struct DelegatedOboProof {
-    app_id: String,
-    proof: SecretString,
-    expires_at: OffsetDateTime,
+/// An account resolved through Silicon Accounts (lookup by id or uuid).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedAccount {
+    /// uuid, kind and current id.
+    pub actor: Actor,
+    /// Lifecycle state.
+    pub status: AccountStatus,
+    /// A Silicon's custodian.
+    pub custodian: Option<AccountUuid>,
+    /// Display name, when known.
+    pub display_name: String,
+    /// Profile photo URL, when known.
+    pub pfp_url: String,
 }
 
-impl DelegatedOboProof {
-    /// Creates a validated delegated proof returned by IAM.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the application identifier or proof is malformed.
-    pub fn new(
-        app_id: String,
-        proof: SecretString,
-        expires_at: OffsetDateTime,
-    ) -> Result<Self, CredentialError> {
-        validate_app_id(&app_id)?;
-        validate_secret(&proof)?;
-        Ok(Self {
-            app_id,
-            proof,
-            expires_at,
-        })
-    }
-
-    /// Application ID sent with the proof to the target service.
+impl ResolvedAccount {
+    /// A resolved account built from what is already known (tests, the caller itself).
     #[must_use]
-    pub fn app_id(&self) -> &str {
-        &self.app_id
-    }
-
-    /// Proof expiry asserted by IAM.
-    #[must_use]
-    pub const fn expires_at(&self) -> OffsetDateTime {
-        self.expires_at
-    }
-
-    /// Exposes the proof only to infrastructure adapters.
-    #[allow(dead_code)]
-    pub(crate) fn expose_proof(&self) -> &str {
-        self.proof.expose_secret()
+    pub fn known(actor: Actor, custodian: Option<AccountUuid>) -> Self {
+        Self {
+            actor,
+            status: AccountStatus::Active,
+            custodian,
+            display_name: String::new(),
+            pfp_url: String::new(),
+        }
     }
 }
 
-impl fmt::Debug for DelegatedOboProof {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DelegatedOboProof")
-            .field("app_id", &self.app_id)
-            .field("proof", &"[REDACTED]")
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
-}
-
-/// Redacted failure returned by an IAM or Briefcase dependency.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+/// Redacted failure returned by Silicon Accounts or another provider.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ProviderError {
-    /// Credential is absent, expired, revoked, or otherwise invalid.
+    /// No credential, or one that is not a Commit credential at all.
     #[error("provider rejected authentication")]
     Unauthenticated,
+    /// A recognisable credential that is not acceptable, with a precise reason.
+    #[error("{message}")]
+    Rejected {
+        /// Stable machine-readable code.
+        code: &'static str,
+        /// Exact human/Silicon-readable reason.
+        message: String,
+    },
+    /// The caller is authenticated but may not do this, with a precise reason.
+    #[error("{message}")]
+    Denied {
+        /// Stable machine-readable code.
+        code: &'static str,
+        /// Exact reason.
+        message: String,
+    },
     /// The represented actor lacks the requested authority.
     #[error("provider denied the requested action")]
     Forbidden,
-    /// The organization-scoped provider resource is absent.
+    /// No account has this id (or it was deleted).
+    #[error("no Silicon Accounts account has the id {id}")]
+    UnknownAccount {
+        /// The id or uuid the caller supplied.
+        id: String,
+    },
+    /// The account exists but cannot be used here.
+    #[error("{id} {reason}")]
+    UnusableAccount {
+        /// The id or uuid the caller supplied.
+        id: String,
+        /// Why, phrased to follow the id (e.g. "is a Carbon; `silicon_ids` takes Silicons").
+        reason: String,
+    },
+    /// The provider resource is absent.
     #[error("provider resource was not found")]
     NotFound,
-    /// A single-use proof or idempotency key conflicted with provider state.
+    /// A single-use value or idempotency key conflicted with provider state.
     #[error("provider reported a state conflict")]
     Conflict,
     /// Provider rate limiting prevented a decision.
@@ -420,51 +277,41 @@ pub enum ProviderError {
     Unavailable,
 }
 
-/// IAM authentication, directory, and child-delegation boundary.
+/// Silicon Accounts authentication and account directory boundary.
 #[async_trait]
 pub trait IdentityProvider: Send + Sync {
-    /// Verifies one inbound grant online and returns current membership power.
+    /// Verifies one inbound credential and returns the account it acts as.
     async fn authenticate(
         &self,
         request: &AuthenticationRequest,
     ) -> Result<VerifiedActor, ProviderError>;
 
-    /// Resolves current members by immutable public handle in one directory operation.
+    /// Resolves `c:`/`si:` ids (or account uuids) to current accounts.
     ///
-    /// The result contains exactly one member for every distinct requested ID,
-    /// ordered by each ID's first appearance in `actor_ids`. An empty request
-    /// returns an empty result without consulting the provider. Missing or
-    /// ambiguous members fail the whole operation rather than returning a
-    /// partial identity set.
-    async fn resolve_active_members(
+    /// The result has exactly one account per distinct requested id, in first
+    /// appearance order. An unknown or deleted id fails the whole call with
+    /// [`ProviderError::UnknownAccount`]; a kind mismatch with `required_type`
+    /// fails it the same way.
+    async fn resolve_accounts(
         &self,
-        org_id: &PublicOrganizationId,
-        actor_ids: &[ActorId],
+        ids: &[ActorId],
         required_type: Option<ActorType>,
-    ) -> Result<Vec<ActiveMember>, ProviderError>;
+    ) -> Result<Vec<ResolvedAccount>, ProviderError>;
 
-    /// Resolves one current member by immutable public handle.
-    async fn resolve_active_member(
+    /// Resolves one id or uuid.
+    async fn resolve_account(
         &self,
-        org_id: &PublicOrganizationId,
-        actor_id: &ActorId,
+        id: &ActorId,
         required_type: Option<ActorType>,
-    ) -> Result<ActiveMember, ProviderError> {
-        let mut members = self
-            .resolve_active_members(org_id, std::slice::from_ref(actor_id), required_type)
+    ) -> Result<ResolvedAccount, ProviderError> {
+        let mut accounts = self
+            .resolve_accounts(std::slice::from_ref(id), required_type)
             .await?;
-        if members.len() != 1 {
+        if accounts.len() != 1 {
             return Err(ProviderError::InvalidResponse);
         }
-        members.pop().ok_or(ProviderError::InvalidResponse)
+        accounts.pop().ok_or(ProviderError::InvalidResponse)
     }
-
-    /// Exchanges the retained actor grant for a narrower target-service proof.
-    async fn exchange_child_proof(
-        &self,
-        actor: &VerifiedActor,
-        request: &ChildProofRequest,
-    ) -> Result<DelegatedOboProof, ProviderError>;
 }
 
 /// Immutable endpoint and subscription decision captured with an outbox event.
@@ -560,9 +407,9 @@ pub enum WebhookRoutingSnapshotError {
 pub struct WebhookEvent {
     /// Stable outbox event and downstream idempotency identifier.
     pub event_id: Uuid,
-    /// Public organization handle associated with the event.
-    pub org_id: PublicOrganizationId,
-    /// Public Silicon handle which owns the snapshotted endpoint.
+    /// Permanent uuid of the Silicon which owns the snapshotted endpoint.
+    pub silicon_uuid: AccountUuid,
+    /// That Silicon's current public id.
     pub silicon_id: ActorId,
     /// Versioned event type such as `todo.status_changed`.
     pub event_type: String,
@@ -622,85 +469,4 @@ impl WebhookPublishError {
 pub trait WebhookPublisher: Send + Sync {
     /// Publishes one immutable event, reusing `event_id` as the idempotency key.
     async fn publish(&self, event: &WebhookEvent) -> Result<(), WebhookPublishError>;
-}
-
-fn validate_secret(secret: &SecretString) -> Result<(), CredentialError> {
-    let exposed = secret.expose_secret();
-    if exposed.is_empty()
-        || exposed.len() > 4_096
-        || exposed.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
-        return Err(CredentialError::Malformed);
-    }
-    Ok(())
-}
-
-fn validate_app_id(app_id: &str) -> Result<(), CredentialError> {
-    if !(3..=80).contains(&app_id.len())
-        || !app_id.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-    {
-        return Err(CredentialError::Malformed);
-    }
-    Ok(())
-}
-
-fn valid_capability(capability: &str) -> bool {
-    (2..=200).contains(&capability.len())
-        && capability
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase())
-        && capability.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use secrecy::SecretString;
-
-    use super::{
-        CapabilityError, CapabilitySet, CredentialError, InboundCredential,
-        PROJECT_MANAGE_CAPABILITY,
-    };
-
-    #[test]
-    fn public_credentials_are_mutually_exclusive() {
-        let bearer = Some(SecretString::from("iat_opaque".to_owned()));
-        let proof = Some(SecretString::from("obo_opaque".to_owned()));
-        assert!(matches!(
-            InboundCredential::from_external_parts(
-                bearer,
-                Some("silicon-interface".to_owned()),
-                proof
-            ),
-            Err(CredentialError::Multiple)
-        ));
-    }
-
-    #[test]
-    fn obo_requires_both_headers() {
-        assert!(matches!(
-            InboundCredential::from_external_parts(
-                None,
-                Some("silicon-interface".to_owned()),
-                None
-            ),
-            Err(CredentialError::IncompleteObo)
-        ));
-    }
-
-    #[test]
-    fn capability_set_rejects_duplicate_or_malformed_provider_data() {
-        assert_eq!(
-            CapabilitySet::try_from_names([PROJECT_MANAGE_CAPABILITY, PROJECT_MANAGE_CAPABILITY]),
-            Err(CapabilityError::Duplicate)
-        );
-        assert_eq!(
-            CapabilitySet::try_from_names(["Commit.Admin"]),
-            Err(CapabilityError::Malformed)
-        );
-    }
 }

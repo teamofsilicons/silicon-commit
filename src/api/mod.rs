@@ -4,15 +4,16 @@ use std::{future::IntoFuture as _, sync::Arc, time::Duration};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, MatchedPath, Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{self, CONTENT_TYPE},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
+use secrecy::SecretString;
 use serde::Serialize;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -26,34 +27,30 @@ use uuid::Uuid;
 
 use crate::{
     application::{
+        accounts::{AccountService, authentication_error},
         idempotency::MutationResponse,
         notifications::NotificationSettingsService,
         ports::{IdentityProvider, VerifiedActor},
         projects::ProjectService,
         todos::TodoService,
     },
-    config::{AuthenticationMode, RuntimeProfile, ServerSettings, Settings},
+    config::{RuntimeProfile, ServerSettings, Settings},
     error::AppError,
     infrastructure::{
-        clients::{
-            ClientBuildError,
-            iam::{IamClient, TrustedHeaderIdentityProvider},
-        },
+        clients::{ClientBuildError, accounts::AccountsIdentity},
         postgres,
     },
     request_context, shutdown,
 };
 
+mod accounts;
 pub mod auth;
 mod contracts;
 mod email;
 pub mod extract;
-mod honeycomb;
 pub mod notifications;
 pub mod projects;
-pub mod sessions;
 mod telemetry;
-pub mod test_environments;
 pub mod todos;
 mod webhooks;
 
@@ -66,22 +63,22 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 pub struct AppState {
     pub(crate) pool: PgPool,
     contract_store: bool,
-    honeycomb_token: Option<secrecy::SecretString>,
     pub(crate) identity: Arc<dyn IdentityProvider>,
     pub(crate) todos: Arc<TodoService>,
     pub(crate) projects: Arc<ProjectService>,
     pub(crate) notifications: Arc<NotificationSettingsService>,
-    pub(crate) sessions: Option<Arc<sessions::SessionService>>,
-    pub(crate) webhook_verifier: Option<Arc<silicon_iam_client::webhook::WebhookVerifier>>,
-    authentication_mode: AuthenticationMode,
+    pub(crate) accounts: Arc<AccountService>,
+    pub(crate) webhook_secret: Option<SecretString>,
+    pub(crate) app_id: String,
+    pub(crate) accounts_url: String,
     public_base_url: Url,
 }
 
 impl AppState {
     /// Creates an application state from already-composed dependencies.
     ///
-    /// This constructor keeps transport tests independent from live IAM and
-    /// PostgreSQL services.
+    /// This constructor keeps transport tests independent from live Silicon
+    /// Accounts and PostgreSQL services.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -90,26 +87,44 @@ impl AppState {
         todos: Arc<TodoService>,
         projects: Arc<ProjectService>,
         notifications: Arc<NotificationSettingsService>,
-        authentication_mode: AuthenticationMode,
+        accounts: Arc<AccountService>,
         public_base_url: Url,
     ) -> Self {
         Self {
             pool,
             contract_store: false,
-            honeycomb_token: None,
             identity,
             todos,
             projects,
             notifications,
-            sessions: None,
-            webhook_verifier: None,
-            authentication_mode,
+            accounts,
+            webhook_secret: None,
+            app_id: crate::config::DEFAULT_APP_ID.to_owned(),
+            accounts_url: crate::config::DEFAULT_ACCOUNTS_URL.to_owned(),
             public_base_url: normalized_base_url(public_base_url),
         }
     }
 
-    /// Builds all API-facing services from validated settings and a database
-    /// pool.
+    /// Sets the secret Silicon Accounts signs Commit's webhook deliveries with.
+    #[must_use]
+    pub fn with_webhook_secret(mut self, secret: Option<SecretString>) -> Self {
+        self.webhook_secret = secret;
+        self
+    }
+
+    /// Sets the app id and the public Silicon Accounts URL clients sign in with.
+    #[must_use]
+    pub fn with_accounts(
+        mut self,
+        app_id: impl Into<String>,
+        accounts_url: impl Into<String>,
+    ) -> Self {
+        self.app_id = app_id.into();
+        self.accounts_url = accounts_url.into();
+        self
+    }
+
+    /// Builds all API-facing services from validated settings and a database pool.
     ///
     /// # Errors
     ///
@@ -120,32 +135,20 @@ impl AppState {
             return Err(ApiBuildError::WrongSettingsProfile);
         }
         let integrations = &settings.integrations;
-        let identity: Arc<dyn IdentityProvider> = match integrations.iam.mode {
-            AuthenticationMode::Iam => Arc::new(IamClient::new(
-                &integrations.iam,
-                integrations.connect_timeout,
-                integrations.request_timeout,
-                integrations.max_response_bytes,
-            )?),
-            AuthenticationMode::TrustedHeaders => {
-                Arc::new(TrustedHeaderIdentityProvider::default())
-            }
-        };
-        let identity: Arc<dyn IdentityProvider> = Arc::new(
-            crate::infrastructure::clients::scoped_identity::ScopedIdentity::new(
-                identity,
-                pool.clone(),
-            ),
-        );
-        let todo_limits = settings.limits.domain_limits();
-        let project_limits = settings.limits.domain_limits();
+        let identity: Arc<dyn IdentityProvider> = Arc::new(AccountsIdentity::new(
+            &integrations.accounts,
+            pool.clone(),
+            integrations.connect_timeout,
+            integrations.request_timeout,
+        )?);
+        let limits = settings.limits.domain_limits();
         let idempotency_ttl = settings.limits.idempotency_ttl;
         let audit_retention = settings.worker.audit_retention;
         let tombstone_retention = settings.worker.todo_tombstone_retention;
         let todos = Arc::new(TodoService::new(
             pool.clone(),
             Arc::clone(&identity),
-            todo_limits,
+            limits,
             idempotency_ttl,
             audit_retention,
             tombstone_retention,
@@ -153,12 +156,19 @@ impl AppState {
         let projects = Arc::new(ProjectService::new(
             pool.clone(),
             Arc::clone(&identity),
-            project_limits,
+            limits,
             idempotency_ttl,
             audit_retention,
         ));
         let notifications = Arc::new(NotificationSettingsService::new(
             pool.clone(),
+            Arc::clone(&identity),
+            audit_retention,
+        ));
+        let accounts = Arc::new(AccountService::new(
+            pool.clone(),
+            Arc::clone(&identity),
+            tombstone_retention,
             audit_retention,
         ));
 
@@ -168,36 +178,57 @@ impl AppState {
             todos,
             projects,
             notifications,
-            integrations.iam.mode,
+            accounts,
             settings.server.public_base_url.clone(),
+        )
+        .with_webhook_secret(integrations.accounts.webhook_secret.clone())
+        .with_accounts(
+            integrations.accounts.app_id.clone(),
+            integrations.accounts.issuer.clone(),
         );
-        if integrations.iam.mode == AuthenticationMode::Iam {
-            state.sessions = Some(Arc::new(sessions::SessionService::new(
-                &integrations.iam,
-                integrations.request_timeout,
-            )?));
-        }
         state.contract_store = true;
-        state.honeycomb_token = honeycomb::configured_token();
-        state.webhook_verifier = webhooks::verifier(&integrations.iam)?.map(Arc::new);
         Ok(state)
     }
 
+    /// Authenticates the request for one action (its proof scope).
     pub(crate) async fn authenticate(
         &self,
         headers: &HeaderMap,
-        action: &'static str,
+        scope: &'static str,
         resource: Option<String>,
     ) -> Result<VerifiedActor, AppError> {
-        let request = auth::request(headers, self.authentication_mode, action, resource)?;
-        test_environments::resolve_context(self, headers).await?;
-        let actor = self
-            .identity
-            .authenticate(&request)
+        self.authenticate_with(headers, scope, resource, false)
             .await
-            .map_err(map_provider_error)?;
-        postgres::assert_identity_consistency(&self.pool, &actor).await?;
-        Ok(actor)
+    }
+
+    /// Authenticates a request that changes who can see or reach something:
+    /// bearer tokens are also checked online, so a revoked sign-in is refused at once.
+    pub(crate) async fn authenticate_sensitive(
+        &self,
+        headers: &HeaderMap,
+        scope: &'static str,
+        resource: Option<String>,
+    ) -> Result<VerifiedActor, AppError> {
+        self.authenticate_with(headers, scope, resource, true).await
+    }
+
+    async fn authenticate_with(
+        &self,
+        headers: &HeaderMap,
+        scope: &'static str,
+        resource: Option<String>,
+        sensitive: bool,
+    ) -> Result<VerifiedActor, AppError> {
+        let request = auth::request(headers, scope, sensitive)?;
+        self.identity.authenticate(&request).await.map_err(|error| {
+            tracing::debug!(
+                scope,
+                resource = resource.as_deref(),
+                ?error,
+                "authentication refused"
+            );
+            authentication_error(error)
+        })
     }
 }
 
@@ -222,6 +253,20 @@ pub enum ApiBuildError {
 /// Returns an error when dependency composition, PostgreSQL connection, socket
 /// binding, serving, or graceful shutdown fails.
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
+    for name in crate::config::retired_variables_still_set() {
+        tracing::warn!(
+            variable = name,
+            "environment variable is set but no longer read; remove it"
+        );
+    }
+    if settings.integrations.accounts.webhook_secret.is_none() {
+        tracing::warn!(
+            "COMMIT_ACCOUNTS_WEBHOOK_SECRET is not set: POST /webhook/ answers 503 until it is"
+        );
+    }
+    if settings.integrations.accounts.proof_issuers.is_empty() {
+        tracing::info!("COMMIT_PROOF_ISSUERS is empty: no app may act for an account with a proof");
+    }
     let pool = postgres::connect(&settings.database, "silicon-commit-api").await?;
     let state = AppState::from_settings(&settings, pool)?;
     let app = router(state, &settings.server)?;
@@ -260,47 +305,19 @@ pub async fn serve(settings: Settings) -> anyhow::Result<()> {
 pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiBuildError> {
     let api = Router::new()
         .route("/contracts", get(contracts::describe))
+        .route("/accounts", get(accounts::metadata))
+        .route("/me", get(accounts::me))
+        .route(
+            "/silicons/{silicon}/allowed-accounts",
+            get(accounts::allowlist),
+        )
+        .route(
+            "/silicons/{silicon}/allowed-accounts/{account}",
+            put(accounts::allow).delete(accounts::disallow),
+        )
         .route("/email-settings", get(email::get).put(email::put))
         .route("/reports", post(email::report))
         .route("/version", get(version))
-        .route(
-            "/testing-context",
-            get(test_environments::discovery::selected),
-        )
-        .route("/iam", get(sessions::iam))
-        .route("/auth/status", get(sessions::status))
-        .route("/auth/login", post(sessions::login))
-        .route("/auth/refresh", post(sessions::refresh))
-        .route("/auth/logout", post(sessions::logout))
-        .route("/auth/organizations", get(sessions::organizations))
-        .route(
-            "/test-environments",
-            get(test_environments::list).post(test_environments::create),
-        )
-        .route(
-            "/test-environments/{id}/rotate",
-            post(test_environments::rotate),
-        )
-        .route(
-            "/test-environments/{id}/key",
-            get(test_environments::retrieve_key),
-        )
-        .route(
-            "/test-environments/{id}/iam-credentials",
-            axum::routing::put(test_environments::pair_iam_credentials),
-        )
-        .route(
-            "/test-environments/{id}/restore",
-            post(test_environments::restore),
-        )
-        .route(
-            "/test-environments/{id}/clean",
-            post(test_environments::clean),
-        )
-        .route(
-            "/test-environments/{id}",
-            axum::routing::delete(test_environments::delete),
-        )
         .route(
             "/notification-settings",
             get(notifications::get_settings).put(notifications::replace_settings),
@@ -360,30 +377,31 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             "/projects/{project_id}/completion",
             post(projects::complete),
         )
-        // Each delegated action has one canonical IAM path; handlers retain their ACLs.
-        .route("/obo/todos/list", axum::routing::get(todos::list))
-        .route("/obo/todos/create", axum::routing::post(todos::create))
-        .route("/obo/todos/{todo_id}/read", axum::routing::get(todos::get))
-        .route("/obo/todos/{todo_id}/update", axum::routing::patch(todos::update))
+        // Transition aliases of the IAM era (one release): each path performs exactly the
+        // action of its canonical route and accepts the same Bearer or Proof credentials.
+        .route("/obo/todos/list", get(todos::list))
+        .route("/obo/todos/create", post(todos::create))
+        .route("/obo/todos/{todo_id}/read", get(todos::get))
+        .route("/obo/todos/{todo_id}/update", patch(todos::update))
         .route("/obo/todos/{todo_id}/delete", axum::routing::delete(todos::delete))
-        .route("/obo/todos/{todo_id}/notes/list", axum::routing::get(todos::list_notes))
-        .route("/obo/todos/{todo_id}/notes/create", axum::routing::post(todos::add_note))
-        .route("/obo/notification-settings/read", axum::routing::get(notifications::get_settings))
-        .route("/obo/notification-settings/update", axum::routing::put(notifications::replace_settings))
-        .route("/obo/todos/{todo_id}/notification-subscription/read", axum::routing::get(notifications::get_todo_subscription))
-        .route("/obo/todos/{todo_id}/notification-subscription/update", axum::routing::put(notifications::replace_todo_subscription))
-        .route("/obo/projects/list", axum::routing::get(projects::list))
-        .route("/obo/projects/create", axum::routing::post(projects::create))
-        .route("/obo/projects/{project_id}/read", axum::routing::get(projects::get))
-        .route("/obo/projects/{project_id}/update", axum::routing::patch(projects::update))
-        .route("/obo/projects/{project_id}/diary/read", axum::routing::get(projects::get_diary))
-        .route("/obo/projects/{project_id}/diary/update", axum::routing::put(projects::replace_diary))
-        .route("/obo/projects/{project_id}/tasks/list", axum::routing::get(projects::list_tasks))
-        .route("/obo/projects/{project_id}/tasks/create", axum::routing::post(projects::create_task))
-        .route("/obo/projects/{project_id}/tasks/{task_id}/update", axum::routing::patch(projects::update_task))
-        .route("/obo/projects/{project_id}/blockers/create", axum::routing::post(projects::create_blocker))
-        .route("/obo/projects/{project_id}/updates/create", axum::routing::post(projects::create_update))
-        .route("/obo/projects/{project_id}/completion/create", axum::routing::post(projects::complete))
+        .route("/obo/todos/{todo_id}/notes/list", get(todos::list_notes))
+        .route("/obo/todos/{todo_id}/notes/create", post(todos::add_note))
+        .route("/obo/notification-settings/read", get(notifications::get_settings))
+        .route("/obo/notification-settings/update", put(notifications::replace_settings))
+        .route("/obo/todos/{todo_id}/notification-subscription/read", get(notifications::get_todo_subscription))
+        .route("/obo/todos/{todo_id}/notification-subscription/update", put(notifications::replace_todo_subscription))
+        .route("/obo/projects/list", get(projects::list))
+        .route("/obo/projects/create", post(projects::create))
+        .route("/obo/projects/{project_id}/read", get(projects::get))
+        .route("/obo/projects/{project_id}/update", patch(projects::update))
+        .route("/obo/projects/{project_id}/diary/read", get(projects::get_diary))
+        .route("/obo/projects/{project_id}/diary/update", put(projects::replace_diary))
+        .route("/obo/projects/{project_id}/tasks/list", get(projects::list_tasks))
+        .route("/obo/projects/{project_id}/tasks/create", post(projects::create_task))
+        .route("/obo/projects/{project_id}/tasks/{task_id}/update", patch(projects::update_task))
+        .route("/obo/projects/{project_id}/blockers/create", post(projects::create_blocker))
+        .route("/obo/projects/{project_id}/updates/create", post(projects::create_update))
+        .route("/obo/projects/{project_id}/completion/create", post(projects::complete))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             contracts::negotiate,
@@ -395,24 +413,14 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
 
     let sensitive_headers = [
         header::AUTHORIZATION,
-        HeaderName::from_static("x-iam-obo-access-token"),
-        HeaderName::from_static("x-iam-obo-access-proof"),
         HeaderName::from_static("idempotency-key"),
-        HeaderName::from_static("x-test-organization-id"),
-        HeaderName::from_static("x-test-membership-id"),
-        HeaderName::from_static("x-test-principal-id"),
-        HeaderName::from_static("x-test-actor-id"),
-        HeaderName::from_static("x-testing-environment-key"),
-        HeaderName::from_static("x-testing-app-secret"),
-        HeaderName::from_static("x-silicon-iam-signature"),
+        HeaderName::from_static("x-accounts-signature"),
     ];
     let concurrency = Arc::new(Semaphore::new(settings.concurrency_limit));
     let product_api = Router::new()
         .nest("/api/v1", api)
         .route("/webhook/", post(webhooks::receive))
-        .route("/internal/honeycomb/organizations/{org}/testing-environments/{id}/operations/{operation}", get(honeycomb::receipt).put(honeycomb::apply))
         .layer(DefaultBodyLimit::max(settings.max_body_bytes))
-        .layer(middleware::from_fn_with_state(settings.max_body_bytes, bind_obo_request))
         .layer(middleware::from_fn_with_state(
             concurrency,
             concurrency_limit,
@@ -440,24 +448,6 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
     Ok(app)
 }
 
-fn map_provider_error(error: crate::application::ports::ProviderError) -> AppError {
-    match error {
-        crate::application::ports::ProviderError::Unauthenticated => AppError::Unauthenticated,
-        crate::application::ports::ProviderError::Forbidden => AppError::Forbidden,
-        crate::application::ports::ProviderError::NotFound => AppError::NotFound,
-        crate::application::ports::ProviderError::Conflict => AppError::Conflict {
-            code: "provider_conflict".into(),
-        },
-        crate::application::ports::ProviderError::RateLimited { retry_after } => {
-            AppError::RateLimited {
-                retry_after_seconds: retry_after.map_or(1, |duration| duration.as_secs().max(1)),
-            }
-        }
-        crate::application::ports::ProviderError::InvalidResponse => AppError::BadGateway,
-        crate::application::ports::ProviderError::Unavailable => AppError::ProviderUnavailable,
-    }
-}
-
 async fn health() -> Json<Health> {
     Json(Health { status: "ok" })
 }
@@ -480,6 +470,7 @@ async fn version() -> Json<Version> {
     Json(Version {
         service: "silicon-commit",
         api_version: "v1",
+        contract: contracts::CURRENT,
         version: env!("CARGO_PKG_VERSION"),
         commit: option_env!("GIT_COMMIT_SHA").unwrap_or("unknown"),
     })
@@ -502,6 +493,7 @@ struct Health {
 struct Version {
     service: &'static str,
     api_version: &'static str,
+    contract: u16,
     version: &'static str,
     commit: &'static str,
 }
@@ -539,25 +531,6 @@ async fn no_store(request: Request, next: Next) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
-}
-
-async fn bind_obo_request(State(maximum): State<usize>, request: Request, next: Next) -> Response {
-    if !request.headers().contains_key("x-iam-obo-access-token") {
-        return next.run(request).await;
-    }
-    let (parts, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, maximum).await else {
-        return AppError::PayloadTooLarge.into_response();
-    };
-    request_context::set_obo_request_binding(silicon_iam_client::models::OboTokenRequestBinding {
-        method: parts.method.as_str().to_owned(),
-        path: parts.extensions.get::<MatchedPath>().map_or_else(
-            || parts.uri.path().to_owned(),
-            |matched| matched.as_str().to_owned(),
-        ),
-    });
-    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
-        .await
 }
 
 async fn ensure_response_request_id(request: Request, next: Next) -> Response {
@@ -645,12 +618,13 @@ fn cors_layer(settings: &ServerSettings) -> Result<CorsLayer, ApiBuildError> {
         .allow_headers([
             header::AUTHORIZATION,
             CONTENT_TYPE,
-            HeaderName::from_static("x-org-id"),
-            HeaderName::from_static("x-app-id"),
-            HeaderName::from_static("x-iam-obo-access-token"),
             HeaderName::from_static("idempotency-key"),
             header::IF_MATCH,
             REQUEST_ID_HEADER,
+            HeaderName::from_static("x-commit-api-version"),
+            HeaderName::from_static("x-commit-supported-versions"),
+            HeaderName::from_static("x-commit-client"),
+            HeaderName::from_static("x-commit-telemetry"),
         ])
         .expose_headers([
             header::ETAG,
@@ -724,113 +698,20 @@ mod tests {
 
     use crate::{
         api::auth::action,
-        application::ports::{
-            ActiveMember, AuthenticationRequest, ChildProofRequest, DelegatedOboProof,
-            ProviderError,
-        },
+        application::ports::{AuthenticationRequest, ProviderError, ResolvedAccount},
         config::ServerSettings,
-        domain::{ActorId, ActorType, DomainLimits, PublicOrganizationId},
+        domain::{ActorId, ActorType, DomainLimits},
     };
 
     use super::*;
 
-    #[tokio::test]
-    async fn delegated_request_binding_preserves_exact_body_and_stays_request_local()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let app = Router::new()
-            .route(
-                "/api/v1/todos",
-                post(|body: String| async move {
-                    Json(serde_json::json!({
-                        "body":body,
-                        "binding":request_context::current_obo_request_binding(),
-                    }))
-                }),
-            )
-            .layer(middleware::from_fn_with_state(1024_usize, bind_obo_request))
-            .layer(middleware::from_fn(request_id));
-        let body = "{ \"title\": \"Preserve these bytes\" }\n";
-        for delegated in [true, false] {
-            let mut request = HttpRequest::builder()
-                .method("POST")
-                .uri("/api/v1/todos?view=mine");
-            if delegated {
-                request = request.header("x-iam-obo-access-token", "oba_test");
-            }
-            let response = app.clone().oneshot(request.body(Body::from(body))?).await?;
-            assert_eq!(response.status(), StatusCode::OK);
-            let output: serde_json::Value =
-                serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
-            assert_eq!(output["body"], body);
-            if delegated {
-                assert_eq!(
-                    output["binding"],
-                    serde_json::json!({"method":"POST","path":"/api/v1/todos"})
-                );
-            } else {
-                assert!(output["binding"].is_null());
-            }
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn delegated_binding_uses_the_server_route_template()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let app = Router::new()
-            .route(
-                "/api/v1/todos/{todo_id}",
-                get(|| async { Json(request_context::current_obo_request_binding()) }),
-            )
-            .layer(middleware::from_fn_with_state(1024_usize, bind_obo_request))
-            .layer(middleware::from_fn(request_id));
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .uri("/api/v1/todos/123?endpoint_id=commit.todos.delete")
-                    .header("x-iam-obo-access-token", "oba_test")
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::OK);
-        let output: serde_json::Value =
-            serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
-        assert_eq!(
-            output,
-            serde_json::json!({"method":"GET","path":"/api/v1/todos/{todo_id}"})
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn oversized_delegated_body_is_rejected_before_the_handler()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let app = Router::new()
-            .route("/todos", post(|| async { StatusCode::OK }))
-            .layer(middleware::from_fn_with_state(3_usize, bind_obo_request))
-            .layer(middleware::from_fn(request_id));
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/todos")
-                    .header("x-iam-obo-access-token", "oba_test")
-                    .body(Body::from("1234"))?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(response.headers().contains_key("x-request-id"));
-        Ok(())
-    }
-
     #[derive(Debug, Default)]
     struct RecordingIdentity {
-        calls: Mutex<Vec<(String, Option<String>)>>,
-        bindings: Mutex<Vec<Option<silicon_iam_client::models::OboTokenRequestBinding>>>,
+        calls: Mutex<Vec<(String, bool)>>,
     }
 
     impl RecordingIdentity {
-        fn take_calls(&self) -> Vec<(String, Option<String>)> {
+        fn take_calls(&self) -> Vec<(String, bool)> {
             self.calls
                 .lock()
                 .map_or_else(|_| Vec::new(), |mut calls| std::mem::take(&mut *calls))
@@ -844,28 +725,15 @@ mod tests {
             request: &AuthenticationRequest,
         ) -> Result<VerifiedActor, ProviderError> {
             let mut calls = self.calls.lock().map_err(|_| ProviderError::Unavailable)?;
-            calls.push((request.action.clone(), request.resource.clone()));
-            self.bindings
-                .lock()
-                .map_err(|_| ProviderError::Unavailable)?
-                .push(request_context::current_obo_request_binding());
+            calls.push((request.scope.clone(), request.sensitive));
             Err(ProviderError::Forbidden)
         }
 
-        async fn resolve_active_members(
+        async fn resolve_accounts(
             &self,
-            _org_id: &PublicOrganizationId,
-            _actor_ids: &[ActorId],
+            _ids: &[ActorId],
             _required_type: Option<ActorType>,
-        ) -> Result<Vec<ActiveMember>, ProviderError> {
-            Err(ProviderError::Forbidden)
-        }
-
-        async fn exchange_child_proof(
-            &self,
-            _actor: &VerifiedActor,
-            _request: &ChildProofRequest,
-        ) -> Result<DelegatedOboProof, ProviderError> {
+        ) -> Result<Vec<ResolvedAccount>, ProviderError> {
             Err(ProviderError::Forbidden)
         }
     }
@@ -900,290 +768,466 @@ mod tests {
             Err(ProviderError::Forbidden)
         }
 
-        async fn resolve_active_members(
+        async fn resolve_accounts(
             &self,
-            _org_id: &PublicOrganizationId,
-            _actor_ids: &[ActorId],
+            _ids: &[ActorId],
             _required_type: Option<ActorType>,
-        ) -> Result<Vec<ActiveMember>, ProviderError> {
-            Err(ProviderError::Forbidden)
-        }
-
-        async fn exchange_child_proof(
-            &self,
-            _actor: &VerifiedActor,
-            _request: &ChildProofRequest,
-        ) -> Result<DelegatedOboProof, ProviderError> {
+        ) -> Result<Vec<ResolvedAccount>, ProviderError> {
             Err(ProviderError::Forbidden)
         }
     }
 
-    struct OperationCase {
+    struct Case {
         method: Method,
         uri: &'static str,
-        action: &'static str,
-        resource: Option<String>,
+        alias: Option<&'static str>,
+        scope: &'static str,
         body: Option<&'static str>,
         idempotent: bool,
         if_match: bool,
     }
 
-    #[tokio::test]
-    async fn every_product_route_uses_its_exact_iam_action_and_resource() -> anyhow::Result<()> {
-        const TODO_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af553";
-        const PROJECT_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af554";
-        const TASK_ID: &str = "018f268d-715a-7b72-8f0f-41f16f9af555";
+    const TODO: &str = "018f268d-715a-7b72-8f0f-41f16f9af553";
 
-        let cases = vec![
-            operation(Method::GET, "/api/v1/todos", action::TODOS_LIST, None),
-            mutation(
+    fn case(
+        method: Method,
+        uri: &'static str,
+        alias: Option<&'static str>,
+        scope: &'static str,
+    ) -> Case {
+        Case {
+            method,
+            uri,
+            alias,
+            scope,
+            body: None,
+            idempotent: false,
+            if_match: false,
+        }
+    }
+
+    fn write(
+        method: Method,
+        uri: &'static str,
+        alias: Option<&'static str>,
+        scope: &'static str,
+        body: &'static str,
+    ) -> Case {
+        Case {
+            method,
+            uri,
+            alias,
+            scope,
+            body: Some(body),
+            idempotent: true,
+            if_match: false,
+        }
+    }
+
+    fn cases() -> Vec<Case> {
+        vec![
+            case(Method::GET, "/api/v1/me", None, action::ME_READ),
+            case(
+                Method::GET,
+                "/api/v1/email-settings",
+                None,
+                action::EMAIL_SETTINGS_READ,
+            ),
+            Case {
+                body: Some(r#"{"email":""}"#),
+                ..case(
+                    Method::PUT,
+                    "/api/v1/email-settings",
+                    None,
+                    action::EMAIL_SETTINGS_UPDATE,
+                )
+            },
+            write(
+                Method::POST,
+                "/api/v1/reports",
+                None,
+                action::REPORTS_CREATE,
+                r#"{"message":"broken"}"#,
+            ),
+            case(
+                Method::GET,
+                "/api/v1/silicons/si:scout/allowed-accounts",
+                None,
+                action::ALLOWLIST_READ,
+            ),
+            case(
+                Method::PUT,
+                "/api/v1/silicons/si:scout/allowed-accounts/c:ada",
+                None,
+                action::ALLOWLIST_UPDATE,
+            ),
+            case(
+                Method::DELETE,
+                "/api/v1/silicons/si:scout/allowed-accounts/c:ada",
+                None,
+                action::ALLOWLIST_UPDATE,
+            ),
+            case(
+                Method::GET,
+                "/api/v1/todos",
+                Some("/api/v1/obo/todos/list"),
+                action::TODOS_LIST,
+            ),
+            write(
                 Method::POST,
                 "/api/v1/todos",
+                Some("/api/v1/obo/todos/create"),
                 action::TODOS_CREATE,
-                None,
-                r#"{"title":"work","assigned_to":"silicon-one"}"#,
+                r#"{"title":"work","assigned_to":"si:one"}"#,
             ),
-            operation(
+            case(
                 Method::GET,
                 "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553",
+                Some("/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/read"),
                 action::TODOS_READ,
-                Some(TODO_ID),
             ),
-            mutation(
+            write(
                 Method::PATCH,
                 "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553",
+                Some("/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/update"),
                 action::TODOS_UPDATE,
-                Some(TODO_ID),
                 r#"{"title":"changed"}"#,
             ),
-            operation(
+            case(
                 Method::DELETE,
                 "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553",
+                Some("/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/delete"),
                 action::TODOS_DELETE,
-                Some(TODO_ID),
             ),
-            operation(
+            case(
                 Method::GET,
                 "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notes",
+                Some("/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notes/list"),
                 action::TODO_NOTES_LIST,
-                Some(TODO_ID),
             ),
-            mutation(
+            write(
                 Method::POST,
                 "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notes",
+                Some("/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notes/create"),
                 action::TODO_NOTES_CREATE,
-                Some(TODO_ID),
                 r#"{"body":"note"}"#,
             ),
-            operation(
+            case(
                 Method::GET,
                 "/api/v1/notification-settings",
+                Some("/api/v1/obo/notification-settings/read"),
                 action::NOTIFICATION_SETTINGS_READ,
-                None,
             ),
-            OperationCase {
-                method: Method::PUT,
-                uri: "/api/v1/notification-settings",
-                action: action::NOTIFICATION_SETTINGS_UPDATE,
-                resource: None,
+            Case {
                 body: Some(r#"{"webhook_url":null,"todo_list_subscription":null}"#),
-                idempotent: false,
                 if_match: true,
+                ..case(
+                    Method::PUT,
+                    "/api/v1/notification-settings",
+                    Some("/api/v1/obo/notification-settings/update"),
+                    action::NOTIFICATION_SETTINGS_UPDATE,
+                )
             },
-            operation(
+            case(
                 Method::GET,
                 "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription",
+                Some(
+                    "/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription/read",
+                ),
                 action::TODO_SUBSCRIPTION_READ,
-                Some(TODO_ID),
             ),
-            OperationCase {
-                method: Method::PUT,
-                uri: "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription",
-                action: action::TODO_SUBSCRIPTION_UPDATE,
-                resource: Some(TODO_ID.to_owned()),
+            Case {
                 body: Some(r#"{"subscription":null}"#),
-                idempotent: false,
                 if_match: true,
+                ..case(
+                    Method::PUT,
+                    "/api/v1/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription",
+                    Some(
+                        "/api/v1/obo/todos/018f268d-715a-7b72-8f0f-41f16f9af553/notification-subscription/update",
+                    ),
+                    action::TODO_SUBSCRIPTION_UPDATE,
+                )
             },
-            operation(Method::GET, "/api/v1/projects", action::PROJECTS_LIST, None),
-            mutation(
+            case(
+                Method::GET,
+                "/api/v1/projects",
+                Some("/api/v1/obo/projects/list"),
+                action::PROJECTS_LIST,
+            ),
+            write(
                 Method::POST,
                 "/api/v1/projects",
+                Some("/api/v1/obo/projects/create"),
                 action::PROJECTS_CREATE,
-                None,
-                r#"{"name":"project","silicon_ids":["silicon-one"]}"#,
+                r#"{"name":"project","silicon_ids":["si:one"]}"#,
             ),
-            operation(
+            case(
                 Method::GET,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/read"),
                 action::PROJECTS_READ,
-                Some(PROJECT_ID),
             ),
-            mutation(
+            write(
                 Method::PATCH,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/update"),
                 action::PROJECTS_UPDATE,
-                Some(PROJECT_ID),
                 r#"{"name":"changed"}"#,
             ),
-            operation(
+            case(
                 Method::GET,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/diary",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/diary/read"),
                 action::DIARY_READ,
-                Some(PROJECT_ID),
             ),
-            OperationCase {
-                method: Method::PUT,
-                uri: "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/diary",
-                action: action::DIARY_UPDATE,
-                resource: Some(PROJECT_ID.to_owned()),
+            Case {
                 body: Some(r#"{"markdown":"entry"}"#),
-                idempotent: false,
                 if_match: true,
+                ..case(
+                    Method::PUT,
+                    "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/diary",
+                    Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/diary/update"),
+                    action::DIARY_UPDATE,
+                )
             },
-            operation(
+            case(
+                Method::GET,
+                "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/entries",
+                None,
+                action::PROJECTS_READ,
+            ),
+            case(
+                Method::GET,
+                "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/versions",
+                None,
+                action::PROJECTS_READ,
+            ),
+            case(
+                Method::GET,
+                "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/versions/3",
+                None,
+                action::PROJECTS_READ,
+            ),
+            case(
                 Method::GET,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/list"),
                 action::PROJECT_TASKS_LIST,
-                Some(PROJECT_ID),
             ),
-            mutation(
+            write(
                 Method::POST,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/create"),
                 action::PROJECT_TASKS_CREATE,
-                Some(PROJECT_ID),
                 r#"{"title":"task"}"#,
             ),
-            OperationCase {
-                method: Method::PATCH,
-                uri: "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/018f268d-715a-7b72-8f0f-41f16f9af555",
-                action: action::PROJECT_TASKS_UPDATE,
-                resource: Some(format!("{PROJECT_ID}/tasks/{TASK_ID}")),
+            Case {
                 body: Some(r#"{"title":"changed"}"#),
-                idempotent: false,
-                if_match: false,
+                ..case(
+                    Method::PATCH,
+                    "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/018f268d-715a-7b72-8f0f-41f16f9af555",
+                    Some(
+                        "/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/018f268d-715a-7b72-8f0f-41f16f9af555/update",
+                    ),
+                    action::PROJECT_TASKS_UPDATE,
+                )
             },
-            mutation(
+            Case {
+                idempotent: true,
+                ..case(
+                    Method::POST,
+                    "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/018f268d-715a-7b72-8f0f-41f16f9af555/claim",
+                    None,
+                    action::PROJECT_TASKS_CLAIM,
+                )
+            },
+            case(
+                Method::DELETE,
+                "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/tasks/018f268d-715a-7b72-8f0f-41f16f9af555",
+                None,
+                action::PROJECT_TASKS_DELETE,
+            ),
+            write(
                 Method::POST,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/blockers",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/blockers/create"),
                 action::PROJECT_BLOCKERS_CREATE,
-                Some(PROJECT_ID),
                 r#"{"title":"blocked","description":"dependency"}"#,
             ),
-            mutation(
+            write(
                 Method::POST,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/updates",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/updates/create"),
                 action::PROJECT_UPDATES_CREATE,
-                Some(PROJECT_ID),
                 r#"{"title":"milestone","description":"shipped"}"#,
             ),
-            mutation(
+            write(
                 Method::POST,
                 "/api/v1/projects/018f268d-715a-7b72-8f0f-41f16f9af554/completion",
+                Some("/api/v1/obo/projects/018f268d-715a-7b72-8f0f-41f16f9af554/completion/create"),
                 action::PROJECT_COMPLETION_CREATE,
-                Some(PROJECT_ID),
                 r#"{"title":"complete","description":"done"}"#,
             ),
-        ];
-        assert_eq!(cases.len(), 23);
+        ]
+    }
 
+    #[tokio::test]
+    async fn every_product_route_requires_its_exact_scope_with_bearer_or_proof()
+    -> anyhow::Result<()> {
         let identity = Arc::new(RecordingIdentity::default());
         let state = test_state(identity.clone())?;
         let app = router(state, &test_server_settings(1_048_576)?)?;
-        let catalog: Vec<serde_json::Value> =
-            serde_json::from_str(include_str!("../../deploy/obo-endpoints.json"))?;
-        assert_eq!(catalog.len(), cases.len());
-        let paths: std::collections::HashSet<_> =
-            catalog.iter().map(|row| row["path"].as_str()).collect();
-        assert_eq!(
-            paths.len(),
-            catalog.len(),
-            "IAM requires unique canonical OBO paths"
-        );
-        for case in cases {
-            let endpoint = catalog
-                .iter()
-                .find(|row| row["endpoint_id"] == case.action)
-                .ok_or_else(|| anyhow::anyhow!("Missing OBO action {}", case.action))?;
-            let template = endpoint["path"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("Missing OBO path"))?;
-            assert_eq!(endpoint["metadata"]["http_method"], case.method.as_str());
-            let alias = template
-                .replace("{todo_id}", TODO_ID)
-                .replace("{project_id}", PROJECT_ID)
-                .replace("{task_id}", TASK_ID);
-            for delegated in [false, true] {
-                let uri = if delegated { alias.as_str() } else { case.uri };
-                let mut builder = HttpRequest::builder()
-                    .method(case.method.clone())
-                    .uri(uri)
-                    .header("x-org-id", "test-org")
-                    .header(CONTENT_TYPE, "application/json");
-                builder = if delegated {
-                    builder
-                        .header("x-app-id", "interface")
-                        .header("x-iam-obo-access-token", "oba_test")
+        let mut covered = std::collections::HashSet::new();
+        for case in cases() {
+            covered.insert(case.scope);
+            let uris = std::iter::once(case.uri).chain(case.alias);
+            for uri in uris {
+                for credential in ["Bearer eyJ.test.token", "Proof sap_test"] {
+                    let mut builder = HttpRequest::builder()
+                        .method(case.method.clone())
+                        .uri(uri)
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, credential);
+                    if case.idempotent {
+                        builder = builder.header("idempotency-key", "route-test-key");
+                    }
+                    if case.if_match {
+                        builder = builder.header(header::IF_MATCH, "\"1\"");
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(builder.body(Body::from(case.body.unwrap_or_default()))?)
+                        .await?;
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::FORBIDDEN,
+                        "{} {uri} did not reach authentication",
+                        case.method
+                    );
+                    let calls = identity.take_calls();
+                    assert_eq!(calls.len(), 1, "{} {uri}", case.method);
+                    assert_eq!(
+                        calls[0].0, case.scope,
+                        "{} {uri} used the wrong scope",
+                        case.method
+                    );
+                }
+            }
+            if let Some(alias) = case.alias {
+                let wrong = if case.method == Method::GET {
+                    Method::POST
                 } else {
-                    builder.header(header::AUTHORIZATION, "Bearer opaque-token")
+                    Method::GET
                 };
-                if case.idempotent {
-                    builder = builder.header("idempotency-key", "route-test-key");
-                }
-                if case.if_match {
-                    builder = builder.header(header::IF_MATCH, "\"1\"");
-                }
                 let response = app
                     .clone()
-                    .oneshot(builder.body(Body::from(case.body.unwrap_or_default()))?)
+                    .oneshot(
+                        HttpRequest::builder()
+                            .method(wrong)
+                            .uri(alias)
+                            .body(Body::empty())?,
+                    )
                     .await?;
-                assert_eq!(
-                    response.status(),
-                    StatusCode::FORBIDDEN,
-                    "{} {} did not reach IAM",
-                    case.method,
-                    uri
-                );
-                assert_eq!(
-                    identity.take_calls(),
-                    vec![(case.action.to_owned(), case.resource.clone())],
-                    "{} {} used the wrong IAM action/resource",
-                    case.method,
-                    uri
-                );
-                let bindings = std::mem::take(
-                    &mut *identity
-                        .bindings
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("Poisoned binding lock"))?,
-                );
-                let expected =
-                    delegated.then(|| silicon_iam_client::models::OboTokenRequestBinding {
-                        method: case.method.to_string(),
-                        path: template.to_owned(),
-                    });
-                assert_eq!(
-                    serde_json::to_value(bindings)?,
-                    serde_json::to_value(vec![expected])?
-                );
+                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+                assert!(identity.take_calls().is_empty());
             }
-            let wrong_method = if case.method == Method::GET {
-                Method::POST
-            } else {
-                Method::GET
-            };
+        }
+        for scope in action::ALL {
+            assert!(covered.contains(scope), "no route test covers {scope}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn visibility_and_membership_changes_are_checked_online() -> anyhow::Result<()> {
+        let identity = Arc::new(RecordingIdentity::default());
+        let app = router(
+            test_state(identity.clone())?,
+            &test_server_settings(1_048_576)?,
+        )?;
+        for (body, sensitive) in [
+            (r#"{"name":"renamed"}"#, false),
+            (r#"{"private":true}"#, true),
+            (r#"{"silicon_ids":["si:one"]}"#, true),
+            (r#"{"carbon_ids":["c:ada"]}"#, true),
+        ] {
             let response = app
                 .clone()
                 .oneshot(
                     HttpRequest::builder()
-                        .method(wrong_method)
-                        .uri(&alias)
-                        .body(Body::empty())?,
+                        .method(Method::PATCH)
+                        .uri(format!("/api/v1/projects/{TODO}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, "Bearer eyJ.test.token")
+                        .header("idempotency-key", "sensitive-key")
+                        .body(Body::from(body))?,
                 )
                 .await?;
-            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-            assert!(identity.take_calls().is_empty());
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                identity.take_calls(),
+                vec![(action::PROJECTS_UPDATE.to_owned(), sensitive)],
+                "{body}"
+            );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retired_iam_and_testing_routes_and_headers_are_gone() -> anyhow::Result<()> {
+        let identity = Arc::new(RecordingIdentity::default());
+        let app = router(test_state(identity.clone())?, &test_server_settings(4096)?)?;
+        for uri in [
+            "/api/v1/iam",
+            "/api/v1/auth/status",
+            "/api/v1/auth/organizations",
+            "/api/v1/testing-context",
+            "/api/v1/test-environments",
+            "/internal/honeycomb/organizations/tos/testing-environments/x/operations/prepare",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(HttpRequest::builder().uri(uri).body(Body::empty())?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/todos")
+                    .header("x-org-id", "tos")
+                    .header(header::AUTHORIZATION, "Bearer eyJ.test.token")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(body["error"]["code"], "retired_header");
+        assert!(identity.take_calls().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accounts_metadata_is_public() -> anyhow::Result<()> {
+        let state = test_state(Arc::new(RecordingIdentity::default()))?
+            .with_accounts("commit", "http://localhost:9590");
+        let app = router(state, &test_server_settings(4096)?)?;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/accounts")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = response_json(response).await?;
+        assert_eq!(value["app_id"], "commit");
+        assert_eq!(value["accounts_url"], "http://localhost:9590");
+        assert!(
+            value["scopes"]
+                .as_array()
+                .is_some_and(|scopes| scopes.len() == action::ALL.len())
+        );
         Ok(())
     }
 
@@ -1237,7 +1281,6 @@ mod tests {
                 HttpRequest::builder()
                     .uri("/api/v1/todos")
                     .header(header::ORIGIN, "https://app.example")
-                    .header("x-org-id", "test-org")
                     .body(Body::empty())?,
             )
             .await?;
@@ -1345,8 +1388,7 @@ mod tests {
 
         let product_request = HttpRequest::builder()
             .uri("/api/v1/todos")
-            .header("x-org-id", "test-org")
-            .header(header::AUTHORIZATION, "Bearer opaque-token")
+            .header(header::AUTHORIZATION, "Bearer eyJ.test.token")
             .body(Body::empty())?;
         let product_app = app.clone();
         let product = tokio::spawn(async move { product_app.oneshot(product_request).await });
@@ -1365,95 +1407,6 @@ mod tests {
 
         assert_eq!(health_response.status(), StatusCode::OK);
         assert_eq!(product_response.status(), StatusCode::FORBIDDEN);
-        Ok(())
-    }
-
-    fn operation(
-        method: Method,
-        uri: &'static str,
-        action: &'static str,
-        resource: Option<&str>,
-    ) -> OperationCase {
-        OperationCase {
-            method,
-            uri,
-            action,
-            resource: resource.map(str::to_owned),
-            body: None,
-            idempotent: false,
-            if_match: false,
-        }
-    }
-
-    fn mutation(
-        method: Method,
-        uri: &'static str,
-        action: &'static str,
-        resource: Option<&str>,
-        body: &'static str,
-    ) -> OperationCase {
-        OperationCase {
-            method,
-            uri,
-            action,
-            resource: resource.map(str::to_owned),
-            body: Some(body),
-            idempotent: true,
-            if_match: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn iam_discovery_and_status_routes_expose_only_public_context() -> anyhow::Result<()> {
-        use wiremock::{
-            Mock, MockServer, ResponseTemplate,
-            matchers::{method, path},
-        };
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/oauth/introspect"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"active":false})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let mut state = test_state(Arc::new(RecordingIdentity::default()))?;
-        state.sessions = Some(Arc::new(sessions::SessionService::new(
-            &crate::config::IamSettings {
-                mode: AuthenticationMode::Iam,
-                base_url: Url::parse(&server.uri())?,
-                app_id: Some("commit".to_owned()),
-                app_secret: Some(secrecy::SecretString::from("never-public")),
-                audience: "commit".to_owned(),
-                webhook_secret: None,
-                webhook_key_version: 1,
-            },
-            Duration::from_secs(1),
-        )?));
-        let app = router(state, &test_server_settings(1024)?)?;
-        let response = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .uri("/api/v1/iam")
-                    .body(Body::empty())?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::OK);
-        let value = response_json(response).await?;
-        assert_eq!(
-            value,
-            serde_json::json!({"app_id":"commit","iam_url":format!("{}/",server.uri())})
-        );
-        for token in [None, Some("Bearer oat_invalid")] {
-            let mut request = HttpRequest::builder().uri("/api/v1/auth/status");
-            if let Some(token) = token {
-                request = request.header(header::AUTHORIZATION, token);
-            }
-            let response = app.clone().oneshot(request.body(Body::empty())?).await?;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        }
         Ok(())
     }
 
@@ -1491,14 +1444,15 @@ mod tests {
             ttl,
             Duration::from_secs(60),
         ));
-        let identity: Arc<dyn IdentityProvider> = Arc::new(
-            crate::infrastructure::clients::scoped_identity::ScopedIdentity::new(
-                identity,
-                pool.clone(),
-            ),
-        );
         let notifications = Arc::new(NotificationSettingsService::new(
             pool.clone(),
+            Arc::clone(&identity),
+            Duration::from_secs(60),
+        ));
+        let accounts = Arc::new(AccountService::new(
+            pool.clone(),
+            Arc::clone(&identity),
+            Duration::from_secs(60),
             Duration::from_secs(60),
         ));
         Ok(AppState::new(
@@ -1507,7 +1461,7 @@ mod tests {
             todos,
             projects,
             notifications,
-            AuthenticationMode::Iam,
+            accounts,
             Url::parse("https://commit.example/api/v1/")?,
         ))
     }

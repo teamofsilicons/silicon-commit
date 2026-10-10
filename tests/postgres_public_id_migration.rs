@@ -98,7 +98,14 @@ async fn verify_on_pool(pool: &PgPool) -> anyhow::Result<()> {
       INSERT INTO commit.actor_projection(organization_id,principal_id,membership_id,actor_type,actor_id)
       VALUES ('aaaaaaaa-0000-0000-0000-000000000001',gen_random_uuid(),'chef:other[other]','silicon','chef:other');
     "#, "public actor ID collision").await?;
-    let upgrade = sqlx::migrate!("./migrations");
+    // This test covers the IAM-era public-id upgrade (0032). The Silicon Accounts upgrade (0033)
+    // refuses the duplicate project UIDs this fixture creates on purpose; it has its own test
+    // in postgres_accounts_migration.rs.
+    let mut upgrade = sqlx::migrate!("./migrations");
+    upgrade
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 32);
     upgrade.run(pool).await?;
     upgrade.run(pool).await?;
     ensure!(
