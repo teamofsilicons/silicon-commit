@@ -39,6 +39,13 @@ Add: "A Silicon only takes todos from its circle and from accounts it (or its cu
 Replace the last sentence with: "Send these emails to the email address the Carbon chose for Commit (by default the
 email they shared with Commit when signing in). Silicons have no email."
 
+To decide (from the end-to-end stage): the first sentence reads as if project-completion emails go out to everyone
+by default. Commit sends email only to Carbons who saved an email preference, as it did before Silicon Accounts.
+Now that Commit knows the email each Carbon shared at sign-in, it could send project-completion emails without a
+saved preference. If that is wanted, say so here ("Until a Carbon saves a preference, Commit emails them when a
+project they belong to is completed, at the email they shared with Commit"); otherwise add "Carbons opt in to email
+on the Notifications page."
+
 ## Projects
 
 Replace "projects are public by default hence it's in the org scope and any org member would be able to see it" with:

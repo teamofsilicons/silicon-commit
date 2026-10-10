@@ -341,3 +341,69 @@ answers 403 `proof_issuer_not_allowed` naming it.
 
 **A-54 Words in the reference.** The OpenAPI description and the README say "the accounts close to" an account
 (defined once) instead of "circle", and no longer say "organizations".
+
+## End to end against Silicon Accounts (stage 4)
+
+**A-55 A local stack in two commands.** `scripts/dev-accounts.sh [--build] [--fresh]` migrates `commit_e2e` on
+`127.0.0.1:5460`, starts `commit-api` on `127.0.0.1:4141` (Commit's block: web 4140, API 4141) and `commit-worker`,
+points Commit's webhook at Silicon Accounts to `http://127.0.0.1:4141/webhook/` with Commit's own app credentials
+and proves a test delivery; `scripts/dev-accounts-stop.sh` stops both and puts the webhook URL it found back (the
+shared stack had it on the testkit's fake app). The signing secret stays in `.mig/webhook-secret` (0600, ignored by
+git): `PUT …/webhook` keeps a stored secret, so the script uses the stack file's seeded one and rotates only when a
+test delivery is refused. Both scripts refuse a non-loopback Silicon Accounts or database, and the services get a
+clean environment (no inherited Postmark or telemetry key). The development API allows `interface` exactly the
+actions production will (cutover step 4), which a unit test keeps in step with the runbook.
+
+**A-56 The scenarios are a script, not a cargo test.** `scripts/e2e-accounts.sh` (`tests/e2e/accounts_e2e.py`,
+Python standard library) needs a running stack, the testkit and the `silicon-accounts` CLI, which `cargo test`
+cannot assume; CI unit-tests the scripts' guards and compiles them instead. Identities come from
+`tests/e2e/mint.mts`, which drives the testkit's sign-in pages and development mail. A run signs each Carbon in
+once and reuses first-party tokens for approvals, Silicon creation and account-site actions, because the stack
+allows ten email codes per address in ten minutes. Transcripts redact tokens, STKs, proofs and secrets.
+
+**A-57 Stored account details only move forward.** Supersedes the part of A-07/A-13 where any lookup refreshed a
+row "as of now". A resolved account carries `observed_at` (when Silicon Accounts said it; a cached lookup keeps
+its fetch time), and `commit.accounts` takes it only when it is at least as new as `refreshed_at`, which now means
+"the newest information stored was true at this time" (fetch time or event time). Found by reading the code
+while fixing A-58, and proven by a regression test that fails without the fix: a lookup cached before a custodian
+transfer, stored right after it, restored the former custodian and made Commit ignore the
+`silicon.custodian_changed` event, so the former custodian kept its powers. Commit's and Silicon Accounts'
+clocks are compared directly (NTP-level skew is accepted, as before).
+
+**A-58 An account's first sign-in reads its own view.** Resolves the CLI stage's open finding. A row known only
+from lookups (someone named the account first) has `accounts_version` 0; its first bearer request refreshes from
+`userinfo`, which now also stores the account's version with the shared email (`remember_own_view`; an equal or
+newer version from `account.updated` wins). Found live: such a Carbon's `/me` had no display name or email, so the
+email default of the decisions file had nothing to use. No migration was needed (the column existed).
+
+**A-59 A token from the sign-out's own second is decided by Silicon Accounts.** Refines A-08. `iat` has whole
+seconds; the cutoff has milliseconds. Earlier seconds are refused and later ones accepted as before; a token from
+the cutoff's own second is introspected (a cached answer from before the cutoff is not trusted), so a sign-in made
+right after the event works and one made just before it does not. Found live: a Silicon signed the CLI in and
+removed Commit 30 ms later, and the CLI kept working. Only tokens from that one second cost an introspection.
+
+**A-60 Changes that widen access never use a cached answer.** Supersedes "cached 30 s" in A-09 for these checks.
+Visibility and member changes and allow-list changes introspect the access token every time, and a proof on those
+routes is verified again; other requests keep the 30-second caches. Found live: a token introspected during an
+allow-list change was accepted for a visibility change after the web had signed the Carbon out (that sign-out is
+Commit's own, `app_revoked`, so no cutoff applies).
+
+**A-61 Concurrent duplicates of one event need no lock.** The dedupe row is written after the event is applied in
+the same transaction, so two deliveries of one `event_id` in flight at once can both apply. Every handler is
+idempotent (id and custodian changes are guarded by time, profile updates by version, cutoffs use `greatest`,
+`forget_account` locks the row and skips what is already forgotten), so the cost is one extra "applied" log line.
+Kept as is.
+
+**A-62 Email stays opt-in.** Only Carbons who saved an email preference get email, as in the IAM era (0026); the
+address offered by default is the one shared with Commit (checked end to end). UNDERSTANDING.md reads as if
+project-completion emails were on by default; making them so would start emailing people who never asked, so it is
+left as a product change for a Carbon (noted in `understanding-proposal.md`).
+
+**A-63 Accounts that never signed in can show an old id.** Silicon Accounts sends app events only for accounts
+with a membership, so an account Commit knows only from lookups (assigned work, never signed in) keeps the id it
+had when named until it signs in or is named again by its new id. Uuids stay right and are what Commit keys on;
+filters by `c:`/`si:` id use the stored current id. Accepted: refreshing every displayed account would spend the
+600 lookups a minute.
+
+**A-64 Commit issues no proofs.** The issuer half of the proof scenario does not apply (A-15 stands: no Ting, no
+other outgoing app calls); the receiver half runs against the stack's `interface` app.

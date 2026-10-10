@@ -439,3 +439,208 @@ an unquoted YAML scalar must not contain `: `; `upload-artifact` drops the exec 
 copy); `commit-migrate`'s tracing layer writes JSON logs to stdout, so `cutover.py` sets
 `COMMIT_LOG=silicon_commit=warn` (in practice `--plan` printed only the CSV); `silicon-apps validate` also accepts an
 archive path.
+
+## 2026-10-10 — Stage 4 (end to end against Silicon Accounts)
+
+The migrated service and CLI were run against the shared local Silicon Accounts stack (`http://localhost:9590`) with
+real Carbons and Silicons. The eight scenarios are now a script; the runs found three defects and a fourth while
+fixing one of them, all fixed with regression tests that fail without the fix. Decisions A-55 to A-64 in
+[`decisions.md`](decisions.md). Nothing outside Commit's app and the `commit-e2e-*` test identities was changed on
+the stack; Commit's webhook URL there was pointed at the local API during runs and put back afterwards.
+
+### Setup: `scripts/dev-accounts.sh` and `scripts/dev-accounts-stop.sh`
+
+`scripts/dev_accounts.py` (behind the two wrappers): migrates `commit_e2e` on `127.0.0.1:5460`, starts
+`commit-api` (`127.0.0.1:4141`) and `commit-worker` with a clean environment, points Commit's webhook at the stack
+(`PUT /v1/apps/commit/webhook`, Commit's own credentials), proves a test delivery, and rotates the secret only if
+the test is refused. State in `.mig/` (`pids/api`, `pids/worker`, `logs/`, `webhook-secret` 0600,
+`webhook-previous-url`); `.mig/` is now in `.gitignore`. `restart`, `status` and `env` subcommands; `--build`
+rebuilds and restarts, `--fresh` recreates the database. First start (real output, trimmed):
+
+```text
+$ COMMIT_TEST_STACK=…/test-stack.json scripts/dev-accounts.sh --fresh
+created database commit_e2e
+migrations applied to commit_e2e
+Commit's webhook now posts to http://127.0.0.1:4141/webhook/ (was http://127.0.0.1:9593/commit/webhooks)
+{"api": {"pid": 85176, "url": "http://127.0.0.1:4141", …}, "worker": {"pid": 85177, …}, "database": "commit_e2e",
+ "accounts_url": "http://localhost:9590", "accounts_api_url": "http://127.0.0.1:9589",
+ "webhook_url": "http://127.0.0.1:4141/webhook/", "proof_issuers": "commit.todos.list=interface,…(14 actions)",
+ "started": ["api", "worker"], "webhook_test": "delivered"}
+$ scripts/dev-accounts-stop.sh
+{"stopped": ["api", "worker"], "webhook_restored_to": "http://127.0.0.1:9593/commit/webhooks"}
+```
+
+The seeded secret from the stack file was still the stack's (no rotation was needed in any run).
+
+### Scenarios: `scripts/e2e-accounts.sh`
+
+`tests/e2e/accounts_e2e.py` runs the real binaries; identities come from `tests/e2e/mint.mts` (the testkit's sign-in
+pages and development mail, `SILICON_ACCOUNTS_DIR`), the Silicon's own actions from the stack's `silicon-accounts`
+CLI. It starts the stack when the API is not running and stops what it started. Each run writes
+`.mig/e2e/run-<n>/result.json` and a transcript with tokens, STKs, proofs and secrets redacted (checked: no match
+for JWT/`sar_`/`slt_`/`whsec_`/`sa_app_` patterns).
+
+| # | what runs (all against the stack, real tokens) |
+| --- | --- |
+| 1 | `mint app-signin --app commit --email commit-e2e-c1-<n>@example.test --redirect http://localhost:4140/auth/callback --exchange`; `/me` (uuid, id, shared email); todo create (and idempotent retry), list, read, update, note, delete (then 404); project create, update, read by UID; email settings default to the shared address, saved, project completed, the worker picks up the email for that address; `X-Org-ID` 400, contract 1 406, contract 2 200; no token, the account-site token (wrong audience) and a tampered token 401 |
+| 2 | `mint silicon` + `mint slt` → `commit login --slt-stdin` in a fresh home (SLT nowhere in output or session file, file 0600) → `login status --json` (uuid, id, kind, custodian, verified) → `todos create` for the custodian, `projects create` with a task, `projects tasks`, `todos add-note`, `todos list --view delegated_by_me`, `me` → `logout --json` (revoked) → `{"authenticated": false}`; then positional `commit login <SLT>` and logout again |
+| 3 | `commit login --json` (device code on stderr) → `mint approve` → signed in as the Carbon → `todos list` shows its Silicon's todo; access token expired by hand → the next command refreshes at Silicon Accounts and saves the rotated pair |
+| 4 | Carbon named by another before it used Commit: its first `/me` shows its name and shared email; custodian reads and changes its Silicon's project and todo; the custodian's other Silicon reads the public project (403 `project_not_writable` on change); an unrelated Carbon gets 404 until shared by `c:` id, can change it as a member, 404 again after unsharing; private project hidden from the other Silicon, visible to the member's custodian; the unrelated Carbon cannot assign or invite the Silicon (403 `silicon_not_reachable`) or allow itself (403 `not_custodian`), the same-custodian Silicon can; the custodian allows the Carbon → work assigned → the Silicon removes it from its list → refused again, earlier work stays visible |
+| 5 | custodian changes the Silicon's id (`POST /v1/me/silicons/{uuid}/id`) → Commit shows it; the stack replays the delivery and the same body is posted again → applied once; `PATCH /v1/me` display name → shown; forged (other secret, unsigned, 10-minute-old, not an event) → 401/400, not applied; custodian transfer (`…/transfer` + accept) → the new custodian sees the Silicon's todo, the former one 404; the Silicon signs in to the local `silicon-accounts` CLI, `silicon-accounts login --app commit -q \| commit login --slt-stdin`, then `silicon-accounts apps remove commit` → its earlier token 401 `session_ended`, `commit login status --json` false, commands say `session_ended`; STK rotation → `membership.signed_out` reason `stk_rotated` → old token refused, a sign-in with the new STK works at once; the web's sign-out (refresh token revoked) → reads still pass (local verification), a visibility change 401 `token_revoked`; a Silicon deleted by its custodian → its token 401 `account_deleted`, its project passes to the remaining member, its own todo 404 |
+| 6 | `interface` issues User verification proofs (subject token from `mint app-signin --app interface --exchange`): list and create todos as the Carbon (`via_app` in the todo history), the `/api/v1/obo/todos/list` alias; 403 `proof_scope_missing`, 403 `proof_issuer_not_allowed` (`commit.projects.create` is not in the allowed list), 401 `proof_invalid` (revoked; for receiving app `remind`), 401 `proof_without_account` (App verification), 401 `proof_malformed` (a `sapr_` token); a refreshed proof works; revoked after use → refused once the 30-second cache has passed |
+| 7 | release CLI → `scripts/package-apps.sh 0.5.0 macos-aarch64 … --output-dir … --discovery require` → archive holds `apps.yaml` + `bin/commit` (one target) → in an empty `HOME`/`SILICON_HOME`: `--help` exit 0, `accounts --json` (`app_id` commit, production URLs, version 0.5.0), hidden `iam --json` identical, `login status --json` = `{"authenticated": false}`; the home stays empty |
+| 8 | before/after `dev_accounts.py restart` (new pid): the same access token works, the CLI's saved session works, an event id seen before is acknowledged but not applied (also the scenario 5 id change), the Silicon that removed Commit stays refused, a forged delivery is refused |
+
+Scenario 6's issuer half does not apply: Commit issues no proofs (A-64).
+
+### Bugs found and fixed
+
+1. **A token issued just before a sign-out, in the same second, kept working** (found live, scenario 5). The CLI
+   signed in at 04:15:10.193 (`iat` 1791605710) and the Silicon removed Commit at 04:15:10.219; the cutoff check
+   compared `iat` with the floored cutoff, so after the removal:
+   ```text
+   FAIL after: commit login status --json says signed out (exit 0): {… "authenticated": true, "id":
+   "si:commit-e2e-s1x-605702", "kind": "silicon", … "verified": true}
+   ```
+   Fix `6c1b4ab` (A-59): a token from the cutoff's own second is introspected. Regression test
+   `a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts`, on the old comparison:
+   `Error: a token from before the removal, in the same second: 200 OK {…}`; with the fix: ok.
+2. **An "active" answer cached for 30 s let a change widen access after a sign-out** (found live, scenario 5).
+   C2's token was introspected during an allow-list change in scenario 4; after the web-style sign-out its
+   visibility change was not refused (`HTTP 404` from the project lookup instead of `401 token_revoked`).
+   Fix `777aa8b` (A-60): widening changes never reuse a cached positive answer (introspection or proof
+   verification); documented in ACCOUNTS.md. Regression test `changes_that_widen_access_never_rest_on_a_cached_answer`,
+   with the cache: `Error: the second change asked again: 200 OK {…}`; with the fix: ok.
+3. **An account first named by someone else had no name or shared email at its own first sign-in** (found live with
+   a probe; the CLI stage had flagged it). After `c1` assigned `c3` a todo:
+   ```text
+   row after lookup:  | <null> | 2026-10-10 09:35:43.165721+05:30      (display name, email, refreshed_at)
+   c3 /me: 200 {"id": "c:commit-e2e-c3-605142", "display_name": "", "email": null}
+   ```
+   Fix `6af47a3` (A-58): a lookup-only row (`accounts_version` 0) is refreshed from `userinfo` on the account's
+   first bearer request. Regression test `an_account_named_before_it_used_commit_reads_its_own_view_at_sign_in`,
+   before: `Error: {… "email":null …}`; after: ok. Also covered live in scenario 4.
+4. **A lookup answered from the cache could undo a newer webhook event** (found reading the code while fixing 3).
+   `remember` stamped every stored lookup `refreshed_at = now`, so a lookup cached before a custodian transfer or an
+   id change, stored after it, restored the old custodian or id and made Commit ignore the event that followed.
+   Fix `6af47a3` (A-57): `observed_at` on resolved accounts; rows take only newer data. Regression test
+   `a_lookup_answered_from_the_cache_never_undoes_a_newer_event`, before: panics at the "custodian is now"
+   assertion (the transfer event was ignored); after: ok.
+
+Looked at and left as is (recorded): concurrent duplicate deliveries of one event are harmless because every
+handler is idempotent (A-61); email stays opt-in as in the IAM era, the default-on question is in the
+UNDERSTANDING proposal (A-62); ids of accounts that never signed in can go stale because Silicon Accounts sends no
+events for them (A-63).
+
+### Final run (real output, trimmed to section headers and a few checks)
+
+```text
+$ . .mig/e2e.env && scripts/e2e-accounts.sh          # stack stopped beforehand; the script starts and stops it
+migrations applied to commit_e2e
+Commit's webhook now posts to http://127.0.0.1:4141/webhook/ (was http://127.0.0.1:9593/commit/webhooks)
+{… "started": ["api", "worker"], "webhook_test": "delivered"}
+== scenario 1: Carbon on the API
+  c1 is c:commit-e2e-c1-606857 (…)
+  ok  /me shows the email the Carbon shared with Commit
+  ok  the retry returns the same todo
+  ok  read the deleted todo -> 404
+  ok  the email goes to the shared address (Postmark is not configured here, so it stays queued)
+  ok  contract 1 -> 406 unsupported_contract
+  ok  the Carbon's account-site token (another audience) -> 401 token_wrong_audience
+== scenario 2: Silicon on the CLI
+  ok  the short-lived token appears nowhere
+  ok  login status says who is signed in
+  ok  logout ended the sign-in at Silicon Accounts
+  ok  login status says exactly {"authenticated": false}
+  ok  commit login <SLT> (the form the Silicon runtime runs) signs in
+== scenario 3: device flow
+  ok  the Carbon approved the code
+  ok  the CLI is signed in as the Carbon
+  ok  the CLI refreshed at Silicon Accounts and saved the rotated pair
+== scenario 4: circle and sharing
+  ok  its first sign-in shows its own name and the email it shared
+  ok  but cannot change it without being a member -> 403 project_not_writable
+  ok  the Carbon cannot read it any more -> 404
+  ok  an unrelated Carbon cannot assign the Silicon a todo -> 403 silicon_not_reachable
+  ok  work already assigned stays visible to the Carbon -> 200
+== scenario 5: webhooks
+  ok  Commit shows the Silicon's new id
+  ok  the event id was applied once
+  ok  signed with another secret -> 401 invalid_webhook_signature
+  ok  the former custodian cannot -> 404
+  ok  after: its earlier access token is refused -> 401 session_ended
+  ok  after: commit login status --json says signed out (exit 0)
+  ok  Silicon Accounts said why (stk_rotated)
+  ok  a sign-in with the new STK works at once -> 200
+  ok  changing who can see a project is checked online -> 401 token_revoked
+  ok  its access token is refused -> 401 account_deleted
+  ok  the project passed to its remaining member
+== scenario 6: proofs
+  ok  Commit recorded the acting app in the todo's history
+  ok  a scope Commit does not accept from interface -> 403 proof_issuer_not_allowed
+  ok  a proof for another receiving app -> 401 proof_invalid|proof_wrong_receiver
+  ok  an App verification proof speaks for no account -> 401 proof_without_account
+  ok  the revoked proof after the cache window -> 401 proof_invalid
+== scenario 7: discovery from a packed archive
+  ok  scripts/package-apps.sh 0.5.0 macos-aarch64 packs the CLI
+  ok  the hidden commit iam --json prints exactly the accounts object
+  ok  commit login status --json exits 0 and says signed out
+  ok  the empty home stayed empty
+== scenario 8: restart safety
+  ok  the API restarted
+  ok  after: the same access token works (stateless JWT) -> 200
+  ok  after: the CLI's saved session works
+  ok  after: the same event id is acknowledged but not applied
+  ok  after: the Silicon that removed Commit stays refused -> 401 session_ended
+{"stopped": ["api", "worker"], "webhook_restored_to": "http://127.0.0.1:9593/commit/webhooks"}
+8/8 scenarios passed; details in …/.mig/e2e/run-606857
+```
+
+213 checks in 50 s of scenarios (scenario 6 waits 31 s for the proof cache); its 421-line transcript has no token, STK, proof or secret (grep for each pattern: 0 matches). Earlier full runs `run-606247` (199 checks) and
+`run-606606` (213) also passed 8/8. The API log shows each event applied by Commit itself (for example
+`account.id_changed | id is now si:commit-e2e-s1x-…`, `silicon.custodian_changed | custodian is now c:…`,
+`membership.access_removed | access removed: every earlier sign-in is refused`), and the cleanup's revocations as
+`membership.signed_out | one Commit sign-in ended; other sign-ins stay valid` (`app_revoked`).
+
+### Test commands and results
+
+```sh
+export CARGO_TARGET_DIR=$PWD/target/mig CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3
+cargo fmt --all --check                                                        # ok
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings  # ok
+COMMIT_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/commit_e2e_full \
+  cargo test --workspace --all-targets --locked --no-fail-fast                 # 198 passed, 0 failed, none skipped
+python3 scripts/test_dev_accounts.py                                           # 9 tests OK (new)
+python3 scripts/test_package_apps.py; python3 scripts/test_linux_abi.py        # 20, 8 OK
+python3 deploy/aws/test_bootstrap.py; …/test_cutover.py; …/test_host.py        # 8, 7, 4 OK
+npm run build --prefix docs-site && npm run check --prefix docs-site           # 13 pages; 22 pages, 354 links ok
+for g in cli/docs/*.md; do cmp "$g" "docs/$(basename "$g")"; done             # identical
+CI tools steps replayed locally (py_compile of the new scripts, bash -n of the wrappers; workflow parsed with PyYAML)
+. .mig/e2e.env && scripts/e2e-accounts.sh                                      # 8/8 scenarios, 213 checks
+```
+
+| target | before (stage 3) | now |
+| --- | --- | --- |
+| `tests/accounts_api_workflow.rs` | 5 | 8 (cutoff second, own view at first sign-in, no cached answer for widening changes) |
+| `tests/postgres_accounts.rs` | 4 | 5 (a cached lookup never undoes a newer event) |
+| everything else | 185 | 185 |
+
+Commits: `6af47a3` Keep account details from going backwards and read a new account's own view · `6c1b4ab` Refuse
+a token from the second of a sign-out once Silicon Accounts ended it · `777aa8b` Check with Silicon Accounts every
+time a change widens access · `2eed4a6` Run Commit against a local Silicon Accounts stack, end to end · `7a9efdd`
+Cover email defaults, transition aliases and contract checks end to end · then this folder (decisions A-55 to A-64,
+the UNDERSTANDING proposal's email question, the cutover rehearsal step, this log).
+
+Blocked on: nothing. No defect was found in Silicon Accounts or another app.
+
+Left for later stages or a Carbon: the web stages (the Next.js web and its browser tests); running the packed
+Linux archives' discovery commands (CI does it natively and in the glibc 2.28 image); the production cutover per
+[`cutover.md`](cutover.md); Interface's proof release (outside this repository); the email default (A-62).
+
+Gotchas: `PUT /v1/apps/{app}/webhook` keeps a stored secret and answers `"secret": null`, so the stack file's seeded
+secret is the one to use; app lookups return only uuid, kind, id, status (and a Silicon's custodian), no name or
+photo; Silicon Accounts answers `{"valid": false}` to a proof verified by an app that is not its receiver, so with a
+real stack Commit says `proof_invalid`, never `proof_wrong_receiver`; the stack allows ten email codes per address in
+ten minutes (reuse each Carbon's first-party token for approvals, Silicon creation, id changes and transfers); STKs
+look like `stk-<hex>` (hyphen); `python3 -I` hides the user site-packages, so PyYAML is only in
+`/usr/local/bin/python3`; zsh has no `PIPESTATUS`.

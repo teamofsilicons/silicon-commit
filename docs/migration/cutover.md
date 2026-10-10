@@ -52,8 +52,9 @@ database. Both are in this repository; see [`deploy/aws/README.md`](../../deploy
 
 1. **Rehearse locally.** `COMMIT_TEST_DATABASE_URL=postgres://…/commit_rehearsal cargo test --workspace
    --all-targets --locked` (the PostgreSQL suites include an upgrade of IAM-era data and a
-   `link-identities` plan, dry run and apply from the command line), and the end-to-end checks against a local
-   Silicon Accounts stack recorded in the [progress log](progress.md).
+   `link-identities` plan, dry run and apply from the command line), then the end-to-end scenarios against a local
+   Silicon Accounts stack: `scripts/e2e-accounts.sh` (all eight must pass; what it needs is in
+   [`tests/e2e/README.md`](../../tests/e2e/README.md), and the last recorded run is in the [progress log](progress.md)).
 
 2. **Build the release artifacts.**
    - CLI archives: push the tag `v0.5.0` on the release commit (**run at cutover**: it starts `release.yml`,
