@@ -28,6 +28,13 @@ The backend is Rust/Axum/PostgreSQL. Run the database migrations before the API 
 separate from migration authority. Point Commit at Silicon Accounts with `ACCOUNTS_URL` (a local stack may use
 `http://localhost:…`), `COMMIT_APP_SECRET` and `COMMIT_ACCOUNTS_WEBHOOK_SECRET`; `.env.example` lists every setting.
 
+To run Commit against a local Silicon Accounts stack (the Silicon Accounts testkit), point
+`COMMIT_TEST_STACK` at the stack's JSON file and run `scripts/dev-accounts.sh`: it migrates a local database, starts
+the API on `127.0.0.1:4141` and the worker, registers Commit's webhook at the stack and proves a delivery
+(`scripts/dev-accounts-stop.sh` stops it and puts the webhook back). `scripts/e2e-accounts.sh` then signs real
+Carbons and Silicons in and runs the end-to-end scenarios (API, CLI, device flow, sharing, webhooks, proofs, the
+packaged CLI, restarts); [`tests/e2e/README.md`](../tests/e2e/README.md) lists what it needs.
+
 `cargo test --workspace --all-targets` runs unit, HTTP, client and CLI tests. Set `COMMIT_TEST_DATABASE_URL` to a
 disposable PostgreSQL 16 database (the role needs CREATEDB for the migration tests) to include the transactional
 tests; the HTTP tests sign their own EdDSA tokens and serve a local Silicon Accounts double, so no Accounts stack is
