@@ -256,9 +256,10 @@ impl AccountService {
         })
     }
 
-    /// A custodian that never used Commit has no stored row: look it up (cached) and
-    /// remember it, so `/me` names it. If Silicon Accounts cannot answer, the id stays
-    /// empty rather than failing the request.
+    /// A custodian that never used Commit has no stored row: look it up (lookups are
+    /// cached) so `/me` names it. The answer is not stored: a row made from a lookup would
+    /// delay the custodian's own first refresh from `userinfo` (name, shared email). If
+    /// Silicon Accounts cannot answer, the id stays empty rather than failing the request.
     async fn unstored_custodian(&self, uuid: &AccountUuid) -> Result<ActorRef, AppError> {
         let unnamed = ActorRef::new(
             ActorType::Carbon,
@@ -273,10 +274,7 @@ impl AccountService {
             .resolve_account(&selector, Some(ActorType::Carbon))
             .await
         {
-            Ok(resolved) if resolved.actor.uuid == *uuid => {
-                store::remember(&self.pool, &resolved).await?;
-                Ok(resolved.actor.public_ref())
-            }
+            Ok(resolved) if resolved.actor.uuid == *uuid => Ok(resolved.actor.public_ref()),
             Ok(_) | Err(_) => Ok(unnamed),
         }
     }

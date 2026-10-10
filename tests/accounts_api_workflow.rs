@@ -1158,7 +1158,7 @@ async fn me_names_a_custodian_that_never_used_commit() -> anyhow::Result<()> {
     let app = router(&pool, &accounts, "", true)?;
     let token = accounts.token(&scout);
     accounts.userinfo(&token, &scout).await;
-    // Only the Silicon has used Commit: its custodian is looked up, then remembered.
+    // Only the Silicon has used Commit: its custodian is looked up (and the lookup cached).
     for _ in 0..2 {
         let me = call(
             &app,
@@ -1186,7 +1186,14 @@ async fn me_names_a_custodian_that_never_used_commit() -> anyhow::Result<()> {
         .count();
     ensure!(
         lookups == 1,
-        "the custodian is looked up once, then read from storage ({lookups})"
+        "the custodian is looked up once, then cached ({lookups})"
     );
+    // Nothing is stored for the custodian, so its own first sign-in reads userinfo.
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT public_id FROM commit.accounts WHERE uuid = $1")
+            .bind(&ada.uuid)
+            .fetch_optional(&pool)
+            .await?;
+    ensure!(stored.is_none(), "{stored:?}");
     Ok(())
 }
