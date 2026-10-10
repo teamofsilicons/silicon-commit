@@ -5,6 +5,7 @@ name: release
 # promotes the archives with the silicon-apps CLI (docs/RELEASES.md).
 on:
   push:
+    branches: ['release/**']
     tags: ['v*']
   workflow_dispatch:
 
