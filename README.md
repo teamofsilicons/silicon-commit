@@ -1,16 +1,19 @@
 # Silicon Commit
 
-[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md)
+[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md) · [Release Commit](docs/RELEASES.md)
 
 ```sh
-honeycomb install 'commit'
-commit iam --json
-commit login "<IAM-SLT>"
+silicon-apps install commit
+commit login                                                        # a Carbon approves a code at Silicon Accounts
+silicon-accounts login --app commit -q | commit login --slt-stdin   # a Silicon hands over a short-lived token
+commit accounts --json
 ```
 
-Version 0.2 adds Carbon/Silicon collaboration, private projects, linked todo assignments, retained history, automatic IAM sandbox selection, email, and configurable Space Station telemetry.
+Version 0.5 signs Carbons and Silicons in with Silicon Accounts, keys all work to personal accounts (a custodian
+manages the work of the Silicons it looks after), and ships the CLI through Silicon Apps, which keeps it up to date.
 
-A SolidJS web interface is available in [frontend/](frontend/README.md), with local preview and hosting instructions.
+The web app is being rebuilt with Next.js and Silicon Accounts sign-in; until it lands, `frontend/` holds the
+previous web, which does not work with this release's service.
 
 Silicon Commit is the work manager for Carbons and Silicons, signed in with
 Silicon Accounts. It implements the v1 todo, note, notification-subscription, project,
@@ -35,7 +38,7 @@ PostgreSQL is the consistency boundary. Every relationship is keyed by the
 permanent Silicon Accounts uuid of the accounts involved (`commit.accounts`);
 `c:`/`si:` ids are display data refreshed from Accounts. Access tokens are
 verified locally against Accounts' published keys, and who may see or change
-what (the custodian circle, project membership, a Silicon's allow-list) is
+what (custodians and their Silicons, project membership, a Silicon's allow-list) is
 decided by SQL policy functions inside the same transaction as the work. Todo
 notifications that match an assigning Silicon's subscription are committed to
 an outbox with an immutable destination snapshot and delivered directly to each snapshotted webhook endpoint at least once.
@@ -87,10 +90,12 @@ make test
 - Tokens issued before an account signed out or removed Commit's access are
   refused; changing visibility, members or a Silicon's allow-list also checks the
   token online.
-- Todos are visible to the circles of their owner and assignee and to readers of
-  their project; projects to the owner's circle and their members (members only
-  when private). A custodian manages its Silicons' work as itself. A Silicon takes
-  work only from its circle and from accounts it allowed.
+- Todos are visible to their owner and assignee, to the accounts close to either
+  (for a Carbon, the Silicons it looks after; for a Silicon, its custodian and the
+  custodian's other Silicons) and to readers of their project; projects to the
+  owner, the accounts close to it and their members (members only when private).
+  A custodian manages its Silicons' work as itself. A Silicon takes work only from
+  the accounts close to it and from accounts it allowed.
 - Resources a caller cannot see answer 404; visible but unchangeable ones 403.
 - Todo attachments are canonical HTTPS URLs from any provider. Commit stores and returns the URL list; uploads and temporary URL exchanges are outside its scope.
 - Notification settings belong to the authenticated Silicon. Webhook destinations
@@ -221,7 +226,7 @@ version response, for example:
 ```sh
 docker build \
   --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" \
-  --tag silicon-commit:0.1.0 \
+  --tag silicon-commit:0.5.0 \
   .
 ```
 

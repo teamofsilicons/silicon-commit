@@ -15,7 +15,7 @@ contains the root `honeycomb.yaml` and exactly six native executables.
 | Windows x86_64 and aarch64 | PE architecture and DLL imports checked; Visual C++ runtime linked statically. Execution on Windows is still unverified. |
 
 Cross-linkers reported non-fatal deprecated optimization and missing CRT debug
-information warnings. The CI workflow in [RELEASES.md](../RELEASES.md) provides
+information warnings. The CI workflow in [RELEASES.md](../RELEASES-0.4.md) provides
 native Windows runtime checks before publication.
 
 SHA-256 checksums (archive, then files inside the archive):

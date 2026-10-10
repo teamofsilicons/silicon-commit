@@ -17,7 +17,7 @@ Keep this compatible consumer after it serves traffic, even if IAM rolls back.
 Older Commit binaries cannot authenticate newly allocated private actor mappings.
 Reverting requires the predeployment database backup and previous runtime, with
 explicit handling of later writes; prefer retaining or repairing this consumer.
-See the repository's `deploy/iam-3-cutover.md` for the complete cutover contract.
+See the repository's `docs/history/iam-3-cutover.md` for the complete cutover contract.
 
 ## Linux package compatibility
 

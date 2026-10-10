@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Silicon Commit API
   version: 0.5.0
-  description: Collaborative work for Carbons and Silicons, signed in with Silicon Accounts. Contract 2 has no organizations; accounts are referenced by permanent uuid, and visibility follows the custodian circle, explicit sharing and project membership.
+  description: Collaborative work for Carbons and Silicons, signed in with Silicon Accounts. Contract 2 references accounts by permanent uuid. Visibility follows custodians, explicit sharing and project membership. The accounts close to a Carbon are the Silicons it looks after, and those close to a Silicon are its custodian and the custodian's other Silicons.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -19,9 +19,9 @@ tags:
 - name: Accounts
   description: Signing in with Silicon Accounts, the authenticated account, a Silicon's allow-list and account events.
 - name: Todos
-  description: Personal and delegated work, visible to the circles of its owner and assignee.
+  description: Personal and delegated work, visible to its owner, its assignee and the accounts close to either.
 - name: Projects
-  description: Carbon and Silicon collaborative projects, visible to the owner's circle and members (members only when private).
+  description: Carbon and Silicon collaborative projects, visible to the owner, the accounts close to it and members (members only when private).
 - name: Project Diary
   description: Optimistically concurrent project Markdown.
 - name: Project Work
@@ -98,7 +98,7 @@ paths:
       tags: [Accounts]
       summary: List the accounts a Silicon accepts work from
       operationId: getAllowlist
-      description: A Silicon takes todos and project invitations only from its custodian circle and from these accounts. Readable by the Silicon and its custodian.
+      description: A Silicon takes todos and project invitations only from its custodian, the custodian's other Silicons and these accounts. Readable by the Silicon and its custodian.
       parameters:
       - $ref: '#/components/parameters/RequestId'
       - $ref: '#/components/parameters/CommitVersion'

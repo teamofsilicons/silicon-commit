@@ -57,7 +57,7 @@ The production frontend uses Vercel at https://commit.teamofsilicons.com. `npm r
 
 The frontend requires the accompanying backend `GET /api/v1/projects/{project_id}/entries` read route so project activity is available. Release 0.2.0 requires migrations 0023–0027 and the updated runtime grants. Testing-environment timestamps now serialize as RFC 3339; the frontend also understands the older tuple format during rollout.
 
-The historical deployment report in `deploy/aws/verification-2026-09-08.md` predates automatic IAM sandbox discovery. Live login and read smoke tests succeeded; full live mutation coverage is not claimed.
+The historical deployment report in `docs/history/aws/verification-2026-09-08.md` predates automatic IAM sandbox discovery. Live login and read smoke tests succeeded; full live mutation coverage is not claimed.
 
 ## Repeatable local UI verification
 

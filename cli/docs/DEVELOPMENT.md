@@ -33,6 +33,10 @@ disposable PostgreSQL 16 database (the role needs CREATEDB for the migration tes
 tests; the HTTP tests sign their own EdDSA tokens and serve a local Silicon Accounts double, so no Accounts stack is
 needed.
 
+To try an installable CLI package, build the CLI and pack it the way a release does:
+`scripts/package-apps.sh VERSION TARGET target/release/commit` writes a Silicon Apps archive to `dist/apps/` after
+checking the three commands every Silicon app answers; [releases](RELEASES.md) explains the whole path.
+
 Diagnostics use the dedicated Space Station table through the worker; clients can opt out per request. `commit report`
 submits a report through the Rust client and Commit API for Postmark delivery. Attach a source PR with `--pr`, or keep
 a local draft with `--save-only`.

@@ -46,7 +46,7 @@ Against live IAM and Commit:
 
 ## Hosting requirements
 
-The release includes the added backend activity route, an HTTPS frontend origin, a persistent random cookie encryption key, and an IAM callback for the production hostname. The activity route requires no schema migration or additional runtime grants. The prior IAM directory/sandbox integration limitations are recorded in `deploy/aws/verification-2026-09-08.md`; this frontend work does not establish that those live mutation paths are fixed.
+The release includes the added backend activity route, an HTTPS frontend origin, a persistent random cookie encryption key, and an IAM callback for the production hostname. The activity route requires no schema migration or additional runtime grants. The prior IAM directory/sandbox integration limitations are recorded in `docs/history/aws/verification-2026-09-08.md`; this frontend work does not establish that those live mutation paths are fixed.
 
 ## Unscoped login correction
 

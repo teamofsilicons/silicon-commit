@@ -33,7 +33,10 @@ async function inventory(dir, prefix = "") {
   }
   return result;
 }
-const files = await inventory(source),
+// docs/history keeps earlier releases' records and docs/migration the operator's cutover notes: neither is
+// published here (nor bundled into the CLI).
+const unpublished = ["history/", "migration/"];
+const files = (await inventory(source)).filter((f) => !unpublished.some((prefix) => f.startsWith(prefix))),
   documents = files.filter((f) => f.endsWith(".md"));
 const titles = new Map(
   await Promise.all(
@@ -43,7 +46,20 @@ const titles = new Map(
     ]),
   ),
 );
-const navigation = ["START.md","PROJECTS.md","CLI.md","TEST_ENVIRONMENTS.md","NOTIFICATIONS.md","DEVELOPMENT.md","CLIENT.md","API.md","CONTRACTS.md","TELEMETRY.md","IAM.md"];
+const navigation = ["START.md","PROJECTS.md","CLI.md","NOTIFICATIONS.md","ACCOUNTS.md","DEVELOPMENT.md","CLIENT.md","API.md","CONTRACTS.md","TELEMETRY.md","RELEASES.md","DEPLOYMENT.md"];
+for (const file of navigation) if (!documents.includes(file)) throw new Error(`Navigation names a missing page: ${file}`);
+// Pages that no longer exist; their old addresses lead to the page that replaced them.
+const moved = {
+  "/iam/": "ACCOUNTS.md",
+  "/honeycomb/": "RELEASES.md",
+  "/test-environments/": "DEVELOPMENT.md",
+  "/public-id-migration/": "ACCOUNTS.md",
+  "/iam5-session-contexts/": "ACCOUNTS.md",
+  "/frontend-iam5-contexts/": "ACCOUNTS.md",
+  "/releases/commit-0.2.0/": "RELEASES.md",
+  "/releases/commit-0.2.1/": "RELEASES.md",
+  "/releases/commit-0.2.3/": "RELEASES.md",
+};
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
@@ -89,7 +105,7 @@ for (const file of documents) {
         `<a href="${route(f)}"${f === file ? ' aria-current="page"' : ""}>${escape(titles.get(f))}</a>`,
     )
     .join("");
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)} · Commit Docs</title><meta name="description" content="Silicon Commit ${escape(version)} documentation: ${escape(title)}"><link rel="canonical" href="${url}"><meta property="og:title" content="${escape(title)} · Commit Docs"><meta property="og:url" content="${url}"><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css"><script src="/search.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>▣</span> Commit <small>Docs</small></a><label class="search-label" for="search">Search docs<input id="search" type="search" placeholder="Search the documentation" autocomplete="off" aria-controls="search-results"></label><a class="app-link" href="https://commit.teamofsilicons.com">Open Commit ↗</a></header><div id="search-results" hidden role="region" aria-label="Search results"></div><div class="layout"><aside><span class="version">VERSION · ${escape(version)}</span><nav aria-label="Documentation">${nav}</nav><a class="source" href="https://github.com/teamofsilicons/silicon-commit">Source on GitHub ↗</a></aside><main id="main"><div class="eyebrow">SILICON COMMIT / DOCUMENTATION</div>${releasePreview ? `<div class="release-preview" role="note"><strong>Upcoming release ${escape(version)}</strong><p>This documentation previews the IAM 5 integration. Runtime rollout is pending; existing installations still use the previous release. <a href="https://docs.iam.teamofsilicons.com/obo-cutover/">Prepare your OBO integration</a>.</p></div>` : ""}<article>${body}</article><footer>Silicon Commit · Contract 1 · <a href="/contracts/">Version policy</a></footer></main><nav class="toc" aria-label="On this page"><strong>On this page</strong>${headings.map((h) => `<a href="#${h.id}">${escape(h.text)}</a>`).join("")}</nav></div></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(title)} · Commit Docs</title><meta name="description" content="Silicon Commit ${escape(version)} documentation: ${escape(title)}"><link rel="canonical" href="${url}"><meta property="og:title" content="${escape(title)} · Commit Docs"><meta property="og:url" content="${url}"><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css"><script src="/search.js" defer></script></head><body><a class="skip" href="#main">Skip to content</a><header><a class="brand" href="/"><span>▣</span> Commit <small>Docs</small></a><label class="search-label" for="search">Search docs<input id="search" type="search" placeholder="Search the documentation" autocomplete="off" aria-controls="search-results"></label><a class="app-link" href="https://commit.teamofsilicons.com">Open Commit ↗</a></header><div id="search-results" hidden role="region" aria-label="Search results"></div><div class="layout"><aside><span class="version">VERSION · ${escape(version)}</span><nav aria-label="Documentation">${nav}</nav><a class="source" href="https://github.com/teamofsilicons/silicon-commit">Source on GitHub ↗</a></aside><main id="main"><div class="eyebrow">SILICON COMMIT / DOCUMENTATION</div>${releasePreview ? `<div class="release-preview" role="note"><strong>Upcoming release ${escape(version)}</strong><p>This documentation describes a release that is not live yet; the service and installed CLIs still run the previous release until it ships.</p></div>` : ""}<article>${body}</article><footer>Silicon Commit · Contract 2 · <a href="/contracts/">Version policy</a></footer></main><nav class="toc" aria-label="On this page"><strong>On this page</strong>${headings.map((h) => `<a href="#${h.id}">${escape(h.text)}</a>`).join("")}</nav></div></body></html>`;
   const directory = path.join(output, route(file));
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, "index.html"), html);
@@ -112,6 +128,15 @@ for (const file of ["styles.css", "search.js"])
 await cp(path.join(source, "install.sh"), path.join(output, "install.sh"));
 await cp(path.join(root, "openapi.yaml"), path.join(output, "openapi.yaml"));
 await cp(path.join(root, "docs-site/favicon.svg"), path.join(output, "favicon.svg"));
+for (const [from, file] of Object.entries(moved)) {
+  if (!documents.includes(file)) throw new Error(`A moved page points at a missing page: ${file}`);
+  const to = route(file), title = escape(titles.get(file));
+  await mkdir(path.join(output, from), { recursive: true });
+  await writeFile(
+    path.join(output, from, "index.html"),
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Commit Docs</title><meta name="robots" content="noindex"><link rel="canonical" href="${origin + to}"><meta http-equiv="refresh" content="0; url=${to}"><link rel="stylesheet" href="/styles.css"></head><body><main><h1>This page moved</h1><p>Read <a href="${to}">${title}</a>.</p></main></body></html>`,
+  );
+}
 await writeFile(path.join(output, "search-index.json"), JSON.stringify(search));
 await writeFile(
   path.join(output, "robots.txt"),

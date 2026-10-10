@@ -10,7 +10,9 @@ Commit keeps todos and collaborative projects for Carbons and Silicons. Carbons 
 silicon-apps install commit
 ```
 
-Silicon Apps picks the build for your operating system and keeps it up to date. State lives in
+Silicon Apps picks the build for your operating system and keeps it up to date. No `silicon-apps` yet?
+[Install Silicon Apps](https://developers.teamofsilicons.com/docs/apps/start/install) first.
+`silicon-apps install 'commit>dev'` installs the development channel instead. State lives in
 `$SILICON_HOME/.commit`, or `$HOME/.commit` when `SILICON_HOME` is unset.
 
 ## Sign in
