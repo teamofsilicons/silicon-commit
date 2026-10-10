@@ -263,3 +263,81 @@ Telemetry stays server-side (Space Station in the worker); the CLI only sends `X
 with an empty id until the custodian used Commit. `/me` now looks the custodian up (cached a minute) and does not
 store the answer, because a row made from a lookup would delay the custodian's own first `userinfo` refresh (name,
 shared email) by up to ten minutes. The CLI also keeps a known custodian id when an answer omits it.
+
+## Packaging, CI, deployment and documentation (stage 3)
+
+**A-40 One archive per target, from a template.** `packaging/apps.yaml.in` is rendered by
+`scripts/package-apps.sh VERSION TARGET BINARY` into an `apps.yaml` that lists only that target; the archive holds
+exactly `apps.yaml` and `bin/commit` (`bin/commit.exe`), is packed by `silicon-apps pack` (deterministic: the same
+binary gives the same archive) and is validated again as an archive. Output: `dist/apps/commit-VERSION-TARGET.tar.gz`
+and `.sha256`. Why: Silicon Apps uploads and validates per target, so each archive must stand on its own; `honeycomb.yaml`
+and the six-target single archive are gone.
+
+**A-41 The six targets Commit already shipped.** The release builds linux-x86_64 and linux-aarch64 (glibc 2.28 with
+cargo-zigbuild 0.23.4 and Zig 0.15.2), windows-x86_64 and windows-aarch64 (static C runtime), macos-x86_64 and
+macos-aarch64, on the same runners as before. The packager also accepts linux-i686, linux-armv7hf and windows-i686
+(the glibc check now reads ELF32), so adding one is a matrix row; they are not built now because Commit never
+shipped them and the Silicons run x86_64 and aarch64 (the brief: keep the targets the app already ships).
+
+**A-42 Discovery is checked where the binary runs, and bound to its bytes.** The three commands use Silicon Apps'
+own pass rules: `--help` exits 0 with text; `accounts --json` exits 0 with one JSON object whose `app_id` is
+`commit`; `login status --json` exits 0 with one JSON object whose `authenticated` is `false`, signed out, in an
+empty home with none of the caller's environment. The packager also requires `commit --version` to print the
+manifest's version (packing the wrong build is caught). Each release build job runs them on the target's own
+runner (Linux again in the pinned glibc 2.28 Debian image with no network) and writes a receipt: target, version,
+SHA-256 of the binary, results. The single packaging job, on Linux, runs them itself where it can and otherwise
+accepts only a receipt for the same bytes; `--discovery require` refuses without either. Why: one packer install on
+one Linux runner instead of six (two of them Windows), without weakening the guarantee.
+
+**A-43 The packer never sees a sign-in.** `silicon-apps validate` and `pack` are local; the script runs them with an
+empty `--home`, `SILICON_APPS_NO_DAEMON=1`, and without `APPS_TOKEN`, `APPS_URL`, `ACCOUNTS_URL` or `SILICON_HOME`,
+and requires silicon-apps 0.2.x (CI installs `silicon-apps-cli` 0.2.0 with `cargo install --locked`).
+
+**A-44 One version, and a tag that names it.** The root, client and CLI manifests (and the CLI's dependency on the
+client) must agree on a strict `x.y.z` (Silicon Apps refuses prerelease suffixes); a release tag must be exactly
+`v<version>`. `workflow_dispatch` builds from any branch without the tag check. The release publishes nothing:
+artifact `commit-silicon-apps-release` with the archives, `SHA256SUMS` and `SOURCE_REVISION`.
+
+**A-45 CI packs on every change.** A `package` job in `ci.yml` builds the Linux CLI for glibc 2.28 and packs it with
+the discovery commands required, and the tools job runs the packager's tests, so a release stays one tag away.
+
+**A-46 Both crates stay on crates.io.** `silicon-commit-client` is a library dependency; `silicon-commit-cli` stays
+publishable as a source mirror for `cargo install` (as Silicon Apps does for its own CLI), and 0.5.0 replaces the
+0.4.1 crate that stops working at the cutover. Every doc installs with `silicon-apps install commit`, the only
+channel that updates the CLI. (The survey suggested stopping the CLI crate; the CLI stage's runbook kept it.)
+
+**A-47 Production steps are scripts, not hand-typed SSM payloads.** `deploy/aws/host.py` copies a file under
+`/opt/commit` (checked by SHA-256 on the host, names limited to letters, digits, `.`, `_`, `-`) or runs a command as
+root through Systems Manager; `deploy/aws/cutover.py` runs on the host the two steps that need the private database:
+`queues` (waiting webhook deliveries and emails, read-only, as the migrator) and `plan`/`dry-run`/`apply` of
+`commit-migrate link-identities` in the deployed image, with a root-only environment file that is removed even on
+failure. Why: the database accepts only the host, and bootstrap deletes the migrator's environment after migrating.
+
+**A-48 Drain before 0033.** Migration 0033 asks for a drained outbox. The runbook stops only the API, lets the worker
+empty the queues (`cutover.py queues`), then runs bootstrap. A delivery still waiting on a failing destination may be
+carried over; the new worker sends it as stored.
+
+**A-49 The webhook secret exists before the webhook.** `POST /v1/apps/commit/webhook/generate-secret` makes the
+`whsec_…` before the URL is set, so bootstrap starts with it and no event is refused while the old service runs;
+`silicon-accounts app webhook set` afterwards keeps that secret.
+
+**A-50 History moves out of the current docs.** Release notes, verification reports, cutover contracts and design
+notes of the IAM and Honeycomb era moved to `docs/history/` unchanged (paths inside them fixed); the three retired
+stubs (`IAM.md`, `HONEYCOMB.md`, `TEST_ENVIRONMENTS.md`) are gone. Neither `docs/history/` nor `docs/migration/` is
+published on the docs site or bundled into the CLI; the site sends the old addresses of removed pages to the pages
+that replaced them.
+
+**A-51 Docs site.** Navigation lists Silicon Accounts, releases and deployment; the footer says contract 2; the
+release-preview banner no longer names a retired integration; the build fails if the navigation or a redirect names
+a missing page.
+
+**A-52 `install.sh` keeps its address.** `https://docs.commit.teamofsilicons.com/install.sh` now runs
+`silicon-apps install commit` (passing options through) and explains how to install Silicon Apps when it is missing,
+the same shape as before.
+
+**A-53 Production allows Interface only what it used.** The runbook builds `COMMIT_PROOF_ISSUERS` from the action ids
+Interface called in the IAM era (todos, notes, projects, tasks) for Interface's app id, rather than `*=`; a missing one
+answers 403 `proof_issuer_not_allowed` naming it.
+
+**A-54 Words in the reference.** The OpenAPI description and the README say "the accounts close to" an account
+(defined once) instead of "circle", and no longer say "organizations".

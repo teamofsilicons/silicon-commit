@@ -282,3 +282,160 @@ Addendum (same stage, after the record above): `fbecc6b` Answer login status eve
 `COMMIT_API_URL`, `verified: false` + warning; the new assertions fail without the fix, shown) and `f8da0bc` Keep
 retired words out of the client's and CLI's doc comments. Re-run: `cargo test -p silicon-commit-client -p
 silicon-commit-cli` 54 passed + 1 doctest, workspace clippy clean, `cargo fmt --all --check` ok.
+
+## 2026-10-10 — Stage 3 (packaging, CI, deployment, documentation): Silicon Apps
+
+Everything around the code now says and does Silicon Accounts and Silicon Apps. Nothing was pushed, released,
+uploaded or deployed; a release is one tag away and each production step is one reviewed command in
+[`cutover.md`](cutover.md). Decisions A-40 to A-54 in [`decisions.md`](decisions.md); root `decisions.md` D-057.
+
+What changed:
+
+- **Packaging.** `packaging/apps.yaml.in` and `scripts/package-apps.sh VERSION TARGET BINARY` (Python behind a bash
+  wrapper, `scripts/package_apps.py`): one target per archive, `bin/commit[.exe]`, native-binary check per target
+  (glibc ≤ 2.28 for Linux; the ABI checker now reads ELF32 for linux-i686/armv7hf), the three discovery commands
+  with Silicon Apps' own pass rules in an empty home (plus `--version` = manifest version), `silicon-apps validate`
+  and `pack` with an empty packer home, archive members checked byte for byte and validated again, `.sha256`.
+  Receipts carry a discovery run from the target's own machine to the packer (`--receipt`, `--discovery
+  require`); `version` checks manifests and tag; `checksums` writes SHA256SUMS. `build-release-macos.sh` packs each
+  target the same way. Deleted: `honeycomb.yaml`, `scripts/package-release.py`, `docs-site/release.py`,
+  `.github/workflows/release-package.yml`.
+- **CI.** `release.yml` (tags `v*` and by hand): version/tag check, the six existing targets on the same runners and
+  toolchains, discovery natively on each runner and on Linux again in the glibc 2.28 Debian image with no network,
+  one packaging job (`cargo install --locked silicon-apps-cli --version 0.2.0`), artifact
+  `commit-silicon-apps-release` (archives, `.sha256`, `SHA256SUMS`, `SOURCE_REVISION`); publishes nothing. `ci.yml`:
+  a `package` job (Linux CLI for glibc 2.28, packed with discovery required) and the tools job runs the packager,
+  ABI, bootstrap, cutover and host tests. No IAM env or Honeycomb step remains; the Postgres service container was
+  already there.
+- **Deployment.** `deploy/aws/host.py` (SSM copy/run, SHA-256-checked copies under `/opt/commit` only) and
+  `deploy/aws/cutover.py` (on the host: `queues`, and `link-identities` plan/dry-run/apply in the deployed image with
+  a root-only env file removed even on failure). The AWS README describes the current procedure. Caddy needed no
+  change (it proxies `/webhook/` with everything else; the API sets no CSP; the Next.js web's CSP comes from the web
+  kit). `cutover.md` rewritten as the full ordered runbook.
+- **Docs.** New `docs/RELEASES.md`; `install.sh` installs with Silicon Apps at the same address; START/DEVELOPMENT
+  (and their CLI copies), README top, README/OpenAPI wording ("the accounts close to" instead of "circle", no
+  "organizations"). IAM/Honeycomb-era records moved to `docs/history/` unchanged with an index; the three retired
+  stubs removed. Docs site: excludes `docs/history` and `docs/migration`, redirects the removed pages' addresses,
+  new navigation, contract 2 footer, generic preview banner, fails on a missing nav/redirect page.
+- **Service wording.** The retired `X-Org-ID` refusal, the contract 1 refusal and `/api/v1/contracts` no longer name
+  the previous identity service or organizations; three stale doc comments fixed.
+- **Records.** `understanding-proposal.md` gains the Updates/docs/wording paragraphs; decisions A-40 to A-54; D-057.
+
+Commits: `dbdc046` Package the CLI for Silicon Apps instead of Honeycomb · `631c622` Build Silicon Apps archives in
+the release workflow · `e867598` Prepare the production cutover for Silicon Accounts and Silicon Apps · `5ae8416`
+Document releasing and installing through Silicon Apps · `f346f79` Keep retired words out of the service's own
+messages · then this folder (decisions, proposal, progress).
+
+### Tests and proofs
+
+```sh
+export CARGO_TARGET_DIR=$PWD/target/mig CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3
+cargo fmt --all --check                                                        # ok (after rustfmt on one line)
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings  # ok
+COMMIT_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/commit_ship_full \
+  cargo test --workspace --all-targets --locked --no-fail-fast                 # 194 passed, 0 failed, none skipped
+cargo test -p silicon-commit-client --doc --locked                             # 1 passed
+python3 scripts/test_package_apps.py                                           # 20 tests OK
+python3 scripts/test_linux_abi.py                                              # 8 tests OK (2 new: ELF32, bad class)
+python3 deploy/aws/test_bootstrap.py; python3 deploy/aws/test_cutover.py; python3 deploy/aws/test_host.py  # 8, 7, 4 OK
+npm ci --prefix docs-site && npm run build --prefix docs-site && npm run check --prefix docs-site
+                                     # 13 pages built; 22 pages (with 9 redirects) and 354 local links verified
+for g in cli/docs/*.md; do cmp "$g" "docs/$(basename "$g")"; done             # identical
+npx --yes @redocly/cli@2.49.0 lint openapi.yaml                                # valid, 9 warnings (as before)
+python3 (PyYAML 6.0.3) parse + structural lint of all workflows                # no problems (needs, matrix keys, outputs)
+psql … -c "$(cutover.py QUEUES)" on a migrated scratch database                # runs; (0 rows)
+```
+
+Mutation checks on the packager tests (each reverted): accepting `login status` JSON without
+`"authenticated": false` (survived at first; two cases added, now caught), accepting `accounts --json` with any
+`app_id`, dropping the `--version` check, skipping the receipt check: all fail the suite.
+
+Packaging proof on this Mac (silicon-apps 0.2.0 from `~/.apps/bin`, used only for the local `validate`/`pack`
+with an empty scratch `--home`):
+
+```text
+$ cargo build --locked --release -p silicon-commit-cli --bin commit                 # 59.8 s, 5,992,704 bytes
+$ SILICON_APPS=~/.apps/bin/silicon-apps scripts/package-apps.sh 0.5.0 macos-aarch64 target/mig/release/commit --discovery require
+packaged …/dist/apps/commit-0.5.0-macos-aarch64.tar.gz (2808091 bytes)
+sha256 09cbc11771e4ed5563d1587600a5506829e11db24ab2c47783b31fee294dc00b
+discovery ran here
+$ tar -tvzf dist/apps/commit-0.5.0-macos-aarch64.tar.gz
+-rw-r--r--  0 0      0         113  1 Jan  1970 apps.yaml
+-rwxr-xr-x  0 0      0     5992704  1 Jan  1970 bin/commit
+$ silicon-apps validate EXTRACTED_DIR --home EMPTY --json      # {"errors": [], "manifest": {… "macos-aarch64": {"binary": "bin/commit"}}, "version": "0.5.0"}, "valid": true}
+$ silicon-apps validate dist/apps/commit-0.5.0-macos-aarch64.tar.gz --home EMPTY --json   # "valid": true
+# from the extracted archive, env -i PATH=/usr/bin:/bin HOME=EMPTY SILICON_HOME=EMPTY:
+$ bin/commit --help                 # exit 0, 92 lines
+$ bin/commit accounts --json        # exit 0: {"accounts_url": "https://accounts.teamofsilicons.com", "api_url": "https://backend.commit.teamofsilicons.com", "app_id": "commit", … "version": "0.5.0"}
+$ bin/commit login status --json    # exit 0: {"authenticated": false}
+# files left in the empty home: 0
+$ cargo zigbuild --locked --release -p silicon-commit-cli --bin commit --target x86_64-unknown-linux-gnu.2.28   # 53 s (cargo-zigbuild 0.23.4, Zig 0.15.2)
+$ python3 scripts/check_linux_abi.py target/mig/x86_64-unknown-linux-gnu/release/commit   # requires glibc 2.28 (maximum 2.28)
+$ scripts/package-apps.sh 0.5.0 linux-x86_64 …/commit --discovery require
+package-apps: the discovery commands are required, but this machine cannot run the linux-x86_64 binary (…); pass the receipt from `discover --receipt-out` on a linux-x86_64 machine
+$ scripts/package-apps.sh 0.5.0 linux-x86_64 …/commit --discovery require --receipt <macos receipt>
+package-apps: the discovery receipt … is for other target, sha256 (…)
+$ scripts/package-apps.sh 0.5.0 linux-aarch64 …/commit     # the ELF executable is not built for linux-aarch64
+$ scripts/package-apps.sh 0.5.0 linux-x86_64 …/commit      # auto: note, then packaged (sha256 0aebd970…), "validation worker runs them at upload"
+$ python3 scripts/package_apps.py checksums dist/apps --version 0.5.0 --expect linux-x86_64 linux-aarch64
+package-apps: commit-0.5.0-linux-aarch64.tar.gz is missing from dist/apps; every release target must be packed
+$ (cd dist/apps && shasum -a 256 -c SHA256SUMS)              # both OK
+```
+
+The release workflow's hand-off was replayed locally for macos-aarch64: build-job receipt, a copy without the exec
+bit (as `download-artifact` delivers it), packaging with `--discovery require --receipt`: the same archive digest
+`09cbc117…` as the direct run (packing is deterministic).
+
+### Sweep
+
+`git grep -n -i -E 'iam|honeycomb|org_id|organi[sz]ation|\borg\b|tenant'` (106 files; no `vendor/` left). Every
+remaining hit is intentional:
+
+| where | why it stays |
+| --- | --- |
+| `migrations/0001`–`0032` | applied migrations are immutable history (sqlx checksums them) |
+| `migrations/0033_silicon_accounts.sql` | keeps IAM-era columns as provenance, creates `iam:` placeholders, re-keys, drops org-qualified keys |
+| `src/infrastructure/postgres/identity_links.rs`, `src/bin/commit_migrate.rs` | the operator command that links IAM-era principals (`iam_principal_id,accounts_uuid,org_id`) |
+| `src/domain/ids.rs`, `src/domain/actor.rs` | the `iam:<organization>:<principal>` placeholder ids and their test |
+| `src/api/auth.rs`, `src/api/mod.rs` | the retired-header list (`x-org-id`, `x-iam-obo-*`) refused with 400, the OBO-alias comment, the test that retired routes are gone |
+| `src/api/contracts.rs`, `src/application/{authorization,scopes}.rs`, `src/infrastructure/clients/webhook.rs`, `src/infrastructure/postgres/todos.rs` | doc comments stating what changed (scope ids kept from the IAM era, payload v3 without `org_id`) and a test asserting `org_id` is absent |
+| `src/config.rs` | the retired variables boot warns about |
+| `cli/src/{main,api,login}.rs` | the hidden `commit iam --json` alias (brief: one minor release) |
+| `cli/src/session.rs`, `cli/tests/sessions.rs` | recognising IAM-era session files (`org_id`, `actor`) to answer `legacy_session` |
+| `cli/tests/discovery.rs` | asserts help never shows retired words, and the hidden alias |
+| `tests/*.rs`, `tests/*.sql` | IAM-era fixtures for the upgrade tests; grant assertions that runtime roles cannot read IAM-era objects; assertions that new rows carry no organization |
+| `deploy/postgres_runtime_grants.sql` | comments on the revoked IAM-era objects |
+| `deploy/aws/bootstrap.py`, `test_bootstrap.py`, `test_cutover.py` | retired secret keys that are never copied, and tests proving it |
+| `deploy/aws/cutover.py` | the mapping header `iam_principal_id,accounts_uuid[,org_id]` in an error message |
+| `deploy/aws/edge.json` | AWS IAM (the EC2 instance role), unrelated to Silicon IAM |
+| `docs-site/build.mjs` | old addresses (`/iam/`, `/honeycomb/`, `/iam5-…/`) redirected to the pages that replaced them |
+| `docs/history/**` | historical records, kept unchanged |
+| `docs/migration/**` | this migration's notes (D9 allows them here) |
+| `decisions.md` | the append-only engineering log; D-056 and D-057 supersede |
+| `UNDERSTANDING.md` | Carbon-only; changes proposed in `understanding-proposal.md` |
+| `frontend/**` | the previous SolidJS web and its gateway (IAM popup, `X-Org-ID`): the web stages replace it with the Next.js web and delete `frontend/`; it is not rewritten here and must not be deployed with 0.5.0 (README says so) |
+
+User-facing copy also checked for "circle", "AI agent", "human", "user account", "team": none in current docs, help or
+OpenAPI.
+
+### Left for later stages or a Carbon
+
+- **Web stages**: replace `frontend/` (and its CI job) with the Next.js web; then update the README's web line, the
+  web env names in cutover step 5 if `web/.env.example` differs from the kit's (`APP_ID`, `APP_SECRET`,
+  `ACCOUNTS_URL`, `APP_API_URL`, `SESSION_SECRET`, `PUBLIC_URL`), and the Vercel root directory.
+- **E2E stage**: scenario 7 can use `scripts/package-apps.sh 0.5.0 macos-aarch64 target/mig/release/commit` and run
+  the three commands from the extracted archive (shown above).
+- **Production** (a Carbon, by the runbook): tag `v0.5.0`, image, sign-in setup, webhook secret, deployment secret,
+  drain, bootstrap, link-identities, web, Interface, docs, Silicon Apps upload/release/promote (Linux first), crates.
+- Not run here: the release workflow itself (needs GitHub; nothing may be pushed), the Linux discovery commands
+  (no Docker or Linux on this Mac; CI runs them natively and in the glibc 2.28 image), actionlint (not installed;
+  PyYAML parse plus a structural check instead).
+
+Blocked on: nothing in this repository. Interface's proof release and the Silicon runtime's switch to Silicon
+Accounts tokens are outside it (cutover steps 15 and 24).
+
+Gotchas: zsh treats `echo ======` as a command lookup; `bash -n a.sh b.sh` checks only `a.sh` (CI loops);
+an unquoted YAML scalar must not contain `: `; `upload-artifact` drops the exec bit (the packager chmods its staged
+copy); `commit-migrate`'s tracing layer writes JSON logs to stdout, so `cutover.py` sets
+`COMMIT_LOG=silicon_commit=warn` (in practice `--plan` printed only the CSV); `silicon-apps validate` also accepts an
+archive path.

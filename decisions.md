@@ -977,3 +977,15 @@ accounts by `commit-migrate link-identities`. Visibility follows the custodian c
 project membership) and a Silicon's allow-list; other apps act for an account with User verification proofs.
 Contract 2 replaces contract 1. The full mapping and each decision are in
 [`docs/migration/decisions.md`](docs/migration/decisions.md).
+
+## D-057 — Silicon Apps distributes the CLI
+
+**Status:** Accepted (2026-10-10); supersedes the previous package manager's release packaging, the single
+multi-target release archive and the release notes now kept in `docs/history/`
+
+The `commit` CLI ships as one Silicon Apps archive per target: `apps.yaml` at the root listing only that target,
+the executable at `bin/commit` (`bin/commit.exe` on Windows). The release workflow builds the six targets Commit
+already shipped with the same toolchains, runs `--help`, `accounts --json` and `login status --json` signed out on
+each target's own runner, packs with `silicon-apps validate` and `silicon-apps pack`, and publishes nothing; a
+Carbon uploads, releases and promotes with `silicon-apps`. Silicon Apps' updater is the only updater. Each call is
+in [`docs/migration/decisions.md`](docs/migration/decisions.md) (A-40 to A-54).

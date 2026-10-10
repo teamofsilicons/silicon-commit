@@ -85,3 +85,23 @@ Replace "On the docs page, show `honeycomb install 'commit'` to install the CLI,
 "On the docs page, show `silicon-apps install commit` to install the CLI, followed by how to log in."
 
 In "Telemetry", replace "All IAM apps use Space Station" with "All Silicon apps use Space Station".
+
+## Updates, docs and wording (from the packaging stage)
+
+Replace the "Updates" section with:
+
+> For each Commit release, build the commit CLI for every supported target and package one .tar.gz per target with
+> apps.yaml at the archive root: the app id `commit`, the release version, the command `commit` and that target's
+> executable. Check each package with `silicon-apps validate` and pack it with `silicon-apps pack`; read
+> https://developers.teamofsilicons.com/docs/apps for the format. Every package must answer `commit --help`,
+> `commit accounts --json` and `commit login status --json` before anyone signs in. Silicon Apps installs and
+> updates the CLI; Commit never replaces itself.
+
+In "Rust Package & CLI", replace "(carbons, silicons, org, access keys, api keys, read, write, patch, delete,
+everything)" with "(carbons, silicons, access keys, api keys, read, write, patch, delete, everything)".
+
+In "Cli experience", replace "CLI is the primary way to interact with IAM Apps." with "CLI is the primary way to
+interact with Silicon apps."
+
+In "Docs", replace "Since all IAM apps can both be used as is, and also built on top of..." with "Since all Silicon
+apps can both be used as is, and also built on top of...".
