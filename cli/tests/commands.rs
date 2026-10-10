@@ -1,130 +1,318 @@
-use serde_json::{Value, json};
-use std::{
-    fs,
-    path::PathBuf,
-    process::{Command, Output},
-    sync::atomic::{AtomicU64, Ordering},
-};
+//! API commands: request shapes, local validation, errors, reports, configuration.
+
+mod support;
+
+use serde_json::json;
+use std::fs;
+use support::{Home, json_output, now, session, stderr};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_json, header, method, path},
+    matchers::{body_json, header, method, path, query_param},
 };
 
-#[tokio::test(flavor = "multi_thread")]
-async fn legacy_unscoped_or_actorless_sessions_require_new_login_without_network() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    fs::create_dir_all(home.0.join(".commit")).unwrap();
-    let session = home.0.join(".commit/session.json");
-    for (actor, org) in [
-        (Value::Null, json!("tos")),
-        (json!({"type":"carbon","public_id":"c:person"}), Value::Null),
-    ] {
-        let original = json!({"access_token":"oat_saved","refresh_token":"ort_saved",
-            "expires_at":4102444800_u64,"api_url":server.uri(),"org_id":org,"actor":actor})
-        .to_string();
-        fs::write(&session, &original).unwrap();
-        let output = home.command().args(["todos", "list"]).output().unwrap();
-        assert!(!output.status.success());
-        assert_eq!(fs::read_to_string(&session).unwrap(), original);
-    }
-    assert!(server.received_requests().await.unwrap().is_empty());
+fn signed_in(home: &Home, api: &MockServer) {
+    home.write_session(
+        None,
+        &session(
+            "http://127.0.0.1:9",
+            &api.uri(),
+            "eyJ.saved",
+            "sar_saved",
+            now() + 1500,
+        ),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn ambiguous_organizations_require_selection_and_explicit_tokens_do_not_change_saved_state() {
+async fn commands_need_a_sign_in_but_health_checks_do_not() {
     let home = Home::new();
-    let server = MockServer::start().await;
-    fs::create_dir_all(home.0.join(".commit")).unwrap();
-    let session = home.0.join(".commit/session.json");
-    let saved = json!({"access_token":"oat_saved","refresh_token":"ort_saved",
-        "expires_at":4102444800_u64,"api_url":server.uri(),"org_id":"private-saved-org"})
-    .to_string();
-    fs::write(&session, &saved).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer oat_explicit"))
-        .and(|r: &wiremock::Request| !r.headers.contains_key("x-org-id"))
+    let api = MockServer::start().await;
+    for route in ["/healthz", "/readyz", "/api/v1/version"] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .and(|r: &wiremock::Request| !r.headers.contains_key("authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"ok"})))
+            .expect(1)
+            .mount(&api)
+            .await;
+    }
+    for command in ["health", "ready", "version"] {
+        json_output(
+            home.command()
+                .env("COMMIT_API_URL", api.uri())
+                .arg(command)
+                .output()
+                .unwrap(),
+        );
+    }
+    let output = home
+        .command()
+        .env("COMMIT_API_URL", api.uri())
+        .args(["todos", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    for part in [
+        "Not signed in",
+        "not_signed_in",
+        "commit login",
+        "silicon-accounts login --app commit -q | commit login --slt-stdin",
+    ] {
+        assert!(text.contains(part), "{text}");
+    }
+    assert!(!home.state().exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_todos_are_explained_without_a_request() {
+    let home = Home::new();
+    let api = MockServer::start().await;
+    signed_in(&home, &api);
+    for (payload, expected) in [
+        (
+            json!({"title":"Eat","assignee_id":"si:builder"}),
+            "use assigned_to",
+        ),
+        (
+            json!({"title":"Eat","assignee":{"id":"si:builder"}}),
+            "use assigned_to",
+        ),
+        (
+            json!({"title":"Eat"}),
+            "assigned_to is required and must be a string",
+        ),
+        (
+            json!({"title":"Eat","assigned_to":{"id":"c:alice"}}),
+            "assigned_to is required and must be a string",
+        ),
+        (
+            json!({"assigned_to":"c:alice"}),
+            "title is required and must be a string",
+        ),
+        (json!([]), "requires a JSON object"),
+    ] {
+        let file = home.0.join("todo.json");
+        fs::write(&file, payload.to_string()).unwrap();
+        for data in [payload.to_string(), format!("@{}", file.display())] {
+            let output = home
+                .command()
+                .args(["todos", "create", "--data", &data])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+        }
+    }
+    let broken = home
+        .command()
+        .args(["todos", "create", "--data", "{not json"])
+        .output()
+        .unwrap();
+    assert!(stderr(&broken).contains("--data is not valid JSON"));
+    assert!(api.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn server_validation_keeps_the_code_request_id_details_and_hint() {
+    let home = Home::new();
+    let api = MockServer::start().await;
+    signed_in(&home, &api);
+    let payload = json!({"title":"Eat","assigned_to":"si:elsewhere","description":null,"status":"yet_to_do","attachments":[]});
+    Mock::given(method("POST"))
+        .and(path("/api/v1/todos"))
+        .and(body_json(&payload))
+        .and(header("authorization", "Bearer eyJ.saved"))
         .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"authenticated":true,
-            "org_id":null,"organizations":["bricks","tos"]})),
+            ResponseTemplate::new(422)
+                .insert_header("x-request-id", "todo-validation-request")
+                .set_body_json(json!({"error":{"code":"validation_failed","message":"The request contains invalid data.","details":{"assigned_to":"unknown account"}}})),
         )
         .expect(1)
-        .mount(&server)
+        .mount(&api)
         .await;
     let output = home
         .command()
-        .args(["--token", "oat_explicit", "projects", "list"])
+        .args(["todos", "create", "--data", &payload.to_string()])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let text = stderr(&output);
+    for part in [
+        "422",
+        "validation_failed",
+        "todo-validation-request",
+        "unknown account",
+        "commit todos create --help",
+        "not created",
+    ] {
+        assert!(text.contains(part), "{text}");
+    }
+    assert!(!text.contains("eyJ.saved"));
+    Mock::given(method("POST"))
+        .and(path("/api/v1/todos"))
+        .and(body_json(json!({"title":"Help","assigned_to":"si:outsider"})))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error":{"code":"silicon_not_reachable","message":"si:outsider does not take work from you."}})))
+        .mount(&api)
+        .await;
+    let refused = home
+        .command()
+        .args([
+            "todos",
+            "create",
+            "--data",
+            "{\"title\":\"Help\",\"assigned_to\":\"si:outsider\"}",
+        ])
+        .output()
+        .unwrap();
+    let text = stderr(&refused);
     assert!(
-        error.contains("one organization") && error.contains("--profile"),
-        "{error}"
+        text.contains("silicon_not_reachable") && text.contains("commit silicons allow"),
+        "{text}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn list_filters_custodian_selectors_and_the_allow_list_reach_the_api() {
+    let home = Home::new();
+    let api = MockServer::start().await;
+    signed_in(&home, &api);
     Mock::given(method("GET"))
-        .and(path("/api/v1/projects"))
-        .and(header("authorization", "Bearer oat_explicit"))
-        .and(header("x-org-id", "bricks"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items":[]})))
+        .and(path("/api/v1/todos"))
+        .and(query_param("view", "delegated_by_me"))
+        .and(query_param("assigned_to", "si:builder"))
+        .and(query_param("limit", "10"))
+        .and(query_param("cursor", "next"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"items":[],"next_cursor":null})),
+        )
         .expect(1)
-        .mount(&server)
+        .mount(&api)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/notification-settings"))
+        .and(query_param("silicon", "si:scout"))
+        .and(header("if-match", "\"2\""))
+        .and(body_json(json!({"webhook_url":"https://hooks.example/commit","todo_list_subscription":{"scope":"status_updates"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"version":3})))
+        .expect(1)
+        .mount(&api)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/silicons/si:scout/allowed-accounts/c:alice"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"silicon":{"id":"si:scout"},"allowed":[{"id":"c:alice"}]})),
+        )
+        .expect(1)
+        .mount(&api)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/me"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"uuid":"zQo","id":"c:ada","silicons":[{"id":"si:scout"}]})),
+        )
+        .expect(1)
+        .mount(&api)
         .await;
     json_output(
         home.command()
             .args([
-                "--token",
-                "oat_explicit",
-                "--org-id",
-                "bricks",
-                "projects",
+                "todos",
                 "list",
+                "--view",
+                "delegated_by_me",
+                "--assigned-to",
+                "si:builder",
+                "--limit",
+                "10",
+                "--cursor",
+                "next",
             ])
             .output()
             .unwrap(),
     );
-    assert_eq!(fs::read_to_string(session).unwrap(), saved);
+    let settings = json_output(
+        home.command()
+            .args(["--if-match", "2", "notifications", "--silicon", "si:scout", "--data",
+                   "{\"webhook_url\":\"https://hooks.example/commit\",\"todo_list_subscription\":{\"scope\":\"status_updates\"}}"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(settings["version"], 3);
+    assert_eq!(
+        json_output(
+            home.command()
+                .args(["silicons", "allow", "si:scout", "c:alice"])
+                .output()
+                .unwrap()
+        )["allowed"][0]["id"],
+        "c:alice"
+    );
+    assert_eq!(
+        json_output(home.command().arg("me").output().unwrap())["silicons"][0]["id"],
+        "si:scout"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn failed_report_is_saved_locally_without_hiding_provider_error() {
+async fn carbons_without_a_shared_email_are_told_how_to_share_one() {
     let home = Home::new();
-    let server = MockServer::start().await;
+    let api = MockServer::start().await;
+    signed_in(&home, &api);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/email-settings"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"email":"","enabled":true,"saved":false,"shared_email":null}),
+            ),
+        )
+        .mount(&api)
+        .await;
+    let output = home.command().arg("email").output().unwrap();
+    assert!(
+        stderr(&output).contains("commit login --scope email"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(json_output(output)["saved"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_report_is_saved_locally_and_the_failure_is_kept() {
+    let home = Home::new();
+    let api = MockServer::start().await;
+    signed_in(&home, &api);
     Mock::given(method("POST"))
         .and(path("/api/v1/reports"))
-        .respond_with(
-            ResponseTemplate::new(502)
-                .set_body_json(json!({"error":{"code":"invalid_provider_response"}})),
-        )
+        .and(body_json(
+            json!({"message":"Todos cannot be read.","pr":null}),
+        ))
+        .respond_with(ResponseTemplate::new(502).set_body_json(
+            json!({"error":{"code":"invalid_provider_response","message":"Postmark refused."}}),
+        ))
         .expect(1)
-        .mount(&server)
+        .mount(&api)
         .await;
     let output = home
         .command()
-        .args([
-            "--api-url",
-            &server.uri(),
-            "--token",
-            "oat_saved",
-            "--org-id",
-            "bricks",
-            "report",
-            "Todos cannot be read.",
-        ])
+        .args(["report", "Todos cannot be read."])
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
     assert!(
-        error.contains("Saved locally:") && error.contains("invalid_provider_response"),
-        "{error}"
+        text.contains("Saved locally:") && text.contains("invalid_provider_response"),
+        "{text}"
     );
-    let reports = fs::read_dir(home.0.join(".commit"))
+    let reports: Vec<_> = fs::read_dir(home.state())
         .unwrap()
-        .map(|p| p.unwrap().path())
+        .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|e| e == "md"))
-        .collect::<Vec<_>>();
+        .collect();
     assert_eq!(reports.len(), 1);
     assert!(
         fs::read_to_string(&reports[0])
@@ -133,1172 +321,75 @@ async fn failed_report_is_saved_locally_without_hiding_provider_error() {
     );
 }
 
-struct Home(PathBuf);
-
 #[test]
-fn offline_report_does_not_require_valid_api_or_session_configuration() {
+fn a_report_draft_needs_no_api_or_session() {
     let home = Home::new();
-    fs::create_dir_all(home.0.join(".commit")).unwrap();
-    fs::write(home.0.join(".commit/session.json"), "invalid session").unwrap();
+    fs::create_dir_all(home.state()).unwrap();
+    fs::write(home.session_path(None), "invalid session").unwrap();
     let output = home
         .command()
         .env("COMMIT_API_URL", "invalid-url")
         .args(["report", "Offline report recovery", "--save-only"])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let reports = fs::read_dir(home.0.join(".commit"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
-        .collect::<Vec<_>>();
-    assert_eq!(reports.len(), 1);
-    assert!(
-        fs::read_to_string(&reports[0])
-            .unwrap()
-            .contains("Offline report recovery")
-    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Saved bug report"));
     assert_eq!(
-        fs::read_to_string(home.0.join(".commit/session.json")).unwrap(),
+        fs::read_to_string(home.session_path(None)).unwrap(),
         "invalid session"
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn login_status_distinguishes_expired_sessions_from_refresh_permission_errors() {
-    for (status, code) in [(401, "unauthenticated"), (403, "forbidden")] {
-        let home = Home::new();
-        let server = MockServer::start().await;
-        let session = home.0.join(".commit/session.json");
-        fs::create_dir_all(session.parent().unwrap()).unwrap();
-        let saved = json!({"access_token":"oat_old", "refresh_token":"ort_old",
-            "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "expires_at":1})
-        .to_string();
-        fs::write(&session, &saved).unwrap();
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/refresh"))
-            .respond_with(
-                ResponseTemplate::new(status).set_body_json(json!({"error":{"code":code}})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let output = home
-            .command()
-            .args(["login", "status", "--json"])
-            .output()
-            .unwrap();
-        if status == 401 {
-            assert_eq!(json_output(output)["authenticated"], false);
-        } else {
-            assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains(code));
-        }
-        let retained: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
-        assert_eq!(retained["access_token"], "oat_old");
-        assert_eq!(retained["refresh_token"], "ort_old");
-        assert!(retained["refresh_started_at"].is_u64());
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn login_to_another_server_does_not_send_the_old_session() {
-    let home = Home::new();
-    let original = MockServer::start().await;
-    let destination = MockServer::start().await;
-    fs::create_dir_all(home.0.join(".commit")).unwrap();
-    fs::write(
-        home.0.join(".commit/session.json"),
-        json!({"access_token":"oat_original",
-        "refresh_token":"ort_original","api_url":original.uri(),"org_id":"old-org"})
-        .to_string(),
-    )
-    .unwrap();
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/login"))
-        .and(body_json(json!({"slt":"oac_destination"})))
-        .and(|r: &wiremock::Request| {
-            !r.headers.contains_key("authorization") && !r.headers.contains_key("x-org-id")
-        })
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new",
-            "refresh_token":"ort_new","expires_in":1800,"token_type":"Bearer","scope":"",
-            "actor":{"type":"carbon","public_id":"c:person"},"org_id":"tos"})),
-        )
-        .expect(1)
-        .mount(&destination)
-        .await;
-    assert_eq!(
-        json_output(
-            home.command()
-                .args(["--api-url", &destination.uri(), "login", "oac_destination"])
-                .output()
-                .unwrap()
-        )["authenticated"],
-        true
-    );
-    assert!(original.received_requests().await.unwrap().is_empty());
-}
-impl Home {
-    fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "commit-cli-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-    fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_commit"));
-        for name in [
-            "COMMIT_API_URL",
-            "COMMIT_ACCESS_TOKEN",
-            "COMMIT_ORG_ID",
-            "COMMIT_TEST_KEY",
-            "COMMIT_PROFILE",
-            "SILICON_HOME",
-        ] {
-            command.env_remove(name);
-        }
-        command.env("HOME", &self.0).arg("--no-update");
-        command
-    }
-}
-impl Drop for Home {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-fn json_output(output: Output) -> Value {
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
+    let bad_link = home
+        .command()
+        .args([
+            "report",
+            "x",
+            "--pr",
+            "https://example.com/pr",
+            "--save-only",
+        ])
+        .output()
+        .unwrap();
+    assert!(stderr(&bad_link).contains("teamofsilicons/silicon-commit"));
 }
 
 #[test]
-fn help_and_login_grammar_work_without_network_or_state() {
+fn silicon_home_and_config_home_choose_where_state_lives() {
     let home = Home::new();
-    for args in [
-        vec!["--help"],
-        vec!["-h"],
-        vec!["login", "--help"],
-        vec!["login", "status", "--help"],
-        vec!["logout", "--help"],
-        vec!["iam", "--help"],
-    ] {
-        let output = home.command().args(args).output().unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
-    }
-    assert!(
-        !home
-            .command()
-            .arg("login")
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert!(
-        !home
-            .command()
-            .args(["login", "status", "--no-save"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert_eq!(
-        json_output(
-            home.command()
-                .args(["login", "status", "--json"])
-                .output()
-                .unwrap()
-        )["authenticated"],
-        false
-    );
-    assert!(!home.0.join(".commit").exists());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn logout_revokes_the_saved_session_before_removing_only_its_credentials() {
-    for (status, test_key) in [
-        (204, None),
-        (503, None),
-        (204, Some("abcdefghijklmnopqrstuvwxyz123456")),
-    ] {
-        let home = Home::new();
-        let silicon = Home::new();
-        let configured = Home::new();
-        let server = MockServer::start().await;
-        let other_server = MockServer::start().await;
-        let mut command = home.command();
-        command
-            .env("SILICON_HOME", &silicon.0)
-            .args(["config", "home"])
-            .arg(&configured.0);
-        assert!(command.output().unwrap().status.success());
-        let pointer = silicon.0.join(".commit/home_dir");
-        let original_pointer = fs::read(&pointer).unwrap();
-        let state = configured.0.join(".commit");
-        fs::create_dir_all(&state).unwrap();
-        fs::write(state.join("test-key"), b"unrelated configuration").unwrap();
-        let session = state.join(test_key.map_or_else(
-            || "session.json".to_owned(),
-            |key| {
-                use sha2::{Digest, Sha256};
-                format!("test-{:x}.json", Sha256::digest(key.as_bytes()))
-            },
-        ));
-        let saved = serde_json::to_vec(&json!({
-            "access_token": "oat_saved", "refresh_token": "ort_saved",
-            "api_url": server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id": "tos", "test_key":test_key
-        }))
-        .unwrap();
-        fs::write(&session, &saved).unwrap();
-        let run = |api: &str| {
-            let mut command = home.command();
-            command
-                .env("SILICON_HOME", &silicon.0)
-                .env("COMMIT_API_URL", api)
-                .env("COMMIT_ACCESS_TOKEN", "oat_unrelated")
-                .env("COMMIT_ORG_ID", "tos")
-                .args(["logout", "--json"]);
-            if let Some(key) = test_key {
-                command.env("COMMIT_TEST_KEY", key);
-            }
-            command.output().unwrap()
-        };
-        assert!(!run(&other_server.uri()).status.success());
-        assert_eq!(fs::read(&session).unwrap(), saved);
-        assert!(other_server.received_requests().await.unwrap().is_empty());
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/logout"))
-            .and(body_json(json!({"token":"ort_saved"})))
-            .and(move |r: &wiremock::Request| {
-                !r.headers.contains_key("authorization")
-                    && !r.headers.contains_key("x-org-id")
-                    && r.headers.contains_key("idempotency-key")
-                    && r.headers
-                        .get("x-testing-environment-key")
-                        .and_then(|v| v.to_str().ok())
-                        == test_key
-            })
-            .respond_with(ResponseTemplate::new(status))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let output = run(&format!("{}/api/v1/", server.uri()));
-        if status == 204 {
-            assert_eq!(json_output(output)["removed"], true);
-            assert!(!session.exists());
-            // An absent session succeeds without validating or contacting any API.
-            assert_eq!(json_output(run("invalid URL"))["removed"], true);
-        } else {
-            assert!(!output.status.success());
-            assert_eq!(fs::read(&session).unwrap(), saved);
-        }
-        assert_eq!(fs::read(&pointer).unwrap(), original_pointer);
-        assert_eq!(
-            fs::read(state.join("test-key")).unwrap(),
-            b"unrelated configuration"
-        );
-        assert!(!home.0.join(".commit").exists());
-        assert!(!silicon.0.join(".commit/session.json").exists());
-        fs::write(&session, b"invalid session").unwrap();
-        assert!(!run(&server.uri()).status.success());
-        assert_eq!(fs::read(&session).unwrap(), b"invalid session");
-        fs::write(silicon.0.join(".commit/session.json"), &saved).unwrap();
-        fs::write(&pointer, b"").unwrap();
-        assert!(!run(&server.uri()).status.success());
-        assert_eq!(
-            fs::read(silicon.0.join(".commit/session.json")).unwrap(),
-            saved
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn silicon_home_persists_login_and_explicit_configuration_overrides_it() {
-    let home = Home::new();
-    let silicon = Home::new();
-    let configured = Home::new();
-    let server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/api/v1/auth/login"))
-        .and(body_json(json!({"slt":"slt_once"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "access_token":"oat_secret", "refresh_token":"ort_secret", "token_type":"Bearer",
-            "expires_in":3600, "scope":"profile.read", "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"
-        }))).expect(3).mount(&server).await;
-    let login = || {
-        let mut command = home.command();
-        command.env("SILICON_HOME", &silicon.0).args([
-            "--api-url",
-            &server.uri(),
-            "login",
-            "slt_once",
-        ]);
-        command
-    };
-    json_output(login().output().unwrap());
-    assert!(silicon.0.join(".commit/session.json").exists());
-    assert!(!home.0.join(".commit").exists());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(silicon.0.join(".commit/session.json"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-    }
-    let output = home
-        .command()
-        .env("SILICON_HOME", &silicon.0)
-        .args(["config", "home"])
-        .arg(&configured.0)
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    json_output(login().output().unwrap());
-    assert!(configured.0.join(".commit/session.json").exists());
-    assert!(silicon.0.join(".commit/home_dir").exists());
-    json_output(
+    let silicon = home.0.join("silicon-home");
+    let chosen = home.0.join("chosen");
+    fs::create_dir_all(&silicon).unwrap();
+    fs::create_dir_all(&chosen).unwrap();
+    let with_silicon = |args: &[&str]| {
         home.command()
-            .args(["--api-url", &server.uri(), "login", "slt_once"])
-            .output()
-            .unwrap(),
-    );
-    assert!(home.0.join(".commit/session.json").exists());
-    assert!(
-        !home
-            .command()
-            .args(["config", "home"])
-            .arg(home.0.join("missing"))
+            .env("SILICON_HOME", &silicon)
+            .args(args)
             .output()
             .unwrap()
-            .status
-            .success()
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn discovery_and_status_are_clean_json_and_use_current_credentials() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/iam"))
-        .and(|r: &wiremock::Request| {
-            !r.headers.contains_key("authorization")
-                && !r.headers.contains_key("x-testing-environment-key")
-                && !r.headers.contains_key("x-org-id")
-        })
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"app_id":"commit","iam_url":"https://iam.example/api/v1/"})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer oat_current"))
-        .and(header("x-org-id", "tos"))
-        .and(header(
-            "x-testing-environment-key",
-            "abcdefghijklmnopqrstuvwxyz123456",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"authenticated":true,"actor":{"type":"silicon","id":"agent"},"org_id":"tos"}),
-        ))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let run = |args: &[&str]| {
-        json_output(
-            home.command()
-                .env("COMMIT_API_URL", server.uri())
-                .env("COMMIT_ACCESS_TOKEN", "oat_current")
-                .env("COMMIT_ORG_ID", "tos")
-                .env("COMMIT_TEST_KEY", "abcdefghijklmnopqrstuvwxyz123456")
-                .args(args)
-                .output()
-                .unwrap(),
-        )
     };
-    assert_eq!(run(&["iam", "--json"])["app_id"], "commit");
-    let status = run(&["login", "status", "--json"]);
-    assert_eq!(status["authenticated"], true);
-    assert_eq!(status["actor"]["type"], "silicon");
-    assert!(!status.to_string().contains("oat_current"));
-}
-
-#[test]
-fn todo_help_explains_assignment_without_exposing_environment_credentials() {
-    let home = Home::new();
-    for args in [vec!["--help"], vec!["todos", "create", "--help"]] {
-        let output = home
-            .command()
-            .env("COMMIT_ACCESS_TOKEN", "oat_private_help_token")
-            .env("COMMIT_TEST_KEY", "abcdefghijklmnopqrstuvwxyz123456")
-            .args(&args)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let help = String::from_utf8(output.stdout).unwrap();
-        assert!(!help.contains("oat_private_help_token"));
-        assert!(!help.contains("abcdefghijklmnopqrstuvwxyz123456"));
-        if args.len() > 1 {
-            assert!(help.contains("assigned_to"));
-            assert!(help.contains("assistant:example-org"));
-            assert!(help.contains("alex"));
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn invalid_todo_assignments_explain_the_fix_without_sending_a_request() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    for (payload, expected) in [
-        (
-            json!({"title":"Eat","assignee_id":"head-of-sales:final-test"}),
-            "use assigned_to",
-        ),
-        (
-            json!({"title":"Eat","assignee":{"id":"head-of-sales:final-test","type":"silicon"}}),
-            "use assigned_to",
-        ),
-        (
-            json!({"title":"Eat","assigned_to":"saket","assignee_id":"saket"}),
-            "use assigned_to",
-        ),
-        (
-            json!({"title":"Eat"}),
-            "assigned_to is required and must be a string",
-        ),
-        (
-            json!({"title":"Eat","assigned_to":{"id":"saket"}}),
-            "assigned_to is required and must be a string",
-        ),
-        (
-            json!({"assigned_to":"saket"}),
-            "title is required and must be a string",
-        ),
-        (json!([]), "requires a JSON object"),
-    ] {
-        // Exercise both inline JSON and @FILE, the two supported input paths.
-        let file = home.0.join("todo.json");
-        fs::write(&file, payload.to_string()).unwrap();
-        for data in [payload.to_string(), format!("@{}", file.display())] {
-            let output = home
-                .command()
-                .args([
-                    "--api-url",
-                    &server.uri(),
-                    "todos",
-                    "create",
-                    "--data",
-                    &data,
-                ])
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            assert!(output.stdout.is_empty());
-            let error = String::from_utf8(output.stderr).unwrap();
-            assert!(error.contains(expected), "{error}");
-        }
-    }
-    assert!(server.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn todo_creation_preserves_payload_and_server_validation_correlation() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    for (actor, status) in [("saket", 201), ("head-of-sales:final-test", 422)] {
-        let payload = json!({"title":"Eat","assigned_to":actor,
-            "description":null,"status":"yet_to_do","attachments":[]});
-        let mut response = ResponseTemplate::new(status);
-        if status == 201 {
-            response = response.set_body_json(json!({"id":"created-todo","assigned_to":actor}));
-        } else {
-            response = response
-                .insert_header("x-request-id", "todo-validation-request")
-                .set_body_json(
-                    json!({"error":{"code":"validation_failed","details":"private-body-value"}}),
-                );
-        }
-        Mock::given(method("POST"))
-            .and(path("/api/v1/todos"))
-            .and(body_json(&payload))
-            .and(header("authorization", "Bearer oat_test"))
-            .respond_with(response)
-            .expect(1)
-            .mount(&server)
-            .await;
-        let output = home
-            .command()
-            .args([
-                "--api-url",
-                &server.uri(),
-                "--token",
-                "oat_test",
-                "--org-id",
-                "final-test",
-                "todos",
-                "create",
-                "--data",
-                &payload.to_string(),
-            ])
-            .output()
-            .unwrap();
-        if status == 201 {
-            assert_eq!(json_output(output)["id"], "created-todo");
-        } else {
-            assert!(!output.status.success());
-            assert!(output.stdout.is_empty());
-            let error = String::from_utf8(output.stderr).unwrap();
-            for part in [
-                "422",
-                "validation_failed",
-                "todo-validation-request",
-                "commit todos create --help",
-            ] {
-                assert!(error.contains(part), "{error}");
-            }
-            assert!(!error.contains("private-body-value"));
-            assert!(!error.contains("oat_test"));
-        }
-    }
-}
-
-#[test]
-fn legacy_updater_cannot_replace_a_honeycomb_install() {
-    let home = Home::new();
-    for args in [
-        vec!["daemon", "install"],
-        vec!["daemon", "run", "--once"],
-        vec!["config", "updates", "on"],
-    ] {
-        let output = home.command().args(args).output().unwrap();
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Honeycomb"));
-    }
-    let status = json_output(home.command().args(["daemon", "status"]).output().unwrap());
-    assert_eq!(status["auto_update"], false);
-    assert_eq!(status["update_manager"], "honeycomb");
-    assert!(!home.0.join(".commit").exists());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_lifecycle_errors_explain_honeycomb_recovery() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/test-environments/env/clean"))
-        .respond_with(
-            ResponseTemplate::new(409)
-                .set_body_json(json!({"error":{"code":"honeycomb_manages_testing_lifecycle"}})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let output = home
-        .command()
-        .args([
-            "--api-url",
-            &server.uri(),
-            "test-environments",
-            "clean",
-            "env",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("Manage this environment in Honeycomb"));
-    assert!(error.contains("commit testing use"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn expired_scoped_sessions_refresh_once_across_concurrent_commands() {
-    for test_key in [None, Some("abcdefghijklmnopqrstuvwxyz123456")] {
-        let home = Home::new();
-        let server = MockServer::start().await;
-        let state = home.0.join(".commit");
-        fs::create_dir_all(&state).unwrap();
-        let session = state.join(test_key.map_or_else(
-            || "session.json".to_owned(),
-            |key| {
-                use sha2::{Digest as _, Sha256};
-                format!("test-{:x}.json", Sha256::digest(key.as_bytes()))
-            },
-        ));
-        // Missing expiry on a scoped IAM 5 family requires one serialized rotation.
-        fs::write(
-            &session,
-            serde_json::to_vec(&json!({
-                "access_token":"oat_expired", "refresh_token":"ort_saved",
-                "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "test_key":test_key
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
-            .and(body_json(json!({"refresh_token":"ort_saved"})))
-            .and(move |r: &wiremock::Request| {
-                !r.headers.contains_key("authorization") && r.headers.contains_key("idempotency-key")
-                    && r.headers.get("x-testing-environment-key").and_then(|v| v.to_str().ok()) == test_key
-            })
-            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(100))
-                .set_body_json(json!({"access_token":"oat_new", "refresh_token":"ort_new", "expires_in":1800,
-                    "token_type":"Bearer", "scope":"self.identity.read", "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"})))
-            .expect(1).mount(&server).await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/auth/status"))
-            .and(header("authorization", "Bearer oat_new"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true})))
-            .expect(2)
-            .mount(&server)
-            .await;
-        let mut commands = Vec::new();
-        for _ in 0..2 {
-            let mut command = home.command();
-            command.args(["login", "status", "--json"]);
-            if let Some(key) = test_key {
-                command.env("COMMIT_TEST_KEY", key);
-            }
-            commands.push(tokio::task::spawn_blocking(move || {
-                command.output().unwrap()
-            }));
-        }
-        for command in commands {
-            assert_eq!(json_output(command.await.unwrap())["authenticated"], true);
-        }
-        let saved: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
-        assert_eq!(saved["refresh_token"], "ort_new");
-        assert!(
-            saved["expires_at"].as_u64().unwrap()
-                > std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-        );
-        if test_key.is_some() {
-            assert!(!state.join("session.json").exists());
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn uncertain_refresh_retains_credentials_and_reuses_key_without_sending_to_another_api() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let other = MockServer::start().await;
-    let session = home.0.join(".commit/session.json");
-    fs::create_dir_all(session.parent().unwrap()).unwrap();
-    let saved = serde_json::to_vec(&json!({"access_token":"oat_old", "refresh_token":"ort_old", "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "expires_at":1})).unwrap();
-    fs::write(&session, &saved).unwrap();
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/refresh"))
-        .respond_with(
-            ResponseTemplate::new(503)
-                .set_body_json(json!({"error":{"code":"upstream_unavailable"}})),
-        )
-        .expect(2)
-        .mount(&server)
-        .await;
-    for _ in 0..2 {
-        let result = home
-            .command()
-            .args(["login", "status", "--json"])
-            .output()
-            .unwrap();
-        assert!(!result.status.success());
-        let retained: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
-        assert_eq!(retained["access_token"], "oat_old");
-        assert_eq!(retained["refresh_token"], "ort_old");
-        assert!(retained["refresh_started_at"].is_u64());
-    }
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(
-        requests[0].headers["idempotency-key"],
-        requests[1].headers["idempotency-key"]
-    );
     assert!(
-        !home
-            .command()
-            .args(["--api-url", &other.uri(), "login", "status", "--json"])
-            .output()
-            .unwrap()
+        with_silicon(&["config", "telemetry", "off"])
             .status
             .success()
     );
-    assert!(other.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn delayed_refresh_replay_rotates_the_recovered_token_before_using_it() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let session = home.0.join(".commit/session.json");
-    fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(
-        &session,
-        json!({"access_token":"oat_old", "refresh_token":"ort_old",
-        "api_url":server.uri(), "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos", "expires_at":1, "refresh_started_at":1})
-        .to_string(),
-    )
-    .unwrap();
-    for (old, new) in [("old", "replayed"), ("replayed", "fresh")] {
-        Mock::given(method("POST"))
-            .and(path("/api/v1/auth/refresh"))
-            .and(body_json(json!({"refresh_token":format!("ort_{old}")})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token":format!("oat_{new}"), "refresh_token":format!("ort_{new}"),
-                "expires_in":1800, "token_type":"Bearer", "scope":"",
-                "actor":{"type":"carbon","public_id":"c:person"}, "org_id":"tos"})))
-            .expect(1)
-            .mount(&server)
-            .await;
-    }
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer oat_fresh"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":true})))
-        .expect(1)
-        .mount(&server)
-        .await;
     assert_eq!(
-        json_output(
-            home.command()
-                .args(["login", "status", "--json"])
-                .output()
-                .unwrap()
-        )["authenticated"],
-        true
+        fs::read_to_string(silicon.join(".commit/telemetry")).unwrap(),
+        "off"
     );
-    let saved: Value = serde_json::from_slice(&fs::read(session).unwrap()).unwrap();
-    assert_eq!(saved["refresh_token"], "ort_fresh");
-    assert!(saved["refresh_started_at"].is_null());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn early_access_rejection_refreshes_and_replays_identical_mutation() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let session = home.0.join(".commit/session.json");
-    fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(
-        &session,
-        json!({"access_token":"oat_old","refresh_token":"ort_old",
-        "api_url":server.uri(),"actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks","expires_at":4102444800_u64})
-        .to_string(),
-    )
-    .unwrap();
-    let payload = json!({"title":"original","assigned_to":"chef:bricks"});
-    let input = home.0.join("todo.json");
-    fs::write(&input, payload.to_string()).unwrap();
-    let changed_input = input.clone();
-    Mock::given(method("POST"))
-        .and(path("/api/v1/todos"))
-        .and(header("authorization", "Bearer oat_old"))
-        .respond_with(move |_: &wiremock::Request| {
-            fs::write(
-                &changed_input,
-                json!({"title":"changed","assigned_to":"chef:bricks"}).to_string(),
-            )
-            .unwrap();
-            ResponseTemplate::new(401).set_body_json(json!({"error":{"code":"unauthenticated"}}))
-        })
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
-        .and(body_json(json!({"refresh_token":"ort_old"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new","refresh_token":"ort_new",
-            "expires_in":1800,"token_type":"Bearer","scope":"","actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks"})))
-        .expect(1).mount(&server).await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/todos"))
-        .and(header("authorization", "Bearer oat_new"))
-        .and(header("x-org-id", "bricks"))
-        .and(body_json(payload))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"created"})))
-        .expect(1)
-        .mount(&server)
-        .await;
+    assert!(!home.state().exists(), "SILICON_HOME wins over HOME");
+    let output = with_silicon(&["config", "home", chosen.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(silicon.join(".commit/home_dir").exists());
+    let shown = json_output(with_silicon(&["config", "show"]));
     assert_eq!(
-        json_output(
-            home.command()
-                .args([
-                    "todos",
-                    "create",
-                    "--data",
-                    &format!("@{}", input.display())
-                ])
-                .output()
-                .unwrap()
-        )["id"],
-        "created"
-    );
-    let requests = server.received_requests().await.unwrap();
-    let writes = requests
-        .iter()
-        .filter(|r| r.url.path() == "/api/v1/todos")
-        .collect::<Vec<_>>();
-    assert_eq!(writes.len(), 2);
-    assert_eq!(writes[0].body, writes[1].body);
-    assert_eq!(
-        writes[0].headers.get("idempotency-key"),
-        writes[1].headers.get("idempotency-key")
-    );
-    assert!(writes[0].headers.contains_key("idempotency-key"));
-    let saved: Value = serde_json::from_slice(&fs::read(session).unwrap()).unwrap();
-    assert_eq!(saved["refresh_token"], "ort_new");
-    assert_eq!(saved["org_id"], "bricks");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn inactive_status_silently_renews_the_existing_family_once() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let session = home.0.join(".commit/session.json");
-    fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(&session,json!({"access_token":"oat_old","refresh_token":"ort_old","api_url":server.uri(),"actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks","expires_at":4102444800_u64}).to_string()).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer oat_old"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"authenticated":false})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST")).and(path("/api/v1/auth/refresh")).and(body_json(json!({"refresh_token":"ort_old"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"oat_new","refresh_token":"ort_new","expires_in":1800,
-            "token_type":"Bearer","scope":"","actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks"})))
-        .expect(1).mount(&server).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/status"))
-        .and(header("authorization", "Bearer oat_new"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"authenticated":true,"org_id":"bricks"})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    assert_eq!(
-        json_output(
-            home.command()
-                .args(["login", "status", "--json"])
-                .output()
-                .unwrap()
-        )["authenticated"],
-        true
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn forced_refresh_outages_retain_the_family_and_retry_receipt() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let session = home.0.join(".commit/session.json");
-    fs::create_dir_all(session.parent().unwrap()).unwrap();
-    fs::write(&session,json!({"access_token":"oat_old","refresh_token":"ort_old","api_url":server.uri(),"actor":{"type":"silicon","public_id":"si:chef"},"org_id":"bricks","expires_at":4102444800_u64}).to_string()).unwrap();
-    Mock::given(method("GET"))
-        .and(path("/api/v1/todos"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(json!({"error":{"code":"unauthenticated"}})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/refresh"))
-        .respond_with(
-            ResponseTemplate::new(503)
-                .set_body_json(json!({"error":{"code":"provider_unavailable"}})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let result = home.command().args(["todos", "list"]).output().unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("provider_unavailable"));
-    let saved: Value = serde_json::from_slice(&fs::read(session).unwrap()).unwrap();
-    assert_eq!(saved["access_token"], "oat_old");
-    assert_eq!(saved["refresh_token"], "ort_old");
-    assert!(saved["refresh_started_at"].is_u64());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn named_profiles_keep_accounts_and_sandboxes_independent() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let sandbox = "abcdefghijklmnopqrstuvwxyz123456";
-    for (profile, org, actor, test) in [
-        ("personal", "team-a", "c:person", None),
-        ("work", "team-b", "si:helper", None),
-        ("work", "team-b", "si:helper", Some(sandbox)),
-    ] {
-        let identity = json!({"type":if actor.starts_with("c:") {"carbon"} else {"silicon"},"public_id":actor});
-        let label = format!(
-            "{profile}-{}",
-            if test.is_some() {
-                "testing"
-            } else {
-                "production"
-            }
-        );
-        Mock::given(method("POST")).and(path("/api/v1/auth/login"))
-            .and(body_json(json!({"slt":label,"org_id":org})))
-            .and(move |r: &wiremock::Request| r.headers.get("x-testing-environment-key").and_then(|v| v.to_str().ok()) == test)
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":label,"refresh_token":format!("refresh-{label}"),
-                "token_type":"Bearer","expires_in":3600,"scope":"self.identity.read","actor":identity,"org_id":org})))
-            .expect(1).mount(&server).await;
-        let mut command = home.command();
-        command.args([
-            "--profile",
-            profile,
-            "--api-url",
-            &server.uri(),
-            "--org-id",
-            org,
-            "login",
-            &label,
-        ]);
-        if let Some(key) = test {
-            command.env("COMMIT_TEST_KEY", key);
-        }
-        assert_eq!(json_output(command.output().unwrap())["org_id"], org);
-        Mock::given(method("GET"))
-            .and(path("/api/v1/todos"))
-            .and(header("authorization", format!("Bearer {label}")))
-            .and(header("x-org-id", org))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"context":label})))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let mut read = home.command();
-        read.env("COMMIT_PROFILE", profile).args(["todos", "list"]);
-        if let Some(key) = test {
-            read.env("COMMIT_TEST_KEY", key);
-        }
-        assert_eq!(json_output(read.output().unwrap())["context"], label);
-    }
-    assert!(!home.0.join(".commit/session.json").exists());
-    for profile in ["personal", "work"] {
-        let stored: Value = serde_json::from_slice(
-            &fs::read(
-                home.0
-                    .join(format!(".commit/profiles/{profile}/session.json")),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(stored["actor"]["public_id"].is_string());
-    }
-    let invalid = home
-        .command()
-        .args(["--profile", "../work", "todos", "list"])
-        .output()
-        .unwrap();
-    assert!(!invalid.status.success());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn saved_profile_org_override_is_rejected_before_refresh_or_logout() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let path = home.0.join(".commit/session.json");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let saved = json!({"access_token":"access", "refresh_token":"refresh", "api_url":server.uri(),"expires_at":1,
-        "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}}).to_string();
-    fs::write(&path, &saved).unwrap();
-    for args in [
-        vec!["--org-id", "team-b", "todos", "list"],
-        vec!["--org-id", "team-b", "logout"],
-    ] {
-        let result = home.command().args(args).output().unwrap();
-        assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("--profile"));
-    }
-    assert_eq!(fs::read_to_string(path).unwrap(), saved);
-    assert!(server.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn refresh_cannot_change_saved_actor_or_organization() {
-    for (actor, org) in [
-        (json!({"type":"carbon","public_id":"c:another"}), "team-a"),
-        (json!({"type":"carbon","public_id":"c:person"}), "team-b"),
-        (json!({"type":"silicon","public_id":"si:person"}), "team-a"),
-    ] {
-        let home = Home::new();
-        let server = MockServer::start().await;
-        let session_file = home.0.join(".commit/session.json");
-        fs::create_dir_all(session_file.parent().unwrap()).unwrap();
-        fs::write(&session_file, json!({"access_token":"original-access", "refresh_token":"original-refresh", "api_url":server.uri(),"expires_at":1,
-            "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}}).to_string()).unwrap();
-        Mock::given(method("POST")).and(path("/api/v1/auth/refresh"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token":"changed-access", "refresh_token":"changed-refresh",
-                "token_type":"Bearer","expires_in":3600,"scope":"self.identity.read","actor":actor,"org_id":org})))
-            .expect(1).mount(&server).await;
-        assert!(
-            !home
-                .command()
-                .args(["todos", "list"])
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        let saved: Value = serde_json::from_slice(&fs::read(session_file).unwrap()).unwrap();
-        assert_eq!(saved["access_token"], "original-access");
-        assert_eq!(saved["refresh_token"], "original-refresh");
-        assert_eq!(saved["org_id"], "team-a");
-        assert_eq!(saved["actor"]["public_id"], "c:person");
-        assert!(saved["refresh_started_at"].is_u64());
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_replaced_profile_cannot_receive_a_pending_commands_retry() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let session = home.0.join(".commit/session.json");
-    fs::create_dir_all(session.parent().unwrap()).unwrap();
-    let mut saved = json!({"access_token":"original-access", "refresh_token":"original-refresh", "api_url":server.uri(),"expires_at":4102444800_u64,
-        "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}});
-    fs::write(&session, saved.to_string()).unwrap();
-    saved["access_token"] = json!("replacement-access");
-    saved["refresh_token"] = json!("replacement-refresh");
-    saved["actor"]["public_id"] = json!("c:another");
-    let changed_path = session.clone();
-    let replacement = saved.to_string();
-    Mock::given(method("POST"))
-        .and(path("/api/v1/todos"))
-        .and(header("authorization", "Bearer original-access"))
-        .respond_with(move |_: &wiremock::Request| {
-            fs::write(&changed_path, &replacement).unwrap();
-            ResponseTemplate::new(401).set_body_json(json!({"error":{"code":"unauthenticated"}}))
-        })
-        .expect(1)
-        .mount(&server)
-        .await;
-    let output = home
-        .command()
-        .args([
-            "todos",
-            "create",
-            "--data",
-            "{\"title\":\"Original account\",\"assigned_to\":\"c:person\"}",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("profile changed"));
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&fs::read(session).unwrap()).unwrap(),
-        saved
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn profile_testing_selection_and_logout_leave_other_profiles_untouched() {
-    let home = Home::new();
-    let server = MockServer::start().await;
-    let key = format!("ask_{}", "a".repeat(43));
-    Mock::given(method("GET"))
-        .and(path("/api/v1/testing-context"))
-        .and(header("x-testing-environment-key", &key))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"name":"Sandbox"})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let output = home
-        .command()
-        .args([
-            "--profile",
-            "work",
-            "--api-url",
-            &server.uri(),
-            "testing",
-            "use",
-            &key,
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        shown["state_dir"],
+        json!(fs::canonicalize(&chosen).unwrap().join(".commit"))
     );
     assert_eq!(
-        json_output(
-            home.command()
-                .args(["--profile", "personal", "testing", "status"])
-                .output()
-                .unwrap()
-        ),
-        json!({"testing":false})
+        shown["telemetry"], "on",
+        "telemetry lives in the chosen home now"
     );
-    assert_eq!(
-        fs::read_to_string(home.0.join(".commit/profiles/work/testing-selection")).unwrap(),
-        key
-    );
-    assert!(
-        home.command()
-            .args(["--profile", "work", "testing", "exit"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    for profile in ["work", "personal"] {
-        let session = home
-            .0
-            .join(format!(".commit/profiles/{profile}/session.json"));
-        fs::create_dir_all(session.parent().unwrap()).unwrap();
-        fs::write(session, json!({"access_token":format!("access-{profile}"), "refresh_token":format!("refresh-{profile}"), "api_url":server.uri(),"expires_at":4102444800_u64,
-            "org_id":"team-a","actor":{"type":"carbon","public_id":"c:person"}}).to_string()).unwrap();
-    }
-    let personal = fs::read(home.0.join(".commit/profiles/personal/session.json")).unwrap();
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/logout"))
-        .and(body_json(json!({"token":"refresh-work"})))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&server)
-        .await;
-    assert_eq!(
-        json_output(
-            home.command()
-                .args(["--profile", "work", "logout"])
-                .output()
-                .unwrap()
-        )["removed"],
-        true
-    );
-    assert!(!home.0.join(".commit/profiles/work/session.json").exists());
-    assert_eq!(
-        fs::read(home.0.join(".commit/profiles/personal/session.json")).unwrap(),
-        personal
-    );
+    assert_eq!(shown["signed_in"], false);
+    let missing = with_silicon(&["config", "home", home.0.join("missing").to_str().unwrap()]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(stderr(&missing).contains("not a directory"));
 }

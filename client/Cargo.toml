@@ -1,21 +1,27 @@
 [package]
 name = "silicon-commit-client"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
-description = "Stateless Rust client for Silicon Commit"
+rust-version = "1.98"
+description = "Stateless Rust client for Silicon Commit: the HTTP API and Silicon Accounts sign-in for Commit's own tools"
 license = "MIT"
 repository = "https://github.com/teamofsilicons/silicon-commit"
 readme = "README.md"
+keywords = ["silicon", "commit", "todos", "projects", "accounts"]
+categories = ["api-bindings"]
 
 [dependencies]
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls"] }
+base64 = "0.22.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "query", "rustls"] }
+secrecy = "0.10.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+silicon-accounts-client = "0.4.0"
 thiserror = "2.0.17"
+tokio = { version = "1.53.1", features = ["time"] }
 url = "2.5.7"
 uuid = { version = "1.26.0", features = ["v4"] }
-secrecy = "0.10.3"
 
 [dev-dependencies]
-wiremock = "0.6.5"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.5"
