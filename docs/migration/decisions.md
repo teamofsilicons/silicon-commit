@@ -151,3 +151,115 @@ left to the packaging stage.
 
 - Stored delivery failure codes are spelled `webwebhook_unavailable` etc. (since before the migration). They are
   persisted values, so they are not renamed here.
+
+## Client crate and CLI (stage 2)
+
+**A-21 The CLI uses only the Rust package.** `silicon-commit-client` 0.5.0 gained an `auth` module
+(`AccountsAuth`) that signs Commit's own tools in at Silicon Accounts as a public client (`client_id=commit`, no
+secret), so the CLI keeps depending on nothing but the client crate (UNDERSTANDING: "CLI is built using the Rust
+Package only"). It wraps `silicon-accounts-client` 0.4.0 for the device flow (`app_device_authorize` /
+`app_device_poll`) and public refresh (`refresh_app_public_client`). Two calls are direct HTTP with the same error
+mapping: the short-lived token exchange (the published 0.4.0 has no `exchange_slt_public_client`; it exists only in
+the unreleased Accounts repository) and revocation (0.4.0's public revoke helper accepts only first-party client
+ids, as the brief notes). Replace both with the crate's helpers when a release has them.
+
+**A-22 Errors keep the API envelope, including details.** `Error::Api` carries `code`, `message`, `hint`,
+`details`, `request_id` and `Retry-After`; the CLI prints all of them. The IAM-era client withheld `details`; the
+service marks them safe to show and an agent needs them to fix a request. Bodies that are not Commit's envelope
+(proxy pages) are never echoed, and `details` over 4 KiB are dropped. Silicon Accounts refusals keep their code and
+description; `SignInRefusal` classifies `invalid_grant` descriptions (already used, expired, wrong app, unknown,
+malformed, sign-in ended, account inactive) because the service gives no machine-readable reason.
+
+**A-23 Plain http only for this machine.** Both the API client and `AccountsAuth` refuse `http://` except for
+`localhost`, `*.localhost`, `127.0.0.0/8` and `::1`. There is no override flag: production is https, and the local
+Accounts stack is on loopback.
+
+**A-24 Session file, version 2.** `<state>/session.json` (or `profiles/<name>/session.json`), mode 0600 in a 0700
+directory, written atomically: tokens, `expires_at`, `refresh_expires_at`, scope, the account (`uuid`, `id`, `kind`,
+display name, shared email, custodian), the Accounts and API URLs, how it was made (`device`/`slt`), and markers for
+an in-flight refresh and an ended sign-in. IAM-era files (no `version`, with `org_id`/`actor`/tokens) are reported as
+`legacy_session`, anything else unknown as `unreadable_session`; neither is ever rewritten by status or commands
+(serde's messages are never shown because they can quote file contents); `commit logout` deletes them and signing in
+replaces them. Leftover `test-*.json`, `testing-selection` and `auto-update` files are ignored.
+
+**A-25 Refresh once, under a lock.** Commands refresh when less than 60 s are left: take `session.lock`, read the
+file again (another command may have rotated already), mark `refresh_started_at`, refresh, save the new pair, then
+use it. An uncertain refresh is never retried automatically (public-client refresh is not idempotent and a used
+refresh token ends the sign-in); the session is kept and the next command tries again, and if that ends in
+`invalid_grant` the error explains the lost answer. `invalid_grant` marks the session ended, so later commands say
+`session_ended` without contacting Silicon Accounts again.
+
+**A-26 Replay after 401.** A request the API refuses with 401 is repeated once after a forced refresh (unless another
+command already replaced the token), with the same idempotency key and the same body (`--data @FILE` is read once).
+If the profile signed in as another account meanwhile, nothing is replayed (`profile_changed`).
+
+**A-27 `commit login status`.** Default: refresh if needed, then ask the API (`GET /api/v1/me`) to confirm
+(`verified: true`) and remember the id, name and custodian it reports. If the API cannot be reached the saved session
+is reported with `verified: false` and a `warning`; only a refused token or an ended sign-in turns it into
+`authenticated: false` (with `reason`). `--offline` reads the file only. `--json` always exits 0; text exits 1 when
+signed out. The app decision "offline from the saved session (refresh first)" is read as: the answer comes from the
+saved session after a refresh, not from a backend status route as before; the `/me` check only sets `verified`.
+Extra keys: `profile`, `api_url`, `accounts_url`, `custodian` (Silicons), `reason`/`message` (signed out), `source:
+"token"` with `--token`.
+
+**A-28 `commit login` (Carbons).** Device flow with `client_id=commit`, label `Commit CLI on <os>`. The link and code
+go to stderr (JSON lines with `--json`: `device_code`, `slow_down`, warnings), the result to stdout. Nothing opens
+unless `--open`. By default no extra details are requested (the app's required fields always come with the sign-in);
+`--scope email` asks to share the email, which is the decisions file's "sign in again to share one". Ctrl-C exits 130.
+
+**A-29 `commit login --slt/--slt-stdin/<SLT>` (Silicons).** The positional form stays (the Silicon runtime still runs
+`commit login <SLT>`) and is documented; `--slt-stdin` refuses a terminal and empty input. A value without the `slt_`
+prefix is refused before any request and described without echoing it (refresh token, proof, STK, JWT, a token of
+the previous sign-in system); a lowercase word like `statuss` is answered as a mistyped subcommand. `--scope`/`--open`
+with a token is a usage error. Commit had no `COMMIT_SLT` variable, so none was added.
+
+**A-30 Signing in again replaces the session.** No `--force` (unlike `silicon-accounts login`): re-consent for email
+and the runtime's repeated `commit login <SLT>` must simply work. The new session is saved first, then the previous
+sign-in is revoked at the Silicon Accounts it came from (best effort; a failure is a warning). After every sign-in the
+CLI asks `GET /api/v1/me` once (best effort) so a wrong `--api-url` shows at once (`verified: false` + warning).
+
+**A-31 `commit logout`.** Revokes at the session's Silicon Accounts (`POST /v1/oauth/revoke`, `client_id=commit`),
+then deletes the file. If Silicon Accounts cannot be reached the session is kept and the command exits 1 so it can be
+retried; `--force` deletes it anyway with a warning. Ended, legacy and damaged sessions are deleted without a network
+call. `--token`/`COMMIT_ACCESS_TOKEN` is ignored by logout (it ends the saved session only). Not signed in:
+`{"signed_out":false,"reason":"not_signed_in"}`, exit 0.
+
+**A-32 Where requests go.** `--api-url`/`COMMIT_API_URL` and `--accounts-url`/`ACCOUNTS_URL` (all global flags), else
+the saved session's URLs, else production. A saved session is never sent to other servers: asking for another API or
+Accounts URL fails with `signed_in_elsewhere` (status reports it as `authenticated: false`). URLs compare by origin;
+an `/api/v1` suffix is ignored.
+
+**A-33 `commit accounts [--json]`.** Prints the same object with or without `--json`, never fails and never touches
+the network or the disk beyond reading the session: `app_id`, `accounts_url`, `api_url` (effective values),
+`version`, `command`, `profile`, `login` (`carbon`, `silicon`, `status` commands), `docs`, `repository`,
+`rust_client`. The hidden `commit iam [--json]` prints exactly the same object for one minor release (the runtime
+still calls it); it appears in no help or user doc.
+
+**A-34 Removed commands and flags.** `testing`, `test-environments`, `daemon` (it only removed the old updater),
+`config updates`, `--org-id`/`COMMIT_ORG_ID`, `--test`/`COMMIT_TEST_KEY` and `--no-update` are gone (usage error,
+exit 2). `--no-update` was already a no-op and the Silicon runtime never passes it (it runs `iam --json`,
+`login <SLT>` and `login status --json`). Manual removal of old updater units is in the cutover runbook.
+
+**A-35 Kept.** `--profile` (one account per profile), `config home|show|telemetry`, `report` (with the local copy on
+failure and `--save-only`), `docs`, `health`/`ready`/`version` (no credentials), `--token` (used as is, never saved
+or refreshed; status reads its claims unverified for display and confirms it with `/me`), `--no-save` (prints the
+tokens with a warning).
+
+**A-36 New CLI commands.** `commit me`, `commit silicons allowed-accounts|allow|disallow`, and `--silicon` on
+`commit notifications` for custodians, mirroring the service's new routes. Carbons without a shared email get a
+hint after `commit email` (`commit login --scope email`).
+
+**A-37 Bundled guides.** `commit docs` topics: start, cli, projects, notifications, client, api, accounts,
+contracts, development, telemetry, deployment (`cli/docs` stays byte-identical to `docs/`, which CI checks). The IAM
+and testing-environment guides left the bundle; their `docs/` files are left for the packaging/docs stage to move to
+`docs/history/`. User-facing guides no longer say "circle": "the accounts close to" an account, defined once.
+
+**A-38 Versions.** `silicon-commit-client` and `silicon-commit-cli` 0.4.1 → 0.5.0 (breaking), speaking contract 2
+(`X-Commit-Supported-Versions: 2`; any other `X-Commit-API-Version` answer is `Error::UnsupportedContract`).
+Telemetry stays server-side (Space Station in the worker); the CLI only sends `X-Commit-Telemetry: on|off` and
+`X-Accounts-Telemetry: off` when diagnostics are off.
+
+**A-39 `/me` names a custodian Commit has not seen.** Found in the live run: a Silicon's `/me` showed its custodian
+with an empty id until the custodian used Commit. `/me` now looks the custodian up (cached a minute) and does not
+store the answer, because a row made from a lookup would delay the custodian's own first `userinfo` refresh (name,
+shared email) by up to ten minutes. The CLI also keeps a known custodian id when an answer omits it.

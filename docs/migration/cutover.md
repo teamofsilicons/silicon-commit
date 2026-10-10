@@ -57,3 +57,31 @@ Right after the migration every IAM-era row belongs to an unlinked placeholder a
 13. Send a test webhook from Silicon Accounts (`POST /v1/apps/commit/webhook/test`) and check the API logs
     (`applied Silicon Accounts webhook event`, outcome `ping`).
 14. Interface: one action through a proof (for example list todos) succeeds; the API log records the issuing app.
+
+## The CLI and the Rust client (0.5.0)
+
+15. **Sign-in setup for the CLI.** The CLI is a public client of app `commit`: its sign-in setup needs
+    `device_flow: true` (Carbons' `commit login`) and `public_client: true` (Silicons' `commit login --slt…`, refresh
+    and sign-out with `client_id=commit` alone). Without them Silicon Accounts answers `unauthorized_client` /
+    `invalid_client` and the CLI says so. Put `email` in `optional_fields` so `commit login --scope email` can ask
+    Carbons to share it. (The local test stack already has both flags on.)
+16. **Publish (not done by the migration).** `silicon-commit-client` 0.5.0 first, then `silicon-commit-cli` 0.5.0
+    (its manifest depends on client 0.5.0), and the Silicon Apps archives from the packaging stage. Client and CLI
+    0.4.x speak contract 1 and stop working when the service switches (406 `unsupported_contract`).
+17. **Silicons still on the old CLI.** Their saved sessions are IAM-era files: the 0.5 CLI reports them as
+    `legacy_session` (`commit login status --json` → `{"authenticated":false,"reason":"legacy_session",…}`) and asks
+    for a new sign-in; `commit logout` deletes them. The Silicon runtime must mint Silicon Accounts tokens
+    (`silicon-accounts login --app commit -q`) instead of IAM ones; it can keep running `commit login <SLT>`
+    (positional, still accepted) and `commit iam --json` (hidden alias of `commit accounts --json` for one minor
+    release; it returns `"app_id":"commit"`). Remove the alias in the release after the runtime switches to
+    `accounts --json`.
+18. **Old updater units.** CLI 0.4.x already refused to install the hourly updater, and 0.5.0 drops the
+    `commit daemon uninstall` helper. On a machine that still has one, remove it by hand:
+    macOS `launchctl bootout gui/$(id -u)/com.teamofsilicons.commit-updater; rm
+    ~/Library/LaunchAgents/com.teamofsilicons.commit-updater.plist`; Linux `systemctl --user disable --now
+    silicon-commit-updater.timer; rm ~/.config/systemd/user/silicon-commit-updater.service
+    ~/.config/systemd/user/silicon-commit-updater.timer`. Silicon Apps' daemon is the only updater now.
+19. **Verify with the CLI.** In a clean `SILICON_HOME`: `commit --help`, `commit accounts --json`,
+    `commit login status --json` (`{"authenticated":false}`); then `commit login` as a Carbon and
+    `silicon-accounts login --app commit -q | commit login --slt-stdin` as a Silicon, `commit login status --json`,
+    `commit todos list`, `commit logout`.

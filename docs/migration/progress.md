@@ -130,3 +130,149 @@ progress).
 Left for later stages or a Carbon: see `remaining` in the stage result (CLI, client, web, packaging, the production
 cutover in [`cutover.md`](cutover.md), the UNDERSTANDING.md proposal, and whether the docs site should publish this
 folder).
+
+## 2026-10-10 — Stage 2 (client crate and CLI): Silicon Accounts
+
+`silicon-commit-client` and `silicon-commit-cli` 0.5.0 speak Silicon Accounts and API contract 2 only. Decisions
+A-21 to A-39 in [`decisions.md`](decisions.md); the CLI's cutover steps are 15 to 19 in [`cutover.md`](cutover.md).
+
+What changed:
+
+- **Client crate.** Bearer (Accounts access token for `commit`) or `with_proof(sap_…)` credentials; `accounts()`,
+  `me()`, the Silicon allow-list, `notification_settings_of`/`update_notification_settings_of` for custodians;
+  contract 2 negotiation; typed `Error`/`ApiError` keeping `code`, `message`, `hint`, `details`, `request_id`,
+  `Retry-After` (foreign bodies never echoed); plain http only for loopback. New `auth::AccountsAuth`: device flow
+  (interval, `slow_down`, expiry, transient retries), short-lived token exchange with `client_id` only, rotating
+  refresh, revocation, `SignInRefusal` classification, `peek_claims`. Removed: organizations, IAM session routes,
+  testing-environment methods, crates.io update checks.
+- **CLI.** `login` (device flow; `--scope`, `--open`, `--json` progress), `login --slt|--slt-stdin|<SLT>`,
+  `login status [--json] [--offline]`, `logout [--force]`, `accounts [--json]` (+ hidden `iam`), `me`,
+  `silicons allowed-accounts|allow|disallow`, `notifications --silicon`. Session v2 in the profile directory
+  (0600/0700, atomic), refreshed once under `session.lock`, ended on `invalid_grant`; replay after 401 with the same
+  idempotency key and body; old IAM and damaged files reported, never crashed on. Removed: `testing`,
+  `test-environments`, `daemon`, `config updates`, `--org-id`, `--test`, `--no-update`. Help pages say what each
+  command is for, how it combines, examples with `c:`/`si:` ids.
+- **Docs.** START, CLI, CLIENT rewritten; API/PROJECTS without "circle"; CONTRACTS names the 0.5 clients;
+  TELEMETRY without testing environments; crate READMEs; the CLI bundles ACCOUNTS and drops IAM and
+  TEST_ENVIRONMENTS (`cli/docs` stays identical to `docs/`).
+- **Service fix found live** (A-39): `/me` named a Silicon's custodian with an empty id until the custodian used
+  Commit; now looked up (cached, not stored). Regression test fails before the fix (shown) and passes after.
+
+Commits: `2389b38` Move the Commit client and CLI to Silicon Accounts · `97ae518` Document the Silicon Accounts CLI
+and Rust client · `cb65d7b` Name a Silicon's custodian before the custodian uses Commit · `d2ace3b` Do not store a
+custodian learned only from a lookup · then this folder (decisions, cutover, proposal, progress).
+
+Tests (PostgreSQL 16.11 on `127.0.0.1:5460`, fresh databases):
+
+```sh
+export CARGO_TARGET_DIR=$PWD/target/mig CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=3
+cargo fmt --all --check                                                         # ok
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings   # ok
+COMMIT_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5460/commit_cli_full \
+  cargo test --workspace --all-targets --locked --no-fail-fast                  # 194 passed, 0 failed, nothing skipped
+cargo test -p silicon-commit-client --doc                                       # 1 passed
+cargo deny --all-features check                                                 # advisories, bans, licenses, sources ok
+cargo package -p silicon-commit-client                                          # builds from the packaged crate
+cargo package -p silicon-commit-cli --list --allow-dirty                        # sources, docs, tests, README
+npm ci --prefix docs-site && npm run build --prefix docs-site && npm run check --prefix docs-site
+                                                                                # 26 pages, 633 local links ok
+for g in cli/docs/*.md; do cmp "$g" "docs/$(basename "$g")"; done               # identical (CI check)
+```
+
+| target | before (service stage) | now |
+|---|---|---|
+| service (unit + HTTP + PostgreSQL suites) | 139 | 140 (+ `me_names_a_custodian_that_never_used_commit`) |
+| `client/tests/transport.rs` | 9 (IAM-era) | 9 (rewritten: credentials, proofs, contract 2, envelope, URLs) |
+| `client/tests/auth.rs` (new: stub Accounts) | – | 7 (device pending/slow_down/denied/expired/transient, SLT ok + every refusal, refresh + reuse, revoke, URL rules, claims) |
+| CLI unit tests (new: storage classes, atomic 0600 writes, exclusive lock, URL comparison, argument parsing, clap tree) | – | 8 |
+| `cli/tests/discovery.rs` (golden `accounts --json`, `iam` alias, signed-out status, help tree, retired flags, guides) | – | 5 |
+| `cli/tests/login.rs` (device flow pending→slow_down→success, denied, expired; SLT via stdin/flag/positional; refusals; replace + revoke previous; `--no-save`) | – | 6 |
+| `cli/tests/sessions.rs` (single-flight refresh across 2 processes, 401 replay, uncertain refresh, reuse ends session, logout + `--force`, legacy/damaged files, profiles, `signed_in_elsewhere`, offline, `--token`, custodian id) | – | 11 |
+| `cli/tests/commands.rs` (sign-in required, todo validation, 422 details, filters/selectors/allow-list, email hint, reports, homes) | 26 (IAM-era) | 8 |
+
+Live run against the shared stack (`ACCOUNTS_URL=http://localhost:9590`) and the migrated service on
+`127.0.0.1:4141` (database `commit_cli_live`, `.mig/cli-live-env.sh` = the service stage's development settings),
+identities `commit-cli-c1-126@example.test`/`si:commit-cli-s1-126` and `commit-cli-c2-127@example.test`/
+`si:commit-cli-s2-127`. Outputs trimmed only where marked.
+
+```text
+$ mint.mts silicon --custodian-email commit-cli-c1-126@example.test --handle commit-cli-s1-126
+{'uuid': 'C66', 'id': 'si:commit-cli-s1-126', 'kind': 'silicon', 'stk': '<hidden>', 'custodian': {'uuid': '0Nn', 'id': 'c:commit-cli-c1-126'}}
+$ SLT=$(mint.mts slt --silicon si:commit-cli-s1-126 --stk … --app commit)        # slt_… (47 chars)
+$ printf %s "$SLT" | commit login --slt-stdin                                     # fresh SILICON_HOME and HOME
+Signed in to Commit as si:commit-cli-s1-126 (commit-cli-s1-126), a Silicon. Custodian: c:commit-cli-c1-126.
+uuid          C66
+verified      yes, the Commit API accepted it                                     (rows trimmed)
+SLT occurrences in stdout, stderr and session.json: 0, 0, 0
+$ commit login status --json
+{"accounts_url":"http://localhost:9590","api_url":"http://127.0.0.1:4141","authenticated":true,
+ "custodian":{"id":"c:commit-cli-c1-126","uuid":"0Nn"},"display_name":"commit-cli-s1-126",
+ "expires_at":"2026-10-10T03:14:30Z","id":"si:commit-cli-s1-126","kind":"silicon","profile":"default",
+ "refresh_expires_at":"2029-03-28T02:44:30Z","uuid":"C66","verified":true}           (exit 0; before the A-39
+                                                                                    fix the custodian id was "")
+$ commit todos create --data '{"title":"CLI live: review the release","assigned_to":"c:commit-cli-c1-126"}'
+{"assigned_by":{"id":"si:commit-cli-s1-126","type":"silicon","uuid":"C66"},
+ "assigned_to":{"id":"c:commit-cli-c1-126","type":"carbon","uuid":"0Nn"},"status":"yet_to_do",…}
+$ commit todos list --view delegated_by_me                                        # count 1, the todo above
+$ commit projects create --data '{"name":"CLI live project 126",…,"tasks":[{"title":"Draft","assigned_to":"c:commit-cli-c1-126"}]}'
+{"id":"01a123b5-85a4-…","owner":{"id":"si:commit-cli-s1-126","type":"silicon","uuid":"C66"},"private":false,…}
+$ commit me                    # {"uuid":"C66",…,"custodian":{"id":"c:commit-cli-c1-126","type":"carbon","uuid":"0Nn"}}
+# forced refresh through the real token endpoint: expires_at set to 1, then
+$ commit todos list --view all # items: 2; refresh token rotated: True, access token valid for 1800 s, marker cleared
+$ printf %s "$SLT" | commit login --slt-stdin --json                              # the same SLT again
+{"error":{"code":"invalid_grant","reason":"already_used","message":"The short-lived token was already used; each one
+ works once. Get a new one.","hint":"Sign in again. … `silicon-accounts login --app commit -q | commit login
+ --slt-stdin`.","request_id":"01a123b5-bbd3-…","status":400}}                      (exit 1, nothing saved)
+$ printf %s "$REMIND_SLT" | commit login --slt-stdin                              # minted for app remind
+commit: The short-lived token was issued for the app 'remind', not for 'commit'; … (HTTP 400, invalid_grant, request ID …)
+$ commit logout --json         # {"id":"si:commit-cli-s1-126","revoked":true,"signed_out":true,"uuid":"C66"}
+$ commit login status --json   # {"authenticated": false}
+# the revoked refresh token at Silicon Accounts: invalid_grant "…revoked at 2026-10-10T02:48:03.568Z (app_revoked)…"
+
+$ commit login --json &        # Carbon, fresh SILICON_HOME; stderr:
+{"browser_opened":false,"event":"device_code","expires_at":"2026-10-10T02:58:16Z","expires_in":600,"interval":5,
+ "user_code":"JYN9-6F64","verification_uri":"http://localhost:9590/device",
+ "verification_uri_complete":"http://localhost:9590/device?code=JYN9-6F64"}
+$ mint.mts approve --email commit-cli-c1-126@example.test --code JYN9-6F64      # {"approved":"JYN9-6F64","status":204}
+# commit login finished; stdout:
+{"authenticated":true,"display_name":"Commit Cli C1 126","id":"c:commit-cli-c1-126","kind":"carbon",
+ "method":"device","uuid":"0Nn","verified":true,…}
+$ commit todos list            # the Silicon's two todos (assigned_by si:commit-cli-s1-126)
+$ commit notifications --silicon si:commit-cli-s1-126     # custodian reads its Silicon's settings (version 0)
+$ commit silicons allowed-accounts si:commit-cli-s1-126   # {"allowed":[],"silicon":{…"uuid":"C66"}}
+$ commit email                 # saved false, shared_email null, then on stderr:
+No email is shared with Commit yet. Set one with `commit email --data '{"email":"you@example.com"}'`, or sign in
+again and share your email: `commit login --scope email`.
+
+# second pair after A-39 (not storing lookup-only custodians):
+$ commit login --scope email   # text mode; approved with mint.mts approve
+Signed in to Commit as c:commit-cli-c2-127 (Commit Cli C2 127), a Carbon.
+$ commit login status --json   # display_name "Commit Cli C2 127", verified true (kept after /me)
+$ commit email                 # "shared_email": "commit-cli-c2-127@example.test"
+$ commit logout                # Signed out …; the sign-in was ended at Silicon Accounts.
+
+# discovery in an EMPTY HOME and SILICON_HOME:
+$ commit --help                # exit 0, 92 lines
+$ commit accounts --json       # {"accounts_url":"https://accounts.teamofsilicons.com","api_url":
+                               #  "https://backend.commit.teamofsilicons.com","app_id":"commit",…,"version":"0.5.0"} exit 0
+$ commit login status --json   # {"authenticated": false} exit 0; the home stayed empty
+```
+
+Nothing outside Commit's app and the test identities above was touched; Commit's sign-in setup and webhook on the
+stack were only read (`device_flow` and `public_client` were already on). All processes this stage started are
+stopped (`.mig/pids/cli-*`); its databases `commit_cli_live`, `commit_cli_test` and `commit_cli_full` are dropped.
+
+Found, not fixed here (for the fix or e2e stage): an account row made from a lookup (someone assigned it a todo or
+invited it before it used Commit) carries `refreshed_at = now`, so that account's own sign-in within ten minutes skips
+`userinfo` and Commit misses its display name (lookups carry none) and shared email until the next refresh. A
+separate "refreshed from userinfo" marker, or treating never-self-refreshed rows as stale, would fix it.
+
+Left for later stages: packaging (`apps.yaml`, release workflow, `honeycomb.yaml` removal; the binary already answers
+the three discovery commands in an empty home), moving `docs/IAM.md`, `HONEYCOMB.md`, `TEST_ENVIRONMENTS.md`,
+`RELEASES.md`, `install.sh` and the IAM-era notes to `docs/history/` with the docs-site navigation, the root README's
+CLI section, and publishing the crates (client first). When `silicon-accounts-client` releases
+`exchange_slt_public_client` and a public revoke for app ids, `auth` can drop its two direct calls (A-21).
+
+Gotchas: the harness refuses `rm -rf "$VAR"`; use fresh `mktemp -d` homes instead. PostgreSQL client tools are in
+`/opt/homebrew/opt/postgresql@16/bin`. The device-flow integration test takes ~8 s because RFC 8628 adds 5 s after
+`slow_down`. The local stack's issuer is `http://localhost:9590`, which also serves the API used by the CLI.

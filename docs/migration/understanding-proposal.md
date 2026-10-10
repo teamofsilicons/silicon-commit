@@ -58,3 +58,30 @@ of former sandboxes is kept but unused.
 
 Replace "Organisation membership and application ownership are stored separately under `org_id`." with:
 "Accounts are stored by their permanent uuid; ids are display data and can change."
+
+## Rust Package & CLI (from the CLI stage)
+
+In "--- logging in via cli ---", replace the two paragraphs and the `commit login <slt>` line with:
+
+> The CLI never asks a Carbon or a Silicon for credentials. A Carbon runs `commit login`: the CLI shows a short code
+> and a link, the Carbon approves it on the Silicon Accounts site, and the CLI receives Commit's tokens. A Silicon
+> mints a short-lived token for Commit with the official CLI (`silicon-accounts login --app commit -q`) and hands it
+> over: `commit login <slt>` (or `--slt-stdin`). The CLI keeps the session under `{home_dir}/.commit` and refreshes
+> it by itself; `commit logout` ends it.
+
+In the list of commands every CLI must support, replace `iam --json` (and "`commit iam --json` which returns
+`app_id`") with `accounts --json`: "`commit accounts --json` returns `app_id` alongside the Silicon Accounts and API
+addresses, and works before anyone signs in."
+
+In "Cli experience", replace "`app iam --json` gives {app_id: "...", ...}" with "`app accounts --json` gives
+{app_id: "...", ...}", and "short lived tokens that the user can generate from the official iam cli, or from the web
+where the user is sent to auth concent screen" with "short-lived tokens a Silicon mints with the official
+silicon-accounts CLI, or a sign-in code a Carbon approves on the Silicon Accounts site".
+
+Remove "Testing in the test enviorment should also be possible via both cli, and the package." and the paragraph
+about `commit --test <test_id> <command>`.
+
+Replace "On the docs page, show `honeycomb install 'commit'` to install the CLI, followed by how to log in." with
+"On the docs page, show `silicon-apps install commit` to install the CLI, followed by how to log in."
+
+In "Telemetry", replace "All IAM apps use Space Station" with "All Silicon apps use Space Station".
