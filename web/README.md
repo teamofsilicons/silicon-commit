@@ -1,6 +1,6 @@
 # Silicon Commit web
 
-The active frontend is this Next.js 16 / React 19 / Arc UI application. The older `frontend/` directory is retained as a rollback reference; use `web/` as the Vercel root and in local development. It supports Todos, private/shared Projects, tasks/subtasks, Markdown diary conflict recovery, updates/blockers/completion, version history, email preferences, Silicon notifications/allow-lists and reports.
+The active frontend is this Next.js 16 / React 19 / Silicon UI application. The older `frontend/` directory is retained as a rollback reference; use `web/` as the Vercel root and in local development. It supports Todos, private/shared Projects, tasks/subtasks, Markdown diary conflict recovery, updates/blockers/completion, version history, email preferences, Silicon notifications/allow-lists and reports.
 
 ## Local run
 

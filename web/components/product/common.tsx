@@ -1,9 +1,9 @@
 "use client";
 import {useState, type ReactNode} from "react";
 import {useInfiniteQuery, useQuery, useQueryClient} from "@tanstack/react-query";
-import {Button} from "@/components/arc/button/button";
-import {Select} from "@/components/arc/select/select";
-import {Dialog,DialogContent} from "@/components/arc/dialog/dialog";
+import {Button} from "@/components/silicon-ui/button/button";
+import {Select} from "@/components/silicon-ui/select/select";
+import {Dialog,DialogContent} from "@/components/silicon-ui/dialog/dialog";
 import {AccountChip} from "@/components/foundation/account/account-chip";
 import {ErrorAlert} from "@/components/foundation/feedback/error-alert";
 import {ApiError} from "@/lib/errors";

@@ -1,11 +1,11 @@
 "use client";
 import {useState} from "react";
-import {Button} from "@/components/arc/button/button";
-import {Input} from "@/components/arc/input/input";
-import {Textarea} from "@/components/arc/textarea/textarea";
-import {Select} from "@/components/arc/select/select";
-import {Switch} from "@/components/arc/switch/switch";
-import {ConfirmMorph} from "@/components/arc/confirm-morph/confirm-morph";
+import {Button} from "@/components/silicon-ui/button/button";
+import {Input} from "@/components/silicon-ui/input/input";
+import {Textarea} from "@/components/silicon-ui/textarea/textarea";
+import {Select} from "@/components/silicon-ui/select/select";
+import {Switch} from "@/components/silicon-ui/switch/switch";
+import {ConfirmMorph} from "@/components/silicon-ui/confirm-morph/confirm-morph";
 import {Page,PageHeader,Section,Surface} from "@/components/foundation/layout/layout";
 import {Empty,Feedback,ResourceError,Who,enc,label,mutate,todoStatuses,useAction,useResource} from "./common";
 import type {Actor,Todo,Me,Rule,EmailSettings,NotificationSettings,Subscription} from "./types";
