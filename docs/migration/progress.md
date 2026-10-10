@@ -276,3 +276,9 @@ CLI section, and publishing the crates (client first). When `silicon-accounts-cl
 Gotchas: the harness refuses `rm -rf "$VAR"`; use fresh `mktemp -d` homes instead. PostgreSQL client tools are in
 `/opt/homebrew/opt/postgresql@16/bin`. The device-flow integration test takes ~8 s because RFC 8628 adds 5 s after
 `slow_down`. The local stack's issuer is `http://localhost:9590`, which also serves the API used by the CLI.
+
+Addendum (same stage, after the record above): `fbecc6b` Answer login status even when the session cannot be read
+(`--json` now also exits 0 for an unreadable session path, `reason: io_error`, and for `--token` with an unusable
+`COMMIT_API_URL`, `verified: false` + warning; the new assertions fail without the fix, shown) and `f8da0bc` Keep
+retired words out of the client's and CLI's doc comments. Re-run: `cargo test -p silicon-commit-client -p
+silicon-commit-cli` 54 passed + 1 doctest, workspace clippy clean, `cargo fmt --all --check` ok.
