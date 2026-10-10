@@ -73,6 +73,29 @@ def kind_matches(actual, expected, allow_unknown=False):
     return actual == expected or (allow_unknown and actual is None)
 
 
+def canonical_uuid(value):
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def require_mapping_coverage(accounts, mapping, allow_unlinked_iam=False):
+    """Account subjects must all migrate; Commit's private IAM placeholders are distinct."""
+    missing = 0
+    for account, status in accounts:
+        if account in mapping or canonical_uuid(account):
+            continue
+        parts = account.split(":")
+        private_placeholder = (allow_unlinked_iam and status == "unlinked" and
+                               len(parts) == 3 and parts[0] == "iam" and
+                               canonical_uuid(parts[1]) and canonical_uuid(parts[2]))
+        if not private_placeholder:
+            missing += 1
+    if missing:
+        raise ValueError(f"mapping omits {missing} legacy account(s)")
+
+
 def qualify(sql, dotted):
     return sql.SQL(".").join(sql.Identifier(part) for part in dotted.split("."))
 
@@ -127,6 +150,26 @@ def reseal(cur, app, mapping, sql):
     return count
 
 
+
+def retire_outgoing(cur, app):
+    """Old prepared deliveries remain immutable evidence and never leave after cutover."""
+    statements = {
+      "dm": [("ting_handoffs", "UPDATE dm.ting_handoffs SET discarded_at=clock_timestamp(),discard_reason='accounts_uuid128_migrated',lease_id=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE accepted_at IS NULL AND discarded_at IS NULL AND request_body IS NOT NULL AND (target_id IN(SELECT old_uuid FROM uuid_map) OR originator_id IN(SELECT old_uuid FROM uuid_map))")],
+      "hook": [("ting_outbox", "UPDATE hook_private.ting_outbox SET next_attempt_at=expires_at,last_error_code='legacy_identity',lease_id=NULL,lease_until=NULL WHERE accepted_at IS NULL AND recipient_id IN(SELECT old_uuid FROM uuid_map)")],
+      "commit": [("outbox_events", "UPDATE commit.outbox_events SET status='dead_letter',lease_owner=NULL,lease_expires_at=NULL,last_error_code='accounts_uuid128_migrated',updated_at=GREATEST(updated_at,statement_timestamp()),dead_lettered_at=GREATEST(updated_at,statement_timestamp()),purge_after=GREATEST(updated_at,statement_timestamp())+interval '90 days' WHERE status IN('pending','in_flight') AND recipient_silicon_account IN(SELECT old_uuid FROM uuid_map)")],
+      "extend": [
+        ("retired_bodies", "INSERT INTO extend.accounts_uuid128_retired_bodies(body_sha256) SELECT DISTINCT sha256(convert_to(body::text,'UTF8')) FROM (SELECT ting_body body FROM extend.requests WHERE from_id IN(SELECT old_uuid FROM uuid_map) OR to_id IN(SELECT old_uuid FROM uuid_map) UNION ALL SELECT ting_body FROM extend.wake_requests WHERE from_id IN(SELECT old_uuid FROM uuid_map) OR to_id IN(SELECT old_uuid FROM uuid_map) UNION ALL SELECT answer_ting_body FROM extend.wake_requests WHERE from_id IN(SELECT old_uuid FROM uuid_map) OR to_id IN(SELECT old_uuid FROM uuid_map)) frozen WHERE body IS NOT NULL ON CONFLICT DO NOTHING"),
+        ("request_tings", "UPDATE extend.requests SET delivery='failed',ting_next_at=NULL,last_error='Accounts identity migrated; send a new request.' WHERE delivery='pending' AND ting_body IS NOT NULL AND (from_id IN(SELECT old_uuid FROM uuid_map) OR to_id IN(SELECT old_uuid FROM uuid_map))"),
+        ("wake_tings", "UPDATE extend.wake_requests SET ting_delivery='failed',ting_next_at=NULL,ting_last_error='Accounts identity migrated; send a new wake request.' WHERE ting_delivery IN('pending','deferred') AND ting_body IS NOT NULL AND (from_id IN(SELECT old_uuid FROM uuid_map) OR to_id IN(SELECT old_uuid FROM uuid_map))"),
+        ("wake_answers", "UPDATE extend.wake_requests SET answer_ting='failed',answer_ting_next_at=NULL,answer_ting_last_error='Accounts identity migrated; the old notification is retired.' WHERE answer_ting='pending' AND answer_ting_body IS NOT NULL AND (from_id IN(SELECT old_uuid FROM uuid_map) OR to_id IN(SELECT old_uuid FROM uuid_map))")]
+    }
+    retired = {}
+    for name, query in statements.get(app, []):
+        cur.execute(query)
+        if cur.rowcount:
+            retired[name] = cur.rowcount
+    return retired
+
 def migrate(database_url, manifest, mapping, kinds, digest, apply=False):
     import psycopg
     from psycopg import sql
@@ -141,7 +184,7 @@ def migrate(database_url, manifest, mapping, kinds, digest, apply=False):
             cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (f"{app}:accounts-uuid128",))
             ledger = qualify(sql, f"{schema}.accounts_uuid128_map")
             cur.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {} (old_uuid text PRIMARY KEY,new_uuid text UNIQUE NOT NULL,kind text NOT NULL CHECK(kind IN ('carbon','silicon')),mapping_sha256 text NOT NULL,applied_at timestamptz NOT NULL DEFAULT clock_timestamp())").format(ledger))
-            tables = sorted({key.rsplit(".", 1)[0] for key in manifest["columns"] + manifest["json_columns"]} | {f"{schema}.accounts_uuid128_map"})
+            tables = sorted({key.rsplit(".", 1)[0] for key in manifest["columns"] + manifest["json_columns"] + manifest.get("expire_columns", [])} | {f"{schema}.accounts_uuid128_map"} | set(manifest.get("lock_tables", [])))
             cur.execute(sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(sql.SQL(",").join(qualify(sql, table) for table in tables)))
             cur.execute(sql.SQL("SELECT old_uuid,new_uuid,kind FROM {}").format(ledger))
             prior = {old:(new,kind) for old,new,kind in cur.fetchall()}
@@ -150,6 +193,9 @@ def migrate(database_url, manifest, mapping, kinds, digest, apply=False):
                     raise ValueError("mapping conflicts with the persisted app mapping")
             if any(new in set(mapping.values()) and old not in mapping for old,(new,_) in prior.items()):
                 raise ValueError("a target already belongs to a different persisted mapping")
+            status_column = sql.SQL("status::text") if manifest.get("allow_unlinked_iam_placeholders", False) else sql.SQL("NULL::text")
+            cur.execute(sql.SQL("SELECT uuid,{} FROM {}").format(status_column, qualify(sql, f"{schema}.accounts")))
+            require_mapping_coverage(cur.fetchall(), mapping, manifest.get("allow_unlinked_iam_placeholders", False))
             cur.execute(sql.SQL("SELECT uuid,kind::text FROM {} WHERE uuid=ANY(%s)").format(qualify(sql,f"{schema}.accounts")), (list(mapping)+list(mapping.values()),))
             accounts = dict(cur.fetchall())
             for old,new in mapping.items():
@@ -169,6 +215,12 @@ def migrate(database_url, manifest, mapping, kinds, digest, apply=False):
             triggers=cur.fetchall()
             for ns,table,name,_ in triggers:
                 cur.execute(sql.SQL("ALTER TABLE {} DISABLE TRIGGER {}").format(qualify(sql,f"{ns}.{table}"),sql.Identifier(name)))
+            for dotted in manifest.get("expire_columns", []):
+                table,column=dotted.rsplit(".",1)
+                cur.execute(sql.SQL("DELETE FROM {} t USING uuid_map m WHERE t.{}=m.old_uuid").format(qualify(sql,table),sql.Identifier(column)))
+                if cur.rowcount:
+                    report["changed"]["expired:"+dotted]=cur.rowcount
+            report["retired_deliveries"] = retire_outgoing(cur,app)
             report["resealed_proofs"] = reseal(cur,app,mapping,sql)
             for dotted in manifest["columns"]:
                 table,column=dotted.rsplit(".",1)

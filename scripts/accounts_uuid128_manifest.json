@@ -49,5 +49,6 @@
     "email_jobs.body: archived notification prose",
     "IAM projections and placeholder_uuid: prior authority and provenance",
     "project resource UUIDs, public slugs, private todo/project keys and artifact URLs"
-  ]
+  ],
+  "allow_unlinked_iam_placeholders": true
 }

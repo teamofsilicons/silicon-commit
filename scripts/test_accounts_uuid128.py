@@ -17,6 +17,16 @@ class MappingTests(unittest.TestCase):
   self.assertTrue(consumer.kind_matches(None,"carbon",True))
   self.assertFalse(consumer.kind_matches("silicon","carbon",True))
   self.assertTrue(consumer.kind_matches("carbon","carbon"))
+ def test_every_legacy_account_requires_mapping_and_error_is_count_only(self):
+  with self.assertRaisesRegex(ValueError, r"^mapping omits 2 legacy account\(s\)$"):
+   consumer.require_mapping_coverage([("secretOld","active"),("deletedOld","deleted"),(NEW,"active")], {})
+  consumer.require_mapping_coverage([("a8K","active"),(NEW,"deleted")], {"a8K":NEW})
+ def test_only_valid_explicit_unlinked_iam_placeholders_are_exempt(self):
+  private="iam:"+NEW+":"+NEW
+  consumer.require_mapping_coverage([(private,"unlinked")], {}, True)
+  for identity,status,allow in [(private,"active",True),(private,"unlinked",False),("iam:not-a-uuid:"+NEW,"unlinked",True)]:
+   with self.subTest(identity=identity,status=status,allow=allow),self.assertRaises(ValueError):
+    consumer.require_mapping_coverage([(identity,status)],{},allow)
  def test_exact_mapping_contract(self):
   mapping,kinds,digest=self.parse(f'old_uuid,new_uuid,kind\na8K,{NEW},carbon\n')
   self.assertEqual(mapping,{'a8K':NEW});self.assertEqual(kinds,{'a8K':'carbon'});self.assertEqual(len(digest),64)
