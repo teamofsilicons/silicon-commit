@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret as _, SecretString};
 use thiserror::Error;
 use url::Url;
 
@@ -60,19 +60,10 @@ pub enum RuntimeEnvironment {
 /// Process-specific configuration capability set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeProfile {
-    /// HTTP API and IAM capability set.
+    /// HTTP API and Silicon Accounts capability set.
     Api,
     /// Outbox worker capability set.
     Worker,
-}
-
-/// Identity authentication implementation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AuthenticationMode {
-    /// Verify credentials online with Silicon IAM.
-    Iam,
-    /// Accept explicit identity headers in non-production tests only.
-    TrustedHeaders,
 }
 
 /// Listener and request middleware policy.
@@ -112,8 +103,8 @@ pub struct DatabaseSettings {
 /// External Silicon service configuration.
 #[derive(Clone, Debug)]
 pub struct IntegrationSettings {
-    /// IAM authentication and directory settings.
-    pub iam: IamSettings,
+    /// Silicon Accounts: sign-in verification, account lookups, proofs and webhooks.
+    pub accounts: AccountsSettings,
     /// Outbound connect deadline.
     pub connect_timeout: Duration,
     /// Outbound request deadline.
@@ -122,23 +113,90 @@ pub struct IntegrationSettings {
     pub max_response_bytes: usize,
 }
 
-/// Silicon IAM adapter settings.
+/// Silicon Accounts settings for the API process.
 #[derive(Clone, Debug)]
-pub struct IamSettings {
-    /// Authentication implementation.
-    pub mode: AuthenticationMode,
-    /// IAM API base URL.
-    pub base_url: Url,
-    /// Commit IAM application ID.
-    pub app_id: Option<String>,
-    /// Commit IAM application secret.
+pub struct AccountsSettings {
+    /// `ACCOUNTS_URL`: the public origin. Every access token's `iss` must equal it exactly.
+    pub issuer: String,
+    /// `ACCOUNTS_API_URL` (defaults to `ACCOUNTS_URL`): where Commit calls Accounts server to server.
+    pub api_url: Url,
+    /// `COMMIT_APP_ID`: Commit's app id at Silicon Accounts; tokens must carry it as `aud`.
+    pub app_id: String,
+    /// `COMMIT_APP_SECRET`: Commit's app secret (API only).
     pub app_secret: Option<SecretString>,
-    /// OBO recipient application expected by Commit.
-    pub audience: String,
-    /// Secret used to authenticate exact-byte incoming IAM webhooks.
+    /// `COMMIT_ACCOUNTS_WEBHOOK_SECRET`: the `whsec_…` secret Accounts signs Commit's webhook with.
     pub webhook_secret: Option<SecretString>,
-    /// Positive IAM signing-secret version accepted by this deployment.
-    pub webhook_key_version: i64,
+    /// `COMMIT_PROOF_ISSUERS`: which apps may act for an account, per scope.
+    pub proof_issuers: ProofIssuers,
+}
+
+/// Per-scope allow-list of apps whose User verification proofs Commit accepts.
+///
+/// Parsed from `COMMIT_PROOF_ISSUERS`: comma-separated `scope=app_id` entries;
+/// `*=app_id` allows that app for every scope Commit honours. Empty denies every proof.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProofIssuers {
+    entries: Vec<(String, String)>,
+}
+
+impl ProofIssuers {
+    /// Parses and validates the allow-list against the scopes Commit honours.
+    ///
+    /// # Errors
+    ///
+    /// Returns a precise message for a malformed entry, an unknown scope or an invalid app id.
+    pub fn parse(raw: &str, known_scopes: &[&str]) -> Result<Self, String> {
+        let mut entries = Vec::new();
+        for entry in raw
+            .split([',', '\n', ' ', '\t'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            let Some((scope, app)) = entry.split_once('=') else {
+                return Err(format!(
+                    "entry `{entry}` is not scope=app_id (example: commit.todos.list=interface, or *=interface for every scope)"
+                ));
+            };
+            let (scope, app) = (scope.trim(), app.trim());
+            if scope != "*" && !known_scopes.contains(&scope) {
+                return Err(format!(
+                    "`{scope}` is not a scope Commit honours; use one of: {}, or *",
+                    known_scopes.join(", ")
+                ));
+            }
+            if app.is_empty()
+                || app.len() > 80
+                || !app.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_')
+                })
+            {
+                return Err(format!(
+                    "`{app}` is not an app id (lowercase letters, digits, - and _, at most 80 characters)"
+                ));
+            }
+            let pair = (scope.to_owned(), app.to_owned());
+            if !entries.contains(&pair) {
+                entries.push(pair);
+            }
+        }
+        Ok(Self { entries })
+    }
+
+    /// Whether `issuing_app` may act for an account with `scope`.
+    #[must_use]
+    pub fn allows(&self, scope: &str, issuing_app: &str) -> bool {
+        self.entries.iter().any(|(allowed_scope, app)| {
+            app == issuing_app && (allowed_scope == "*" || allowed_scope == scope)
+        })
+    }
+
+    /// True when no proof is accepted at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Defensive domain input limits.
@@ -217,7 +275,7 @@ impl Settings {
 
     /// Loads and validates settings for the outbox worker process.
     ///
-    /// IAM, authentication, and HTTP-listener environment variables
+    /// Silicon Accounts, authentication, and HTTP-listener environment variables
     /// are deliberately not read by this profile.
     ///
     /// # Errors
@@ -338,38 +396,133 @@ fn inactive_server_settings() -> Result<ServerSettings, SettingsError> {
 fn load_integrations(
     runtime_profile: RuntimeProfile,
 ) -> Result<IntegrationSettings, SettingsError> {
-    let iam = match runtime_profile {
-        RuntimeProfile::Api => IamSettings {
-            mode: parse_or("COMMIT_AUTH_MODE", "iam")?,
-            base_url: parse_url_or(
-                "COMMIT_IAM_BASE_URL",
-                "https://backend.iam.teamofsilicons.com/api/v1/",
-            )?,
-            app_id: optional("COMMIT_IAM_APP_ID"),
-            app_secret: optional_secret("COMMIT_IAM_APP_SECRET"),
-            audience: optional("COMMIT_IAM_AUDIENCE")
-                .or_else(|| optional("COMMIT_IAM_APP_ID"))
-                .unwrap_or_else(|| "silicon-commit".to_owned()),
-            webhook_secret: optional_secret("COMMIT_WEBHOOK_SIGNING_SECRET"),
-            webhook_key_version: parse_or("COMMIT_WEBHOOK_KEY_VERSION", "1")?,
-        },
-        RuntimeProfile::Worker => IamSettings {
-            mode: AuthenticationMode::Iam,
-            base_url: parse_url_value("COMMIT_IAM_BASE_URL", "http://unused.invalid/")?,
-            app_id: None,
+    let accounts = match runtime_profile {
+        RuntimeProfile::Api => load_accounts_settings()?,
+        // The worker never calls Silicon Accounts and never reads its credentials.
+        RuntimeProfile::Worker => AccountsSettings {
+            issuer: String::new(),
+            api_url: parse_url_value("ACCOUNTS_API_URL", "http://unused.invalid/")?,
+            app_id: DEFAULT_APP_ID.to_owned(),
             app_secret: None,
-            audience: String::new(),
             webhook_secret: None,
-            webhook_key_version: 1,
+            proof_issuers: ProofIssuers::default(),
         },
     };
 
     Ok(IntegrationSettings {
-        iam,
+        accounts,
         connect_timeout: duration_millis("COMMIT_PROVIDER_CONNECT_TIMEOUT_MS", 1_000)?,
         request_timeout: duration_secs("COMMIT_PROVIDER_TIMEOUT_SECONDS", 5)?,
         max_response_bytes: parse_or("COMMIT_PROVIDER_MAX_RESPONSE_BYTES", "1048576")?,
     })
+}
+
+/// Commit's app id at Silicon Accounts.
+pub const DEFAULT_APP_ID: &str = "commit";
+/// Production Silicon Accounts.
+pub const DEFAULT_ACCOUNTS_URL: &str = "https://accounts.teamofsilicons.com";
+
+/// Environment variables of the IAM/Honeycomb era that Commit no longer reads.
+const RETIRED_VARIABLES: [&str; 11] = [
+    "COMMIT_AUTH_MODE",
+    "COMMIT_IAM_BASE_URL",
+    "COMMIT_IAM_APP_ID",
+    "COMMIT_IAM_APP_SECRET",
+    "COMMIT_IAM_AUDIENCE",
+    "COMMIT_WEBHOOK_SIGNING_SECRET",
+    "COMMIT_WEBHOOK_KEY_VERSION",
+    "COMMIT_HONEYCOMB_SERVICE_TOKEN",
+    "COMMIT_HONEYCOMB_URL",
+    "COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY",
+    "COMMIT_TEST_KEY",
+];
+
+/// Names of retired variables that are still set, so the process can say so at boot.
+#[must_use]
+pub fn retired_variables_still_set() -> Vec<&'static str> {
+    RETIRED_VARIABLES
+        .into_iter()
+        .filter(|name| optional(name).is_some())
+        .collect()
+}
+
+fn load_accounts_settings() -> Result<AccountsSettings, SettingsError> {
+    let public_value = value_or("ACCOUNTS_URL", DEFAULT_ACCOUNTS_URL);
+    let public_url = parse_accounts_origin("ACCOUNTS_URL", &public_value)?;
+    let api_url = match optional("ACCOUNTS_API_URL") {
+        Some(value) => parse_accounts_origin("ACCOUNTS_API_URL", &value)?,
+        None => public_url.clone(),
+    };
+    let app_id = value_or("COMMIT_APP_ID", DEFAULT_APP_ID);
+    if app_id.is_empty()
+        || app_id.len() > 80
+        || !app_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(invalid(
+            "COMMIT_APP_ID",
+            "must be an app id: lowercase letters, digits, - and _ (Commit's is commit)",
+        ));
+    }
+    let proof_issuers = ProofIssuers::parse(
+        &value_or("COMMIT_PROOF_ISSUERS", ""),
+        crate::application::scopes::ALL,
+    )
+    .map_err(|reason| invalid("COMMIT_PROOF_ISSUERS", reason))?;
+    Ok(AccountsSettings {
+        issuer: public_value.trim_end_matches('/').to_owned(),
+        api_url,
+        app_id,
+        app_secret: optional_secret("COMMIT_APP_SECRET"),
+        webhook_secret: optional_secret("COMMIT_ACCOUNTS_WEBHOOK_SECRET"),
+        proof_issuers,
+    })
+}
+
+/// An Accounts origin: https, or plain http only on this machine (the local Accounts stack).
+fn parse_accounts_origin(name: &'static str, value: &str) -> Result<Url, SettingsError> {
+    let url = Url::parse(value).map_err(|error| {
+        invalid(
+            name,
+            format!(
+                "`{value}` is not a URL ({error}); use an origin such as {DEFAULT_ACCOUNTS_URL}"
+            ),
+        )
+    })?;
+    if url.cannot_be_a_base()
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid(
+            name,
+            "must be an origin with an optional path prefix, without credentials, query or fragment",
+        ));
+    }
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" if is_loopback(&url) => Ok(url),
+        "http" => Err(invalid(
+            name,
+            "must use https; plain http is accepted only for localhost, *.localhost and loopback addresses (a local Accounts stack)",
+        )),
+        other => Err(invalid(name, format!("must use https, not {other}"))),
+    }
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 fn validate_domain_limit_caps(limits: &LimitSettings) -> Result<(), SettingsError> {
@@ -602,32 +755,31 @@ fn validate_api_integrations(
     environment: RuntimeEnvironment,
     integrations: &IntegrationSettings,
 ) -> Result<(), SettingsError> {
-    if environment == RuntimeEnvironment::Production
-        && integrations.iam.mode == AuthenticationMode::TrustedHeaders
-    {
-        return Err(invalid(
-            "COMMIT_AUTH_MODE",
-            "trusted_headers is forbidden in production",
-        ));
+    let accounts = &integrations.accounts;
+    if accounts.app_secret.is_none() {
+        return Err(SettingsError::Missing("COMMIT_APP_SECRET"));
     }
-    if integrations.iam.mode == AuthenticationMode::Iam {
-        for (name, configured) in [
-            ("COMMIT_IAM_APP_ID", integrations.iam.app_id.is_some()),
-            (
-                "COMMIT_IAM_APP_SECRET",
-                integrations.iam.app_secret.is_some(),
-            ),
+    if environment == RuntimeEnvironment::Production {
+        for (name, url) in [
+            ("ACCOUNTS_URL", Url::parse(&accounts.issuer).ok()),
+            ("ACCOUNTS_API_URL", Some(accounts.api_url.clone())),
         ] {
-            if !configured {
-                return Err(SettingsError::Missing(name));
+            if url.is_none_or(|url| url.scheme() != "https") {
+                return Err(invalid(name, "production requires https"));
             }
         }
+        if accounts.webhook_secret.is_none() {
+            return Err(SettingsError::Missing("COMMIT_ACCOUNTS_WEBHOOK_SECRET"));
+        }
     }
-    validate_http_url(
-        environment,
-        &integrations.iam.base_url,
-        "COMMIT_IAM_BASE_URL",
-    )?;
+    if let Some(secret) = &accounts.webhook_secret
+        && !secret.expose_secret().starts_with("whsec_")
+    {
+        return Err(invalid(
+            "COMMIT_ACCOUNTS_WEBHOOK_SECRET",
+            "must be the whsec_… value Silicon Accounts generated for Commit's webhook",
+        ));
+    }
     Ok(())
 }
 
@@ -815,18 +967,6 @@ impl FromStr for RuntimeEnvironment {
     }
 }
 
-impl FromStr for AuthenticationMode {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "iam" => Ok(Self::Iam),
-            "trusted_headers" => Ok(Self::TrustedHeaders),
-            _ => Err("expected iam or trusted_headers"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
@@ -835,10 +975,11 @@ mod tests {
     use url::Url;
 
     use super::{
-        AuthenticationMode, IamSettings, IntegrationSettings, LimitSettings, RuntimeEnvironment,
-        RuntimeProfile, SettingsError, WorkerSettings, environment_from_value, parse_url_value,
-        validate_database_transport, validate_domain_limit_caps, validate_i64_quantity,
-        validate_integrations, validate_public_base_url, validate_worker_settings,
+        AccountsSettings, IntegrationSettings, LimitSettings, ProofIssuers, RuntimeEnvironment,
+        RuntimeProfile, SettingsError, WorkerSettings, environment_from_value,
+        parse_accounts_origin, parse_url_value, validate_database_transport,
+        validate_domain_limit_caps, validate_i64_quantity, validate_integrations,
+        validate_public_base_url, validate_worker_settings,
     };
 
     #[test]
@@ -853,19 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_closed_authentication_modes() {
-        assert_eq!("iam".parse(), Ok(AuthenticationMode::Iam));
-        assert_eq!(
-            "trusted_headers".parse(),
-            Ok(AuthenticationMode::TrustedHeaders)
-        );
-        assert!("disabled".parse::<AuthenticationMode>().is_err());
-    }
-
-    #[test]
-    fn api_profile_validates_iam_only() {
+    fn api_profile_requires_the_app_secret_and_a_production_webhook_secret() {
         let mut integrations = integration_settings();
-
         assert!(
             validate_integrations(
                 RuntimeProfile::Api,
@@ -875,34 +1005,58 @@ mod tests {
             .is_ok()
         );
 
-        integrations.iam.app_secret = None;
+        integrations.accounts.webhook_secret = None;
         assert!(matches!(
             validate_integrations(
                 RuntimeProfile::Api,
                 RuntimeEnvironment::Production,
                 &integrations,
             ),
-            Err(SettingsError::Missing("COMMIT_IAM_APP_SECRET"))
+            Err(SettingsError::Missing("COMMIT_ACCOUNTS_WEBHOOK_SECRET"))
+        ));
+        assert!(
+            validate_integrations(
+                RuntimeProfile::Api,
+                RuntimeEnvironment::Development,
+                &integrations,
+            )
+            .is_ok()
+        );
+
+        integrations.accounts.app_secret = None;
+        assert!(matches!(
+            validate_integrations(
+                RuntimeProfile::Api,
+                RuntimeEnvironment::Development,
+                &integrations,
+            ),
+            Err(SettingsError::Missing("COMMIT_APP_SECRET"))
+        ));
+    }
+
+    #[test]
+    fn webhook_secret_must_be_an_accounts_whsec_value() {
+        let mut integrations = integration_settings();
+        integrations.accounts.webhook_secret = Some(SecretString::from("plain-secret"));
+        let error = validate_integrations(
+            RuntimeProfile::Api,
+            RuntimeEnvironment::Development,
+            &integrations,
+        );
+        assert!(matches!(
+            error,
+            Err(SettingsError::Invalid {
+                name: "COMMIT_ACCOUNTS_WEBHOOK_SECRET",
+                ..
+            })
         ));
     }
 
     #[test]
     fn worker_profile_requires_no_external_service_credentials() {
         let mut integrations = integration_settings();
-        integrations.iam.mode = AuthenticationMode::TrustedHeaders;
-        integrations.iam.base_url = url("http://insecure-iam.invalid/");
-        integrations.iam.app_id = None;
-        integrations.iam.app_secret = None;
-
-        assert!(
-            validate_integrations(
-                RuntimeProfile::Worker,
-                RuntimeEnvironment::Production,
-                &integrations,
-            )
-            .is_ok()
-        );
-
+        integrations.accounts.app_secret = None;
+        integrations.accounts.webhook_secret = None;
         assert!(
             validate_integrations(
                 RuntimeProfile::Worker,
@@ -914,10 +1068,36 @@ mod tests {
     }
 
     #[test]
-    fn production_api_forbids_trusted_header_authentication() {
-        let mut integrations = integration_settings();
-        integrations.iam.mode = AuthenticationMode::TrustedHeaders;
+    fn accounts_origins_allow_plain_http_only_on_this_machine() {
+        for local in [
+            "http://localhost:9590",
+            "http://127.0.0.1:9589",
+            "http://accounts.localhost:8590",
+            "http://[::1]:9590",
+        ] {
+            assert!(
+                parse_accounts_origin("ACCOUNTS_URL", local).is_ok(),
+                "{local}"
+            );
+        }
+        assert!(
+            parse_accounts_origin("ACCOUNTS_URL", "https://accounts.teamofsilicons.com").is_ok()
+        );
+        let remote = parse_accounts_origin("ACCOUNTS_URL", "http://accounts.example.com");
+        assert!(matches!(
+            remote,
+            Err(SettingsError::Invalid { name: "ACCOUNTS_URL", ref reason }) if reason.contains("plain http is accepted only for localhost")
+        ));
+        assert!(
+            parse_accounts_origin("ACCOUNTS_URL", "https://user:pw@accounts.example.com").is_err()
+        );
+        assert!(parse_accounts_origin("ACCOUNTS_URL", "not a url").is_err());
+    }
 
+    #[test]
+    fn production_rejects_a_loopback_accounts_url() {
+        let mut integrations = integration_settings();
+        integrations.accounts.issuer = "http://localhost:9590".to_owned();
         assert!(matches!(
             validate_integrations(
                 RuntimeProfile::Api,
@@ -925,10 +1105,36 @@ mod tests {
                 &integrations,
             ),
             Err(SettingsError::Invalid {
-                name: "COMMIT_AUTH_MODE",
+                name: "ACCOUNTS_URL",
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn proof_issuers_are_per_scope_and_default_to_deny() {
+        let known = ["commit.todos.list", "commit.todos.create"];
+        let empty = ProofIssuers::parse("", &known);
+        assert!(empty.as_ref().is_ok_and(ProofIssuers::is_empty));
+        assert!(empty.is_ok_and(|issuers| !issuers.allows("commit.todos.list", "interface")));
+
+        let parsed = ProofIssuers::parse("commit.todos.list=interface, *=remind", &known);
+        assert!(
+            parsed
+                .as_ref()
+                .is_ok_and(|issuers| issuers.allows("commit.todos.list", "interface"))
+        );
+        assert!(
+            parsed
+                .as_ref()
+                .is_ok_and(|issuers| !issuers.allows("commit.todos.create", "interface"))
+        );
+        assert!(parsed.is_ok_and(|issuers| issuers.allows("commit.todos.create", "remind")));
+
+        let unknown = ProofIssuers::parse("commit.todo.list=interface", &known);
+        assert!(unknown.is_err_and(|reason| reason.contains("is not a scope Commit honours")));
+        assert!(ProofIssuers::parse("commit.todos.list", &known).is_err());
+        assert!(ProofIssuers::parse("commit.todos.list=Interface!", &known).is_err());
     }
 
     #[test]
@@ -1209,14 +1415,13 @@ mod tests {
 
     fn integration_settings() -> IntegrationSettings {
         IntegrationSettings {
-            iam: IamSettings {
-                mode: AuthenticationMode::Iam,
-                base_url: url("https://iam.example.test/api/v1/"),
-                app_id: Some("silicon-commit".to_owned()),
-                app_secret: Some(SecretString::from("app-secret")),
-                webhook_secret: None,
-                webhook_key_version: 1,
-                audience: "silicon-commit".to_owned(),
+            accounts: AccountsSettings {
+                issuer: "https://accounts.teamofsilicons.com".to_owned(),
+                api_url: url("https://accounts.teamofsilicons.com/"),
+                app_id: "commit".to_owned(),
+                app_secret: Some(SecretString::from("sa_app_commit_test")),
+                webhook_secret: Some(SecretString::from("whsec_test")),
+                proof_issuers: ProofIssuers::default(),
             },
             connect_timeout: Duration::from_secs(1),
             request_timeout: provider_timeout(),

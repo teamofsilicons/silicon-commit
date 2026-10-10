@@ -146,10 +146,18 @@ REVOKE ALL
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA commit FROM :"api_role", :"worker_role";
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA commit_private FROM :"api_role", :"worker_role";
 
--- API: online identity projections and transactional product mutations.
+-- API: Silicon Accounts identities (accounts Commit has seen, the webhook inbox and the
+-- Silicon allow-list) and transactional product mutations. The IAM-era projections,
+-- testing environments, IAM webhook inbox and Honeycomb tables keep their data but are
+-- no longer reachable by either runtime role.
+GRANT SELECT, INSERT, UPDATE
+    ON TABLE commit.accounts
+    TO :"api_role";
 GRANT SELECT, INSERT
-    ON TABLE commit.organization_projection,
-             commit.actor_projection
+    ON TABLE commit.accounts_webhook_events
+    TO :"api_role";
+GRANT SELECT, INSERT, DELETE
+    ON TABLE commit.silicon_allowed_accounts
     TO :"api_role";
 GRANT SELECT, INSERT, UPDATE
     ON TABLE commit.todos,
@@ -180,23 +188,26 @@ GRANT SELECT, INSERT, DELETE
 
 GRANT SELECT, INSERT ON TABLE commit.project_collaborators TO :"api_role";
 GRANT SELECT, INSERT, DELETE ON TABLE commit.project_versions TO :"api_role";
-GRANT EXECUTE ON FUNCTION commit.project_access(uuid,uuid,uuid,text[]) TO :"api_role";
-
--- API testing and authenticated IAM event ingress.
-GRANT SELECT, INSERT, UPDATE
-    ON TABLE commit.testing_environments,
-             commit.testing_organizations
+-- The access policy: the custodian circle, project and todo visibility, Silicon reachability.
+GRANT EXECUTE
+    ON FUNCTION commit.in_circle(text,text),
+                commit.circle_of(text),
+                commit.project_writable(uuid,text),
+                commit.project_access(uuid,text),
+                commit.todo_access(uuid,text),
+                commit.may_reach(text,text)
     TO :"api_role";
-GRANT SELECT, INSERT ON TABLE commit.iam_webhook_events TO :"api_role";
-GRANT EXECUTE ON FUNCTION commit.reset_discovered_testing_environment(uuid,bigint) TO :"api_role";
-GRANT EXECUTE ON FUNCTION commit.clean_testing_environment(uuid,text) TO :"api_role";
+-- account.deleted (Silicon Accounts webhook): one owner-defined, bounded forgetting step.
+GRANT EXECUTE
+    ON FUNCTION commit.forget_account(text,timestamptz,text,bigint,bigint)
+    TO :"api_role";
 
 -- Worker: webhook queue state plus one owner-defined bounded retention
 -- capability; no direct content deletion/redaction, project writes, identity
--- mutation, audit insertion, or new product-row creation.
-GRANT SELECT
-    ON TABLE commit.organization_projection,
-             commit.actor_projection
+-- mutation, audit insertion, or new product-row creation. It reads only the
+-- uuid and current id of a delivery's recipient.
+GRANT SELECT (uuid, public_id)
+    ON TABLE commit.accounts
     TO :"worker_role";
 GRANT SELECT
     ON TABLE commit.outbox_events
@@ -216,9 +227,6 @@ GRANT UPDATE (
     TO :"worker_role";
 GRANT EXECUTE
     ON FUNCTION commit.run_retention_pass(integer)
-    TO :"worker_role";
-GRANT EXECUTE
-    ON FUNCTION commit.run_testing_environment_retention(integer)
     TO :"worker_role";
 
 -- Future objects remain inaccessible until this explicit table map is updated
@@ -270,9 +278,10 @@ GRANT INSERT ON commit.telemetry_events TO :"api_role";
 GRANT SELECT, UPDATE, DELETE ON commit.telemetry_events TO :"worker_role";
 
 GRANT EXECUTE ON FUNCTION commit.lock_notification_access(uuid) TO :"worker_role";
-
-GRANT SELECT, INSERT, UPDATE ON commit.honeycomb_environments,commit.honeycomb_operations TO :"api_role";
-GRANT EXECUTE ON FUNCTION commit.finish_honeycomb_operation(uuid,uuid,text,boolean),commit.mark_honeycomb_activity(uuid,bigint) TO :"api_role";
-GRANT EXECUTE ON FUNCTION commit.honeycomb_activity_outbox(),commit.ack_honeycomb_activity(uuid,bigint,bigint,timestamptz) TO :"worker_role";
-GRANT EXECUTE ON FUNCTION commit.testing_delivery_allowed(uuid) TO :"worker_role";
 COMMIT;
+
+GRANT SELECT, INSERT, UPDATE ON commit.account_lifecycle TO :"api_role";
+GRANT SELECT ON commit.effective_email_preferences TO :"api_role", :"worker_role";
+GRANT EXECUTE ON FUNCTION commit.current_custodian(text) TO :"api_role", :"worker_role";
+
+GRANT SELECT ON commit.accounts_uuid128_map TO :"api_role", :"worker_role";

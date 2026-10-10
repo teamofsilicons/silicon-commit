@@ -38,9 +38,15 @@ pub(crate) async fn create(
     Idempotency(key): Idempotency,
     StrictJson(input): StrictJson<TodoCreate>,
 ) -> Result<Response, AppError> {
-    let actor = state
-        .authenticate(&headers, action::TODOS_CREATE, None)
-        .await?;
+    let actor = if input.project_id.is_some() {
+        state
+            .authenticate_sensitive(&headers, action::TODOS_CREATE, None)
+            .await?
+    } else {
+        state
+            .authenticate(&headers, action::TODOS_CREATE, None)
+            .await?
+    };
     let request_id = required_request_id()?;
     let mutation = state.todos.create(&actor, input, key, &request_id).await?;
     let location = created_resource_location(&mutation, "todos")?;
@@ -69,9 +75,15 @@ pub(crate) async fn update(
     StrictJson(input): StrictJson<TodoPatch>,
 ) -> Result<Response, AppError> {
     let resource = todo_id.to_string();
-    let actor = state
-        .authenticate(&headers, action::TODOS_UPDATE, Some(resource))
-        .await?;
+    let actor = if input.assigned_to.is_some() || !input.project_id.is_absent() {
+        state
+            .authenticate_sensitive(&headers, action::TODOS_UPDATE, Some(resource))
+            .await?
+    } else {
+        state
+            .authenticate(&headers, action::TODOS_UPDATE, Some(resource))
+            .await?
+    };
     let request_id = required_request_id()?;
     let mutation = state
         .todos

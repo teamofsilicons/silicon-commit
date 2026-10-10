@@ -21,8 +21,9 @@ class BootstrapOrderingTests(unittest.TestCase):
         secret = {
             'db_api_password': 'test-api', 'db_worker_password': 'test-worker',
             'db_migrator_password': 'test-migrator', 'db_admin_password': 'test-admin',
-            'COMMIT_IAM_APP_SECRET': 'test-iam',
-            'COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY': 'stable-test-key',
+            'COMMIT_APP_SECRET': 'test-app-secret',
+            'COMMIT_ACCOUNTS_WEBHOOK_SECRET': 'whsec_test',
+            'COMMIT_IAM_APP_SECRET': 'retired-and-never-copied',
         }
 
         def check_output(args, **kwargs):
@@ -77,6 +78,9 @@ class BootstrapOrderingTests(unittest.TestCase):
                 except (subprocess.CalledProcessError, FileNotFoundError) as failure:
                     error = failure
             temporary_credentials = [name for name in ('admin.env', 'migrator.env') if (root/name).exists()]
+            self.environments = {
+                name: (root/name).read_text() for name in ('api.env', 'worker.env') if (root/name).exists()
+            }
         return events, error, temporary_credentials
 
     def test_both_old_services_stop_before_migration_and_new_services_follow_grants(self):
@@ -128,6 +132,18 @@ class BootstrapOrderingTests(unittest.TestCase):
                 self.assertIn('stop:commit-worker', stages)
                 self.assertFalse(any(name == 'restore' or name.startswith('new:') for name in stages))
                 self.assertEqual(credentials, [])
+
+    def test_services_get_silicon_accounts_settings_and_no_retired_variables(self):
+        _, error, _ = self.exercise()
+        self.assertIsNone(error)
+        api, worker = self.environments['api.env'], self.environments['worker.env']
+        self.assertIn('COMMIT_APP_SECRET=test-app-secret\n', api)
+        self.assertIn('COMMIT_ACCOUNTS_WEBHOOK_SECRET=whsec_test\n', api)
+        for environment in (api, worker):
+            self.assertNotIn('COMMIT_IAM_', environment)
+            self.assertNotIn('COMMIT_AUTH_MODE', environment)
+            self.assertNotIn('HONEYCOMB', environment)
+        self.assertNotIn('COMMIT_APP_SECRET', worker)
 
     def test_first_deployment_has_no_old_services_to_stop(self):
         events, error, _ = self.exercise(running=())

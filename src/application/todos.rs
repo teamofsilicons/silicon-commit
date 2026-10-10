@@ -1,4 +1,9 @@
 //! Todo application workflows.
+//!
+//! A todo belongs to the account that created it (`assigned_by`) and is shared
+//! with its assignee. It is visible to both their custodian circles and to
+//! whoever can read its project. The owner changes its content; the owner and
+//! the assignee move its status; custodians stand in for their Silicons.
 
 use std::{borrow::Cow, sync::Arc, time::Duration};
 
@@ -8,18 +13,23 @@ use uuid::Uuid;
 
 use crate::{
     application::{
+        accounts::{account_field_error, ensure_reachable, remember},
+        authorization,
         idempotency::{IdempotencyKey, MutationIdentity, MutationResponse},
-        ports::{ActiveMember, IdentityProvider, InboundCredential, ProviderError, VerifiedActor},
+        ports::{IdentityProvider, ResolvedAccount, VerifiedActor},
     },
     domain::{
         Actor, ActorId, AttachmentUrl, CollectionQuery, DomainLimits, LimitedText, NullablePatch,
-        Page, PageCursor, RequiredText, Todo, TodoCreate, TodoId, TodoNote, TodoNoteCreate,
-        TodoPage, TodoPatch, TodoQuery, TodoStatus, ValidatedTodoPatch, ValidationError,
+        Page, PageCursor, ProjectId, ProjectLocator, RequiredText, Todo, TodoCreate, TodoId,
+        TodoNote, TodoNoteCreate, TodoPage, TodoPatch, TodoQuery, TodoStatus, ValidatedTodoPatch,
+        ValidationError,
     },
     error::AppError,
-    infrastructure::postgres::notifications as notification_store,
-    infrastructure::postgres::todos::{
-        self as store, DeleteTarget, NewOutboxEvent, NewTodo, TodoActivityKind, TodoReplacement,
+    infrastructure::postgres::{
+        notifications as notification_store, projects as project_store,
+        todos::{
+            self as store, DeleteTarget, NewOutboxEvent, NewTodo, TodoActivityKind, TodoReplacement,
+        },
     },
 };
 
@@ -39,7 +49,7 @@ pub struct TodoService {
 }
 
 impl TodoService {
-    /// Creates a todo service from its database and online IAM dependencies.
+    /// Creates a todo service from its database and Silicon Accounts dependencies.
     #[must_use]
     pub fn new(
         pool: PgPool,
@@ -59,7 +69,7 @@ impl TodoService {
         }
     }
 
-    /// Lists active organization-visible todos using stable keyset pagination.
+    /// Lists active todos the caller can see, using stable keyset pagination.
     pub async fn list(
         &self,
         actor: &VerifiedActor,
@@ -69,10 +79,9 @@ impl TodoService {
         store::list_todos(&self.pool, actor, &query, created_at).await
     }
 
-    /// Returns one active organization-visible todo.
+    /// Returns one active todo the caller can see.
     pub async fn get(&self, actor: &VerifiedActor, todo_id: TodoId) -> Result<Todo, AppError> {
-        self.check_project_access(actor, todo_id).await?;
-        store::get_todo(&self.pool, actor.organization_id, todo_id)
+        store::get_visible_todo(&self.pool, todo_id, actor.uuid())
             .await?
             .ok_or(AppError::NotFound)
     }
@@ -101,7 +110,6 @@ impl TodoService {
         let assignee = self.resolve_assignee(actor, &request.assigned_to).await?;
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -109,36 +117,36 @@ impl TodoService {
             return Ok(response);
         }
 
-        crate::infrastructure::postgres::testing::capacity(&mut transaction, false).await?;
-        store::upsert_verified_actor(transaction.as_mut(), actor).await?;
-        store::upsert_active_member(transaction.as_mut(), &assignee).await?;
+        remember(transaction.as_mut(), actor, std::slice::from_ref(&assignee)).await?;
+        ensure_reachable(transaction.as_mut(), actor, &assignee.actor, "assigned_to").await?;
         let todo_id = TodoId::new();
-        let new_todo = NewTodo {
-            id: todo_id,
-            organization_id: actor.organization_id,
-            title: &request.title,
-            description: request.description.as_ref(),
-            assigned_by_principal_id: actor.actor.principal_id,
-            assigned_to_principal_id: assignee.actor.principal_id,
-            status: request.status,
-            attachments: &request.attachments,
-            project_id: request.project_id,
-        };
         if let Some(project_id) = request.project_id {
             authorize_link(&mut transaction, actor, project_id).await?;
-            invite_assignee(&mut transaction, actor, project_id, &assignee.actor).await?;
+            share_project(&mut transaction, actor, project_id, &assignee.actor).await?;
         }
-        store::insert_todo(transaction.as_mut(), &new_todo).await?;
+        store::insert_todo(
+            transaction.as_mut(),
+            &NewTodo {
+                id: todo_id,
+                title: &request.title,
+                description: request.description.as_ref(),
+                assigned_by: actor.uuid(),
+                assigned_to: &assignee.actor.uuid,
+                status: request.status,
+                attachments: &request.attachments,
+                project_id: request.project_id,
+            },
+        )
+        .await?;
 
         let changes = json!({
             "fields": ["title", "description", "assigned_to", "status", "attachments"]
         });
         store::insert_activity(
             transaction.as_mut(),
-            actor.organization_id,
+            actor,
             todo_id,
             TodoActivityKind::Created,
-            actor.actor.principal_id,
             request_id,
             &changes,
             self.audit_retention,
@@ -146,8 +154,7 @@ impl TodoService {
         .await?;
         store::insert_audit_event(
             transaction.as_mut(),
-            actor.organization_id,
-            actor.actor.principal_id,
+            actor,
             "todo.created",
             "todo",
             todo_id.into_uuid(),
@@ -157,7 +164,7 @@ impl TodoService {
         )
         .await?;
 
-        let todo = store::lock_todo(transaction.as_mut(), actor.organization_id, todo_id)
+        let todo = store::lock_todo(transaction.as_mut(), todo_id)
             .await?
             .ok_or_else(|| {
                 AppError::Internal(anyhow::anyhow!("inserted todo could not be read"))
@@ -185,7 +192,6 @@ impl TodoService {
         idempotency_key: IdempotencyKey,
         request_id: &str,
     ) -> Result<MutationResponse, AppError> {
-        self.check_project_access(actor, todo_id).await?;
         validate_request_id(request_id)?;
         let path = format!("/todos/{todo_id}");
         let mutation = mutation_identity(UPDATE_TODO_OPERATION, path, idempotency_key, &request)?;
@@ -194,9 +200,7 @@ impl TodoService {
         }
 
         let patch = request.validate(&self.limits).map_err(validation_error)?;
-        let authorization_snapshot = store::get_todo(&self.pool, actor.organization_id, todo_id)
-            .await?
-            .ok_or(AppError::NotFound)?;
+        let authorization_snapshot = self.get(actor, todo_id).await?;
         authorize_patch(actor, &authorization_snapshot, &patch)?;
         let resolved_assignee = match patch.assigned_to.as_ref() {
             Some(assigned_to) => Some(self.resolve_assignee(actor, assigned_to).await?),
@@ -204,8 +208,7 @@ impl TodoService {
         };
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
-        lock_related_project(&mut transaction, actor, todo_id).await?;
+        lock_related_project(&mut transaction, todo_id).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
@@ -213,16 +216,25 @@ impl TodoService {
             return Ok(response);
         }
 
-        let current = store::lock_todo(transaction.as_mut(), actor.organization_id, todo_id)
+        let current = store::lock_todo(transaction.as_mut(), todo_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        authorize_patch(actor, &current, &patch)?;
-        store::upsert_verified_actor(transaction.as_mut(), actor).await?;
-        if let Some(assignee) = &resolved_assignee {
-            store::upsert_active_member(transaction.as_mut(), assignee).await?;
+        if !store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+            return Err(AppError::NotFound);
         }
+        authorize_patch(actor, &current, &patch)?;
+        remember(transaction.as_mut(), actor, resolved_assignee.as_slice()).await?;
 
         let desired = DesiredTodo::from_patch(&current, patch, resolved_assignee);
+        if desired.changed_fields.contains(&"assigned_to") {
+            ensure_reachable(
+                transaction.as_mut(),
+                actor,
+                &desired.assigned_to,
+                "assigned_to",
+            )
+            .await?;
+        }
         if desired.changed_fields.is_empty() {
             let response = mutation_response(200, &current)?;
             store::insert_idempotency_record(
@@ -239,7 +251,12 @@ impl TodoService {
         }
 
         if desired.project_id != current.project_id {
-            let linked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commit.project_tasks WHERE organization_id=$1 AND todo_id=$2)").bind(actor.organization_id.into_uuid()).bind(todo_id.into_uuid()).fetch_one(&mut *transaction).await?;
+            let linked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM commit.project_tasks WHERE todo_id = $1)",
+            )
+            .bind(todo_id.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
             if linked {
                 return Err(AppError::Conflict {
                     code: "project_task_link_is_immutable".into(),
@@ -249,36 +266,39 @@ impl TodoService {
                 authorize_link(&mut transaction, actor, id).await?;
             }
         }
-        if let Some(project_id) = desired.project_id {
-            invite_assignee(&mut transaction, actor, project_id, &desired.assigned_to).await?;
+        // Content or status edits must not recreate membership removed separately.
+        // A reassignment or a new link may widen access, and needs project write authority.
+        if let Some(project_id) = desired.project_id
+            && (desired.project_id != current.project_id
+                || desired.changed_fields.contains(&"assigned_to"))
+        {
+            authorize_link(&mut transaction, actor, project_id).await?;
+            share_project(&mut transaction, actor, project_id, &desired.assigned_to).await?;
         }
-        let replacement = TodoReplacement {
-            project_id: desired.project_id,
-            title: &desired.title,
-            description: desired.description.as_ref(),
-            assigned_to_principal_id: desired.assigned_to.principal_id,
-            status: desired.status,
-            attachments: &desired.attachments,
-            replace_attachments: desired.replace_attachments,
-        };
         store::update_todo(
             transaction.as_mut(),
-            actor.organization_id,
             todo_id,
-            &replacement,
+            &TodoReplacement {
+                project_id: desired.project_id,
+                title: &desired.title,
+                description: desired.description.as_ref(),
+                assigned_to: &desired.assigned_to.uuid,
+                status: desired.status,
+                attachments: &desired.attachments,
+                replace_attachments: desired.replace_attachments,
+            },
         )
         .await?;
-        let updated = store::lock_todo(transaction.as_mut(), actor.organization_id, todo_id)
+        let updated = store::lock_todo(transaction.as_mut(), todo_id)
             .await?
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("updated todo could not be read")))?;
 
         let changes = json!({ "fields": desired.changed_fields });
         store::insert_activity(
             transaction.as_mut(),
-            actor.organization_id,
+            actor,
             todo_id,
             desired.activity_kind,
-            actor.actor.principal_id,
             request_id,
             &changes,
             self.audit_retention,
@@ -286,8 +306,7 @@ impl TodoService {
         .await?;
         store::insert_audit_event(
             transaction.as_mut(),
-            actor.organization_id,
-            actor.actor.principal_id,
+            actor,
             "todo.updated",
             "todo",
             todo_id.into_uuid(),
@@ -331,54 +350,53 @@ impl TodoService {
         Ok(response)
     }
 
-    /// Soft-deletes one todo when the caller is its assigner or an explicit manager.
+    /// Soft-deletes one todo when the caller is its owner (or the owner's custodian).
     pub async fn delete(
         &self,
         actor: &VerifiedActor,
         todo_id: TodoId,
         request_id: &str,
     ) -> Result<(), AppError> {
-        self.check_project_access(actor, todo_id).await?;
         validate_request_id(request_id)?;
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
-        lock_related_project(&mut transaction, actor, todo_id).await?;
-        let current =
-            match store::lock_delete_target(transaction.as_mut(), actor.organization_id, todo_id)
-                .await?
-            {
-                DeleteTarget::Missing => return Err(AppError::NotFound),
-                DeleteTarget::AlreadyDeleted(assigned_by_principal_id) => {
-                    if actor.actor.principal_id != assigned_by_principal_id
-                        && !actor.manages_todos()
-                    {
-                        return Err(AppError::Forbidden);
-                    }
-                    transaction.commit().await?;
-                    return Ok(());
+        lock_related_project(&mut transaction, todo_id).await?;
+        let current = match store::lock_delete_target(transaction.as_mut(), todo_id).await? {
+            DeleteTarget::Missing => return Err(AppError::NotFound),
+            DeleteTarget::AlreadyDeleted(owner) => {
+                if !actor.acts_for(&owner) {
+                    return Err(AppError::NotFound);
                 }
-                DeleteTarget::Active(todo) => todo,
-            };
-        if actor.actor.principal_id != current.assigned_by.principal_id && !actor.manages_todos() {
-            return Err(AppError::Forbidden);
+                transaction.commit().await?;
+                return Ok(());
+            }
+            DeleteTarget::Active(todo) => todo,
+        };
+        if !store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+            return Err(AppError::NotFound);
+        }
+        if !authorization::can_delete_todo(actor, &current) {
+            return Err(AppError::Denied {
+                code: "not_todo_owner".into(),
+                message:
+                    "Only the todo's owner (who created it) or the owner's custodian can delete it."
+                        .to_owned(),
+            });
         }
 
-        store::upsert_verified_actor(transaction.as_mut(), actor).await?;
+        remember(transaction.as_mut(), actor, &[]).await?;
         let version = store::soft_delete_todo(
             transaction.as_mut(),
-            actor.organization_id,
             todo_id,
-            actor.actor.principal_id,
+            actor.uuid(),
             self.tombstone_retention,
         )
         .await?;
         let changes = json!({ "fields": ["deleted_at"], "version": version });
         store::insert_activity(
             transaction.as_mut(),
-            actor.organization_id,
+            actor,
             todo_id,
             TodoActivityKind::Deleted,
-            actor.actor.principal_id,
             request_id,
             &changes,
             self.audit_retention,
@@ -386,8 +404,7 @@ impl TodoService {
         .await?;
         store::insert_audit_event(
             transaction.as_mut(),
-            actor.organization_id,
-            actor.actor.principal_id,
+            actor,
             "todo.deleted",
             "todo",
             todo_id.into_uuid(),
@@ -412,16 +429,15 @@ impl TodoService {
         Ok(())
     }
 
-    /// Lists append-only notes for one active organization-visible todo.
+    /// Lists append-only notes for one active todo the caller can see.
     pub async fn list_notes(
         &self,
         actor: &VerifiedActor,
         todo_id: TodoId,
         query: CollectionQuery,
     ) -> Result<Page<TodoNote>, AppError> {
-        self.check_project_access(actor, todo_id).await?;
         let limit = query.limit;
-        let notes = store::list_notes(&self.pool, actor.organization_id, todo_id, query)
+        let notes = store::list_notes(&self.pool, todo_id, actor.uuid(), query)
             .await?
             .ok_or(AppError::NotFound)?;
         Ok(Page::from_window(notes, limit, |note| {
@@ -430,6 +446,9 @@ impl TodoService {
     }
 
     /// Appends a todo note exactly once and notifies a delegating Silicon atomically.
+    ///
+    /// The note's author is always the caller: a custodian writing on its
+    /// Silicon's todo writes as itself.
     pub async fn add_note(
         &self,
         actor: &VerifiedActor,
@@ -438,7 +457,6 @@ impl TodoService {
         idempotency_key: IdempotencyKey,
         request_id: &str,
     ) -> Result<MutationResponse, AppError> {
-        self.check_project_access(actor, todo_id).await?;
         validate_request_id(request_id)?;
         let path = format!("/todos/{todo_id}/notes");
         let fingerprint_input = note_fingerprint_input(&request);
@@ -454,24 +472,25 @@ impl TodoService {
         let request = request.validate(&self.limits).map_err(validation_error)?;
 
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
-        lock_related_project(&mut transaction, actor, todo_id).await?;
+        lock_related_project(&mut transaction, todo_id).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, &mutation).await?;
         if let Some(response) = replay_on_connection(transaction.as_mut(), actor, &mutation).await?
         {
             transaction.commit().await?;
             return Ok(response);
         }
-        let todo = store::lock_todo(transaction.as_mut(), actor.organization_id, todo_id)
+        let todo = store::lock_todo(transaction.as_mut(), todo_id)
             .await?
             .ok_or(AppError::NotFound)?;
+        if !store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+            return Err(AppError::NotFound);
+        }
         authorize_note(actor, &todo)?;
-        store::upsert_verified_actor(transaction.as_mut(), actor).await?;
+        remember(transaction.as_mut(), actor, &[]).await?;
 
         let note_id = crate::domain::TodoNoteId::new();
         let note = store::insert_note(
             transaction.as_mut(),
-            actor.organization_id,
             todo_id,
             note_id,
             &actor.actor,
@@ -481,10 +500,9 @@ impl TodoService {
         let changes = json!({ "note_id": note_id, "fields": ["body"] });
         store::insert_activity(
             transaction.as_mut(),
-            actor.organization_id,
+            actor,
             todo_id,
             TodoActivityKind::NoteAdded,
-            actor.actor.principal_id,
             request_id,
             &changes,
             self.audit_retention,
@@ -492,8 +510,7 @@ impl TodoService {
         .await?;
         store::insert_audit_event(
             transaction.as_mut(),
-            actor.organization_id,
-            actor.actor.principal_id,
+            actor,
             "todo.note_added",
             "todo_note",
             note_id.into_uuid(),
@@ -535,78 +552,36 @@ impl TodoService {
         mutation: &MutationIdentity,
     ) -> Result<Option<MutationResponse>, AppError> {
         let mut transaction = self.pool.begin().await?;
-        crate::infrastructure::postgres::testing::guard(&mut transaction).await?;
         store::lock_idempotency_scope(transaction.as_mut(), actor, mutation).await?;
         let response = replay_on_connection(transaction.as_mut(), actor, mutation).await?;
         transaction.commit().await?;
         Ok(response)
     }
 
+    /// Resolves an assignee named by `c:`/`si:` id or uuid. The caller itself needs no lookup.
     async fn resolve_assignee(
         &self,
         caller: &VerifiedActor,
-        actor_id: &ActorId,
-    ) -> Result<ActiveMember, AppError> {
-        let resolved = self
-            .identity_provider
-            .resolve_active_member(&caller.org_id, actor_id, None)
-            .await;
-        let member = match resolved {
-            Ok(member) => member,
-            Err(ProviderError::NotFound)
-                if caller.actor.id == *actor_id
-                    && matches!(caller.grant(), InboundCredential::Trusted(_)) =>
-            {
-                // The non-production trusted-header provider has no configured
-                // directory by default. Its authenticated caller is still a
-                // known member, but only after the provider had an opportunity
-                // to reject a configured public-ID collision.
-                ActiveMember {
-                    organization_id: caller.organization_id,
-                    org_id: caller.org_id.clone(),
-                    membership_id: caller.membership_id.clone(),
-                    actor: caller.actor.clone(),
-                }
-            }
-            Err(ProviderError::NotFound) if caller.actor.id == *actor_id => {
-                return Err(AppError::BadGateway);
-            }
-            Err(error) => return Err(map_assignee_provider_error(error)),
-        };
-
-        validate_resolved_assignee(caller, actor_id, member)
+        id: &ActorId,
+    ) -> Result<ResolvedAccount, AppError> {
+        if id.as_str() == caller.uuid().as_str()
+            || (!caller.actor.id.as_str().is_empty()
+                && id.as_str().eq_ignore_ascii_case(caller.actor.id.as_str()))
+        {
+            return Ok(ResolvedAccount::known(
+                caller.actor.clone(),
+                caller.custodian.clone(),
+            ));
+        }
+        self.identity_provider
+            .resolve_account(id, None)
+            .await
+            .map_err(|error| account_field_error("assigned_to", error))
     }
-}
-
-fn validate_resolved_assignee(
-    caller: &VerifiedActor,
-    requested_actor_id: &ActorId,
-    member: ActiveMember,
-) -> Result<ActiveMember, AppError> {
-    if member.organization_id != caller.organization_id
-        || member.org_id != caller.org_id
-        || member.actor.id != *requested_actor_id
-        || member.organization_id.as_uuid().is_nil()
-        || member.membership_id
-            != format!("{}[{}]", member.actor.id.as_str(), member.org_id.as_str())
-        || member.actor.principal_id.as_uuid().is_nil()
-    {
-        return Err(AppError::BadGateway);
-    }
-
-    if caller.actor.id == *requested_actor_id
-        && (member.membership_id != caller.membership_id || member.actor != caller.actor)
-    {
-        // The caller itself is one known match. A different member returned for
-        // the same untyped public ID proves that the request is ambiguous.
-        return Err(AppError::BadGateway);
-    }
-
-    Ok(member)
 }
 
 struct DesiredTodo {
-    project_id: Option<crate::domain::ProjectId>,
+    project_id: Option<ProjectId>,
     title: RequiredText,
     description: Option<LimitedText>,
     assigned_to: Actor,
@@ -621,7 +596,7 @@ impl DesiredTodo {
     fn from_patch(
         current: &Todo,
         patch: ValidatedTodoPatch,
-        resolved_assignee: Option<ActiveMember>,
+        resolved_assignee: Option<ResolvedAccount>,
     ) -> Self {
         let replace_attachments = patch.attachments.is_some();
         let title = patch.title.unwrap_or_else(|| current.title.clone());
@@ -631,7 +606,7 @@ impl DesiredTodo {
             NullablePatch::Value(description) => Some(description),
         };
         let assigned_to =
-            resolved_assignee.map_or_else(|| current.assigned_to.clone(), |member| member.actor);
+            resolved_assignee.map_or_else(|| current.assigned_to.clone(), |account| account.actor);
         let status = patch.status.unwrap_or(current.status);
         let attachments = patch
             .attachments
@@ -644,7 +619,7 @@ impl DesiredTodo {
         if description != current.description {
             changed_fields.push("description");
         }
-        if assigned_to.principal_id != current.assigned_to.principal_id {
+        if assigned_to.uuid != current.assigned_to.uuid {
             changed_fields.push("assigned_to");
         }
         if status != current.status {
@@ -709,8 +684,17 @@ async fn replay_on_connection(
                 .and_then(Value::as_str)
                 .and_then(|v| v.parse::<TodoId>().ok())
         });
+    // A stored response is served again only while its live todo is still visible to the
+    // caller; once the todo is deleted, the caller's own historical response stays replayable.
     if let Some(id) = id {
-        authorize_related_project(connection, actor, id, true).await?;
+        let live: Option<bool> =
+            sqlx::query_scalar("SELECT deleted_at IS NULL FROM commit.todos WHERE id = $1")
+                .bind(id.into_uuid())
+                .fetch_optional(&mut *connection)
+                .await?;
+        if live == Some(true) && !store::can_see(connection, id, actor.uuid()).await? {
+            return Err(AppError::NotFound);
+        }
     }
     Ok(Some(stored.response))
 }
@@ -720,34 +704,27 @@ fn authorize_patch(
     todo: &Todo,
     patch: &ValidatedTodoPatch,
 ) -> Result<(), AppError> {
-    let changes_content = !patch.project_id.is_absent()
-        || patch.title.is_some()
-        || !patch.description.is_absent()
-        || patch.assigned_to.is_some()
-        || patch.attachments.is_some();
-    let changes_status = patch.status.is_some();
-    let is_assigner = actor.actor.principal_id == todo.assigned_by.principal_id;
-    let is_assignee = actor.actor.principal_id == todo.assigned_to.principal_id;
-    let manages_todos = actor.manages_todos();
-
-    if (changes_content && !(is_assigner || manages_todos))
-        || (changes_status && !(is_assigner || is_assignee || manages_todos))
-    {
-        return Err(AppError::Forbidden);
+    if authorization::can_patch_todo(actor, todo, patch) {
+        return Ok(());
     }
-    Ok(())
+    Err(AppError::Denied {
+        code: "todo_change_not_allowed".into(),
+        message: "Only the todo's owner (or the owner's custodian) can change its title, description, assignee, attachments or project; the assignee (or its custodian) can also change its status.".to_owned(),
+    })
 }
 
 fn authorize_note(actor: &VerifiedActor, todo: &Todo) -> Result<(), AppError> {
-    let is_assigner = actor.actor.principal_id == todo.assigned_by.principal_id;
-    let is_assignee = actor.actor.principal_id == todo.assigned_to.principal_id;
-    if is_assigner || is_assignee || actor.manages_todos() {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden)
+    if authorization::can_add_todo_note(actor, todo) {
+        return Ok(());
     }
+    Err(AppError::Denied {
+        code: "todo_note_not_allowed".into(),
+        message: "Only the todo's owner, its assignee, or their custodians can add notes."
+            .to_owned(),
+    })
 }
 
+/// Queues a webhook to the Silicon that delegated `todo`, when its rules ask for this change.
 pub(crate) async fn enqueue_notification(
     connection: &mut PgConnection,
     actor: &VerifiedActor,
@@ -763,22 +740,24 @@ pub(crate) async fn enqueue_notification(
         return Ok(());
     };
     let event_id = Uuid::now_v7();
-    let payload = json!({
+    let mut payload = json!({
         "event_id": event_id,
         "todo_id": todo.id,
-        "org_id": todo.org_id,
         "event_type": event_type,
+        "silicon": todo.assigned_by.public_ref(),
         "actor": actor.actor.public_ref(),
         "request_id": request_id,
         "details": details,
     });
+    if let (Some(app), Value::Object(fields)) = (actor.via_app(), &mut payload) {
+        fields.insert("via_app".to_owned(), Value::String(app.to_owned()));
+    }
     store::insert_outbox_event(
         connection,
         &NewOutboxEvent {
             id: event_id,
-            organization_id: actor.organization_id,
             todo_id: todo.id,
-            recipient_silicon_principal_id: todo.assigned_by.principal_id,
+            recipient_silicon: &todo.assigned_by.uuid,
             event_type,
             payload: &payload,
             routing: &routing,
@@ -855,242 +834,58 @@ fn validate_request_id(request_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn map_assignee_provider_error(error: ProviderError) -> AppError {
-    match error {
-        ProviderError::NotFound => AppError::Validation {
-            details: json!({
-                "assigned_to": "Must identify a current Carbon or Silicon in this organization."
-            }),
-        },
-        ProviderError::RateLimited { retry_after } => AppError::RateLimited {
-            retry_after_seconds: retry_after.map_or(1, |duration| duration.as_secs().max(1)),
-        },
-        ProviderError::InvalidResponse => AppError::BadGateway,
-        ProviderError::Unavailable | ProviderError::Unauthenticated | ProviderError::Forbidden => {
-            AppError::ProviderUnavailable
-        }
-        ProviderError::Conflict => AppError::Conflict {
-            code: Cow::Borrowed("assignee_resolution_conflict"),
-        },
-    }
-}
-
-impl TodoService {
-    async fn check_project_access(
-        &self,
-        actor: &VerifiedActor,
-        todo_id: TodoId,
-    ) -> Result<(), AppError> {
-        let mut connection = self.pool.acquire().await?;
-        authorize_related_project(&mut connection, actor, todo_id, false).await
-    }
-}
-/// Checks todo visibility before notes, subscriptions or mutation responses.
-pub(crate) async fn authorize_related_project(
-    connection: &mut PgConnection,
-    actor: &VerifiedActor,
-    todo_id: TodoId,
-    lock: bool,
-) -> Result<(), AppError> {
-    let project: Option<Uuid> = sqlx::query_scalar(
-        "SELECT project_id FROM commit.todos WHERE organization_id=$1 AND id=$2",
-    )
-    .bind(actor.organization_id.into_uuid())
-    .bind(todo_id.into_uuid())
-    .fetch_optional(&mut *connection)
-    .await?
-    .flatten();
-    if let Some(id) = project {
-        if lock {
-            authorize_link(connection, actor, crate::domain::ProjectId::from_uuid(id)).await?;
-        } else if !crate::infrastructure::postgres::projects::can_access(
-            connection,
-            actor,
-            crate::domain::ProjectId::from_uuid(id),
-        )
-        .await?
-        {
-            return Err(AppError::NotFound);
-        }
-    }
-    Ok(())
-}
+/// Locks the todo's project (when it has one) so visibility cannot change mid-mutation.
 async fn lock_related_project(
     connection: &mut PgConnection,
-    actor: &VerifiedActor,
     todo_id: TodoId,
 ) -> Result<(), AppError> {
-    authorize_related_project(connection, actor, todo_id, true).await
-}
-// The project row is locked by authorize_link/lock_related_project before this call.
-// Explicit assignment invites the recipient, matching assignments through tasks.
-async fn invite_assignee(
-    connection: &mut PgConnection,
-    actor: &VerifiedActor,
-    project_id: crate::domain::ProjectId,
-    assignee: &Actor,
-) -> Result<(), AppError> {
-    sqlx::query("INSERT INTO commit.project_participants(id,organization_id,project_id,silicon_principal_id,added_by_principal_id) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM commit.projects WHERE organization_id=$2 AND id=$3 AND private) AND NOT EXISTS(SELECT 1 FROM commit.project_participants WHERE organization_id=$2 AND project_id=$3 AND silicon_principal_id=$4 AND removed_at IS NULL)")
-        .bind(Uuid::now_v7()).bind(actor.organization_id.into_uuid()).bind(project_id.into_uuid()).bind(assignee.principal_id.into_uuid()).bind(actor.actor.principal_id.into_uuid()).execute(connection).await?;
+    let project: Option<Uuid> =
+        sqlx::query_scalar("SELECT project_id FROM commit.todos WHERE id = $1")
+            .bind(todo_id.into_uuid())
+            .fetch_optional(&mut *connection)
+            .await?
+            .flatten();
+    if let Some(id) = project {
+        project_store::lock_project(connection, &ProjectLocator::Id(ProjectId::from_uuid(id)))
+            .await?;
+    }
     Ok(())
 }
 
+/// Linking work to a project needs the right to change that project.
 async fn authorize_link(
     connection: &mut PgConnection,
     actor: &VerifiedActor,
-    project_id: crate::domain::ProjectId,
+    project_id: ProjectId,
 ) -> Result<(), AppError> {
-    crate::infrastructure::postgres::projects::lock_project(
-        connection,
-        actor.organization_id,
-        &crate::domain::ProjectLocator::Id(project_id),
-    )
-    .await?
-    .ok_or(AppError::NotFound)?;
-    if !crate::infrastructure::postgres::projects::can_access(connection, actor, project_id).await?
-    {
+    project_store::lock_project(connection, &ProjectLocator::Id(project_id))
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !project_store::can_write(connection, actor.uuid(), project_id).await? {
+        if project_store::can_read(connection, actor.uuid(), project_id).await? {
+            return Err(AppError::Denied {
+                code: "project_not_writable".into(),
+                message: "Only the project's members (and the custodians of member Silicons) can add work to it.".to_owned(),
+            });
+        }
         return Err(AppError::NotFound);
     }
     Ok(())
 }
 
+/// Assigning project work shares the project with the assignee (the project row is locked).
+async fn share_project(
+    connection: &mut PgConnection,
+    actor: &VerifiedActor,
+    project_id: ProjectId,
+    assignee: &Actor,
+) -> Result<(), AppError> {
+    project_store::add_member(connection, actor, project_id, &assignee.uuid).await
+}
+
 #[cfg(test)]
 mod tests {
-    use secrecy::SecretString;
-    use uuid::Uuid;
-
-    use super::{
-        authorize_note, authorize_patch, update_event_type, validate_request_id,
-        validate_resolved_assignee,
-    };
-    use crate::{
-        application::ports::{
-            ActiveMember, CapabilitySet, InboundCredential, OrganizationRole,
-            TODO_MANAGE_CAPABILITY, VerifiedActor,
-        },
-        domain::{
-            Actor, ActorId, ActorType, OrganizationId, PrincipalId, PublicOrganizationId, Todo,
-            TodoId, TodoStatus, ValidatedTodoPatch,
-        },
-        error::AppError,
-    };
-
-    fn actor(principal: u128, public_id: &str) -> Option<Actor> {
-        Some(Actor::new(
-            PrincipalId::from_uuid(Uuid::from_u128(principal)),
-            ActorType::Carbon,
-            ActorId::new(public_id).ok()?,
-        ))
-    }
-
-    fn verified(principal: u128, capabilities: CapabilitySet) -> Option<VerifiedActor> {
-        let actor = actor(principal, &format!("actor-{principal}"))?;
-        Some(VerifiedActor::new(
-            OrganizationId::from_uuid(Uuid::from_u128(100)),
-            PublicOrganizationId::new("test-org").ok()?,
-            format!("{}[test-org]", actor.id.as_str()),
-            actor,
-            OrganizationRole::Member,
-            capabilities,
-            InboundCredential::Bearer(SecretString::from("test-token".to_owned())),
-        ))
-    }
-
-    fn todo() -> Option<Todo> {
-        Some(Todo {
-            project_id: None,
-            id: TodoId::new(),
-            organization_id: OrganizationId::from_uuid(Uuid::from_u128(100)),
-            org_id: PublicOrganizationId::new("test-org").ok()?,
-            title: crate::domain::RequiredText::new("title", "Ship", 500).ok()?,
-            description: None,
-            assigned_by: actor(1, "assigner")?,
-            assigned_to: actor(2, "assignee")?,
-            status: TodoStatus::YetToDo,
-            attachments: Vec::new(),
-            created_at: time::OffsetDateTime::UNIX_EPOCH,
-            updated_at: time::OffsetDateTime::UNIX_EPOCH,
-        })
-    }
-
-    #[test]
-    fn assignee_may_change_status_but_not_content() {
-        let Some(todo) = todo() else {
-            return;
-        };
-        let Some(assignee) = verified(2, CapabilitySet::default()) else {
-            return;
-        };
-        let status_patch = ValidatedTodoPatch {
-            status: Some(TodoStatus::Blocked),
-            ..ValidatedTodoPatch::default()
-        };
-        assert!(authorize_patch(&assignee, &todo, &status_patch).is_ok());
-
-        let title = crate::domain::RequiredText::new("title", "Changed", 500);
-        let Ok(title) = title else {
-            return;
-        };
-        let content_patch = ValidatedTodoPatch {
-            title: Some(title),
-            ..ValidatedTodoPatch::default()
-        };
-        assert!(matches!(
-            authorize_patch(&assignee, &todo, &content_patch),
-            Err(AppError::Forbidden)
-        ));
-    }
-
-    #[test]
-    fn explicit_manage_capability_authorizes_every_patch_field() {
-        let Some(todo) = todo() else {
-            return;
-        };
-        let capabilities = CapabilitySet::try_from_names([TODO_MANAGE_CAPABILITY]);
-        let Ok(capabilities) = capabilities else {
-            return;
-        };
-        let Some(manager) = verified(3, capabilities) else {
-            return;
-        };
-        let title = crate::domain::RequiredText::new("title", "Changed", 500);
-        let Ok(title) = title else {
-            return;
-        };
-        let patch = ValidatedTodoPatch {
-            title: Some(title),
-            status: Some(TodoStatus::Completed),
-            ..ValidatedTodoPatch::default()
-        };
-        assert!(authorize_patch(&manager, &todo, &patch).is_ok());
-    }
-
-    #[test]
-    fn notes_are_limited_to_involved_actors_or_explicit_managers() {
-        let Some(todo) = todo() else {
-            return;
-        };
-        let Some(assignee) = verified(2, CapabilitySet::default()) else {
-            return;
-        };
-        let Some(bystander) = verified(3, CapabilitySet::default()) else {
-            return;
-        };
-        let capabilities = CapabilitySet::try_from_names([TODO_MANAGE_CAPABILITY]);
-        let Ok(capabilities) = capabilities else {
-            return;
-        };
-        let Some(manager) = verified(4, capabilities) else {
-            return;
-        };
-
-        assert!(authorize_note(&assignee, &todo).is_ok());
-        assert!(matches!(
-            authorize_note(&bystander, &todo),
-            Err(AppError::Forbidden)
-        ));
-        assert!(authorize_note(&manager, &todo).is_ok());
-    }
+    use super::{update_event_type, validate_request_id};
 
     #[test]
     fn event_type_prefers_reassignment_then_status() {
@@ -1108,27 +903,5 @@ mod tests {
         assert!(validate_request_id("").is_err());
         assert!(validate_request_id(" leading").is_err());
         assert!(validate_request_id("line\nbreak").is_err());
-    }
-
-    #[test]
-    fn self_assignment_rejects_a_different_principal_with_the_same_public_id() {
-        let Some(caller) = verified(1, CapabilitySet::default()) else {
-            return;
-        };
-        let collision = ActiveMember {
-            organization_id: caller.organization_id,
-            org_id: caller.org_id.clone(),
-            membership_id: caller.membership_id.clone(),
-            actor: Actor::new(
-                PrincipalId::from_uuid(Uuid::from_u128(8_888)),
-                ActorType::Silicon,
-                caller.actor.id.clone(),
-            ),
-        };
-
-        assert!(matches!(
-            validate_resolved_assignee(&caller, &caller.actor.id, collision),
-            Err(AppError::BadGateway)
-        ));
     }
 }

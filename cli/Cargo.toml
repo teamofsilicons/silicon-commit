@@ -1,24 +1,27 @@
 [package]
 name = "silicon-commit-cli"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
-description = "Command-line client for Silicon Commit"
+rust-version = "1.98"
+description = "Command-line client for Silicon Commit, the work manager for Carbons and Silicons"
 license = "MIT"
 repository = "https://github.com/teamofsilicons/silicon-commit"
 readme = "README.md"
+keywords = ["silicon", "commit", "todos", "projects", "cli"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "commit"
 path = "src/main.rs"
 
 [dependencies]
-silicon-commit-client = { version = "0.4.1", path = "../client" }
-clap = { version = "4.5.48", features = ["derive", "env"] }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
-serde_json = "1.0.145"
+silicon-commit-client = { version = "0.5.0", path = "../client" }
+clap = { version = "4.5.48", features = ["derive", "env", "wrap_help"] }
 serde = { version = "1.0.228", features = ["derive"] }
-
-sha2 = "0.10.9"
+serde_json = "1.0.145"
+time = { version = "0.3.55", features = ["formatting"] }
+tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
 
 [dev-dependencies]
+base64 = "0.22.1"
 wiremock = "0.6.5"

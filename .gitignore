@@ -12,6 +12,9 @@
 docs-site/node_modules/
 docs-site/dist/
 
+# State of scripts/dev-accounts.sh and scripts/e2e-accounts.sh (logs, pids, webhook secret).
+/.mig/
+
 __pycache__/
 
 /dist/

@@ -93,10 +93,13 @@ impl WebhookPublisher for WebhookClient {
     }
 }
 
+/// The JSON a Silicon's webhook receives (envelope version 3: accounts, no organization).
 #[derive(Serialize)]
 struct InternalWebhookEvent<'a> {
     event_id: Uuid,
-    org_id: &'a str,
+    /// The receiving Silicon's permanent account uuid.
+    silicon_uuid: &'a str,
+    /// The receiving Silicon's current id.
     silicon_id: &'a str,
     #[serde(rename = "type")]
     event_type: &'a str,
@@ -124,7 +127,7 @@ impl<'a> From<&'a WebhookEvent> for InternalWebhookEvent<'a> {
         let routing = event.routing_snapshot.as_ref();
         Self {
             event_id: event.event_id,
-            org_id: event.org_id.as_str(),
+            silicon_uuid: event.silicon_uuid.as_str(),
             silicon_id: event.silicon_id.as_str(),
             event_type: &event.event_type,
             source: "silicon-commit",
@@ -187,23 +190,21 @@ mod tests {
     use crate::{
         application::ports::{WebhookEvent, WebhookRoutingSnapshot},
         domain::{
-            ActorId, NotificationScope, NotificationSubscriptionLevel, NotificationVersion,
-            PublicOrganizationId, WebhookUrl,
+            AccountUuid, ActorId, NotificationScope, NotificationSubscriptionLevel,
+            NotificationVersion, WebhookUrl,
         },
     };
 
     #[test]
     fn rejects_non_object_payloads_before_network_io() {
-        let org_id = PublicOrganizationId::new("tos");
-        let silicon_id = ActorId::new("silicon-one");
-        assert!(org_id.is_ok());
-        assert!(silicon_id.is_ok());
-        let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
-            return;
+        let silicon_uuid = AccountUuid::new("K1E");
+        let silicon_id = ActorId::new("si:one");
+        let (Ok(silicon_uuid), Ok(silicon_id)) = (silicon_uuid, silicon_id) else {
+            panic!("fixture ids are valid");
         };
         let event = WebhookEvent {
             event_id: Uuid::now_v7(),
-            org_id,
+            silicon_uuid,
             silicon_id,
             event_type: "todo.updated".to_owned(),
             payload_version: 1,
@@ -217,10 +218,10 @@ mod tests {
 
     #[test]
     fn serializes_the_snapshotted_destination_for_webhook_dispatch() {
-        let org_id = PublicOrganizationId::new("tos");
-        let silicon_id = ActorId::new("silicon-one");
-        let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
-            return;
+        let silicon_uuid = AccountUuid::new("K1E");
+        let silicon_id = ActorId::new("si:one");
+        let (Ok(silicon_uuid), Ok(silicon_id)) = (silicon_uuid, silicon_id) else {
+            panic!("fixture ids are valid");
         };
         let webhook_url = WebhookUrl::new(
             "https://hook.example.com/silicon/silicon-one/A1B2C3",
@@ -246,7 +247,7 @@ mod tests {
         let event_id = Uuid::now_v7();
         let event = WebhookEvent {
             event_id,
-            org_id,
+            silicon_uuid,
             silicon_id,
             event_type: "todo.status_changed".to_owned(),
             payload_version: 2,
@@ -263,6 +264,9 @@ mod tests {
             return;
         };
         assert_eq!(serialized["event_id"], event_id.to_string());
+        assert_eq!(serialized["silicon_uuid"], "K1E");
+        assert_eq!(serialized["silicon_id"], "si:one");
+        assert!(serialized.get("org_id").is_none());
         assert_eq!(serialized["trace_id"], "trace-1");
         assert_eq!(
             serialized["webhook_url"],
@@ -276,14 +280,14 @@ mod tests {
 
     #[test]
     fn rejects_new_payloads_without_a_routing_snapshot() {
-        let org_id = PublicOrganizationId::new("tos");
-        let silicon_id = ActorId::new("silicon-one");
-        let (Ok(org_id), Ok(silicon_id)) = (org_id, silicon_id) else {
-            return;
+        let silicon_uuid = AccountUuid::new("K1E");
+        let silicon_id = ActorId::new("si:one");
+        let (Ok(silicon_uuid), Ok(silicon_id)) = (silicon_uuid, silicon_id) else {
+            panic!("fixture ids are valid");
         };
         let event = WebhookEvent {
             event_id: Uuid::now_v7(),
-            org_id,
+            silicon_uuid,
             silicon_id,
             event_type: "todo.updated".to_owned(),
             payload_version: 2,

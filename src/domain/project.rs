@@ -9,9 +9,7 @@ use uuid::Uuid;
 
 use super::{
     actor::{Actor, ActorRef, ActorType},
-    ids::{
-        ActorId, OrganizationId, ProjectEntryId, ProjectId, ProjectTaskId, PublicOrganizationId,
-    },
+    ids::{ActorId, ProjectEntryId, ProjectId, ProjectTaskId},
     pagination::{Page, PageCursor, PageLimit},
     todo::TodoStatus,
     validation::{
@@ -293,7 +291,7 @@ impl FromStr for ProjectLocator {
     }
 }
 
-/// Project visibility and content supplied at creation or returned on reads.
+/// Project visibility and content supplied at creation.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectDetails {
@@ -303,15 +301,13 @@ pub struct ProjectDetails {
     /// HTTPS links; Commit does not upload these files.
     #[serde(default)]
     pub attachments: Vec<super::AttachmentUrl>,
-    /// False means visible and editable within the organization.
+    /// `false`: the owner's custodian circle can read the project as well as its
+    /// members. `true`: only members (and the custodians of member Silicons).
     #[serde(default)]
     pub private: bool,
-    /// Invited Carbon IDs, in addition to Silicon participants.
+    /// Carbon members, by `c:` id or account uuid, in addition to `silicon_ids`.
     #[serde(default)]
     pub carbon_ids: Vec<ActorId>,
-    /// Live IAM membership tags granting access to a private project.
-    #[serde(default)]
-    pub tags: Vec<String>,
 }
 impl ProjectDetails {
     /// Bounds collections and content before persistence.
@@ -335,14 +331,6 @@ impl ProjectDetails {
             limits.participants_per_project,
         )?;
         ensure_unique("carbon_ids", &self.carbon_ids)?;
-        ensure_item_count("tags", self.tags.len(), 0, limits.participants_per_project)?;
-        ensure_unique("tags", &self.tags)?;
-        for tag in &self.tags {
-            let value = RequiredText::new("tags", tag.clone(), 255)?;
-            if value.as_str() != tag {
-                return Err(ValidationError::invalid("tags", "tags must be trimmed"));
-            }
-        }
         Ok(())
     }
 }
@@ -373,7 +361,7 @@ pub struct ProjectSeedTask {
 pub struct ProjectCreate {
     /// Project display name.
     pub name: String,
-    /// Requested participating public Silicon IDs.
+    /// Silicon members, by `si:` id or account uuid.
     #[serde(default)]
     pub silicon_ids: Vec<ActorId>,
     /// Visibility, invites and content.
@@ -483,27 +471,20 @@ pub struct ProjectPatch {
         skip_serializing_if = "Option::is_none"
     )]
     pub attachments: Option<Vec<super::AttachmentUrl>>,
-    /// Switch organization/private visibility.
+    /// Switch between circle-visible (`false`) and members-only (`true`).
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
     pub private: Option<bool>,
-    /// Replacement invited Carbon set.
+    /// Replacement Carbon member set.
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null",
         skip_serializing_if = "Option::is_none"
     )]
     pub carbon_ids: Option<Vec<ActorId>>,
-    /// Replacement IAM tag set.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub tags: Option<Vec<String>>,
 }
 
 impl ProjectPatch {
@@ -517,7 +498,6 @@ impl ProjectPatch {
             && self.attachments.is_none()
             && self.private.is_none()
             && self.carbon_ids.is_none()
-            && self.tags.is_none()
     }
 
     /// Validates metadata changes without mutating the immutable slug.
@@ -558,7 +538,6 @@ impl ProjectPatch {
             attachments: self.attachments.clone().unwrap_or_default(),
             private: self.private.unwrap_or_default(),
             carbon_ids: self.carbon_ids.clone().unwrap_or_default(),
-            tags: self.tags.clone().unwrap_or_default(),
         }
         .validate(limits)?;
         Ok(ValidatedProjectPatch {
@@ -569,7 +548,6 @@ impl ProjectPatch {
             attachments: self.attachments,
             private: self.private,
             carbon_ids: self.carbon_ids,
-            tags: self.tags,
         })
     }
 }
@@ -587,12 +565,10 @@ pub struct ValidatedProjectPatch {
     pub description: Option<String>,
     /// Replacement URL list.
     pub attachments: Option<Vec<super::AttachmentUrl>>,
-    /// Switch organization/private visibility.
+    /// Switch between circle-visible (`false`) and members-only (`true`).
     pub private: Option<bool>,
-    /// Replacement invited Carbon set.
+    /// Replacement Carbon member set.
     pub carbon_ids: Option<Vec<ActorId>>,
-    /// Replacement IAM tag set.
-    pub tags: Option<Vec<String>>,
 }
 
 impl ValidatedProjectPatch {
@@ -619,15 +595,11 @@ impl ValidatedProjectPatch {
     }
 }
 
-/// Public project aggregate with internal tenant and principal identities.
+/// Public project aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Project {
     /// `UUIDv7` resource ID.
     pub id: ProjectId,
-    /// Authoritative internal tenant key.
-    pub organization_id: OrganizationId,
-    /// Public organization ID snapshot.
-    pub org_id: PublicOrganizationId,
     /// Mutable display name.
     pub name: RequiredText,
     /// Immutable normalized creation-name slug.
@@ -636,29 +608,34 @@ pub struct Project {
     pub uid: ProjectUid,
     /// Current state.
     pub status: ProjectStatus,
-    /// Resolved unique Silicon participants.
-    pub silicons: Vec<Actor>,
-    /// Resolved creating Silicon.
+    /// Current members (explicit shares): Carbons and Silicons.
+    pub members: Vec<Actor>,
+    /// Current owner: the creator, unless its account was deleted.
+    pub owner: Actor,
+    /// Immutable creator.
     pub created_by: Actor,
     /// Creation timestamp.
     pub created_at: OffsetDateTime,
     /// Last meaningful update timestamp.
     pub updated_at: OffsetDateTime,
-    /// Visibility, invites, description and attachments.
+    /// Visibility, description and attachments (`carbon_ids` mirrors the Carbon members).
     pub details: ProjectDetails,
-    /// Actors who have contributed to the project.
+    /// Accounts that have contributed to the project.
     pub collaborators: Vec<ActorRef>,
     /// Latest aggregate version.
     pub version: i64,
 }
 
 impl Project {
-    /// Reports whether an internal IAM principal currently participates.
+    /// Reports whether an account is a current member.
     #[must_use]
-    pub fn has_participant(&self, actor: &Actor) -> bool {
-        self.silicons
-            .iter()
-            .any(|participant| participant.principal_id == actor.principal_id)
+    pub fn has_member(&self, account: &super::AccountUuid) -> bool {
+        self.members.iter().any(|member| &member.uuid == account)
+    }
+
+    /// Current Silicon members.
+    pub fn silicon_members(&self) -> impl Iterator<Item = &Actor> {
+        self.members.iter().filter(|member| member.is_silicon())
     }
 }
 
@@ -670,17 +647,20 @@ impl Serialize for Project {
         #[derive(Serialize)]
         struct WireProject<'a> {
             id: ProjectId,
-            org_id: &'a PublicOrganizationId,
             name: &'a RequiredText,
             slug: &'a ProjectSlug,
             uid: &'a ProjectUid,
             status: ProjectStatus,
+            private: bool,
+            description: &'a str,
+            attachments: &'a [super::AttachmentUrl],
             silicon_ids: Vec<&'a ActorId>,
-            #[serde(flatten)]
-            details: &'a ProjectDetails,
+            carbon_ids: Vec<&'a ActorId>,
+            members: Vec<ActorRef>,
+            owner: ActorRef,
+            created_by: ActorRef,
             collaborators: &'a [ActorRef],
             version: i64,
-            created_by: ActorRef,
             #[serde(with = "time::serde::rfc3339")]
             created_at: OffsetDateTime,
             #[serde(with = "time::serde::rfc3339")]
@@ -689,21 +669,25 @@ impl Serialize for Project {
 
         WireProject {
             id: self.id,
-            org_id: &self.org_id,
             name: &self.name,
             slug: &self.slug,
             uid: &self.uid,
             status: self.status,
-            silicon_ids: self
-                .silicons
+            private: self.details.private,
+            description: &self.details.description,
+            attachments: &self.details.attachments,
+            silicon_ids: self.silicon_members().map(|member| &member.id).collect(),
+            carbon_ids: self
+                .members
                 .iter()
-                .filter(|a| a.is_silicon())
-                .map(|a| &a.id)
+                .filter(|member| !member.is_silicon())
+                .map(|member| &member.id)
                 .collect(),
-            details: &self.details,
+            members: self.members.iter().map(Actor::public_ref).collect(),
+            owner: self.owner.public_ref(),
+            created_by: self.created_by.public_ref(),
             collaborators: &self.collaborators,
             version: self.version,
-            created_by: self.created_by.public_ref(),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -717,7 +701,7 @@ impl Serialize for Project {
 pub struct ProjectQuery {
     /// Optional exact lifecycle state.
     pub status: Option<ProjectStatus>,
-    /// Optional participating public Silicon ID.
+    /// Only projects this Silicon is a member of (`si:` id or account uuid).
     pub silicon_id: Option<ActorId>,
     /// Opaque keyset cursor.
     pub cursor: Option<PageCursor>,
@@ -1168,7 +1152,6 @@ fn validate_entry(
 mod tests {
     use serde_json::json;
     use time::macros::datetime;
-    use uuid::Uuid;
 
     use super::{
         DiaryUpdate, MAX_PROJECT_SLUG_BYTES, MAX_PROJECT_UID_BYTES, ProjectCreate, ProjectPatch,
@@ -1176,15 +1159,15 @@ mod tests {
     };
     use crate::domain::{
         actor::{Actor, ActorType},
-        ids::{ActorId, PrincipalId},
+        ids::{AccountUuid, ActorId},
         validation::{DomainLimits, MAX_DIARY_WORDS, RequiredText, ValidationErrorKind},
     };
 
     fn creator() -> Option<Actor> {
         Some(Actor::new(
-            PrincipalId::from_uuid(Uuid::nil()),
+            AccountUuid::new("K1E").ok()?,
             ActorType::Silicon,
-            ActorId::new("head_of_growth:tos").ok()?,
+            ActorId::new("si:head-of-growth").ok()?,
         ))
     }
 
@@ -1249,7 +1232,7 @@ mod tests {
         };
         let request = serde_json::from_value::<ProjectCreate>(json!({
             "name": "Launch",
-            "silicon_ids": ["engineer:tos"]
+            "silicon_ids": ["si:engineer"]
         }));
         let validated = request
             .ok()
@@ -1297,7 +1280,7 @@ mod tests {
         let Some(creator) = creator() else {
             return;
         };
-        let other = ActorId::new("engineer:tos");
+        let other = ActorId::new("si:engineer");
         let result = other.ok().and_then(|other| {
             ProjectPatch {
                 silicon_ids: Some(vec![other]),

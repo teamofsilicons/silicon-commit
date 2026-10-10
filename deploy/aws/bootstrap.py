@@ -18,16 +18,10 @@ def main(secret_arn, db_host, image, *, root=Path('/opt/commit')):
     secret = json.loads(json.loads(subprocess.check_output([
         'aws', 'secretsmanager', 'get-secret-value', '--region', 'us-east-1',
         '--secret-id', secret_arn, '--output', 'json']))['SecretString'])
-    # Shared lifecycle credentials are deployment plumbing; no per-user pairing.
-    if secret.get('COMMIT_HONEYCOMB_SECRET_ID'):
-        from testing_credentials import ensure_testing_credentials
-        ensure_testing_credentials(os.environ.get('AWS_PROFILE'),
-            secret.get('COMMIT_HONEYCOMB_REGION', 'us-east-1'),
-            secret['COMMIT_HONEYCOMB_SECRET_ID'], 'us-east-1', secret_arn,
-            'https://backend.commit.teamofsilicons.com')
-        secret = json.loads(json.loads(subprocess.check_output([
-            'aws', 'secretsmanager', 'get-secret-value', '--region', 'us-east-1',
-            '--secret-id', secret_arn, '--output', 'json']))['SecretString'])
+    # Silicon Accounts sign-in: the API needs Commit's app secret and the webhook secret.
+    missing = [name for name in ('COMMIT_APP_SECRET', 'COMMIT_ACCOUNTS_WEBHOOK_SECRET') if not secret.get(name)]
+    if missing:
+        raise ValueError('The deployment secret lacks ' + ', '.join(missing) + ' (Silicon Accounts sign-in)')
     ca = root / 'rds-ca.pem'
     ca.write_bytes(urllib.request.urlopen('https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem').read())
     ca.chmod(0o644)
@@ -48,12 +42,17 @@ def main(secret_arn, db_host, image, *, root=Path('/opt/commit')):
 
     base = {'COMMIT_ENVIRONMENT': 'production', 'COMMIT_DATABASE_MAX_CONNECTIONS': '8',
             'COMMIT_LOG': 'silicon_commit=info,tower_http=info'}
-    api = {**base, **{k:v for k,v in secret.items() if k.startswith('COMMIT_') and k not in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY_TABLE_KEY','COMMIT_TELEMETRY_HOME']},
-           'COMMIT_AUTH_MODE':'iam', 'COMMIT_BIND_ADDR':'127.0.0.1:8080',
+    # Variables of the IAM/Honeycomb era are never copied: the API warns about them at boot.
+    retired = {'COMMIT_AUTH_MODE', 'COMMIT_IAM_BASE_URL', 'COMMIT_IAM_APP_ID', 'COMMIT_IAM_APP_SECRET',
+               'COMMIT_IAM_AUDIENCE', 'COMMIT_WEBHOOK_SIGNING_SECRET', 'COMMIT_WEBHOOK_KEY_VERSION',
+               'COMMIT_HONEYCOMB_SERVICE_TOKEN', 'COMMIT_HONEYCOMB_URL', 'COMMIT_HONEYCOMB_SECRET_ID',
+               'COMMIT_HONEYCOMB_REGION', 'COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY', 'COMMIT_TEST_KEY'}
+    accounts = {k:v for k,v in secret.items() if k in ('ACCOUNTS_URL', 'ACCOUNTS_API_URL')}
+    api = {**base, **accounts, **{k:v for k,v in secret.items() if k.startswith('COMMIT_') and k not in retired and k not in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY_TABLE_KEY','COMMIT_TELEMETRY_HOME']},
+           'COMMIT_BIND_ADDR':'127.0.0.1:8080',
            'COMMIT_PUBLIC_BASE_URL':'https://backend.commit.teamofsilicons.com/api/v1/',
            'COMMIT_DATABASE_URL':dburl('commit_api', secret['db_api_password'])}
-    worker = {**base, **{k:v for k,v in secret.items() if k in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY','COMMIT_TELEMETRY_TABLE_KEY','COMMIT_HONEYCOMB_URL']}, 'COMMIT_TELEMETRY_HOME':'/var/lib/commit/telemetry', 'COMMIT_DATABASE_URL':dburl('commit_worker', secret['db_worker_password'])}
-    worker['COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY'] = secret.get('COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY', secret['COMMIT_IAM_APP_SECRET'])
+    worker = {**base, **accounts, **{k:v for k,v in secret.items() if k in ['COMMIT_POSTMARK_SERVER_TOKEN','COMMIT_TELEMETRY','COMMIT_TELEMETRY_TABLE_KEY']}, 'COMMIT_TELEMETRY_HOME':'/var/lib/commit/telemetry', 'COMMIT_DATABASE_URL':dburl('commit_worker', secret['db_worker_password'])}
     envfile('api.env', api)
     envfile('worker.env', worker)
     envfile('migrator.env', {**base,'COMMIT_SCHEMA_OWNER':'commit_migrator',

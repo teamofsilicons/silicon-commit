@@ -33,21 +33,36 @@ SELECT has_schema_privilege(:'api_role', 'commit', 'USAGE')
            'commit.notification_subscription_level',
            'USAGE'
        )
-       AND has_table_privilege(:'api_role', 'commit.testing_environments', 'SELECT, INSERT, UPDATE')
-       AND has_table_privilege(:'api_role', 'commit.testing_organizations', 'SELECT, INSERT, UPDATE')
-       AND has_table_privilege(:'api_role', 'commit.iam_webhook_events', 'SELECT, INSERT')
-       AND has_function_privilege(:'api_role', 'commit.clean_testing_environment(uuid,text)', 'EXECUTE')
-       AND NOT has_table_privilege(:'api_role', 'commit.testing_environments', 'DELETE')
+       AND has_table_privilege(:'api_role', 'commit.accounts', 'SELECT, INSERT, UPDATE')
+       AND NOT has_table_privilege(:'api_role', 'commit.accounts', 'DELETE')
+       AND has_table_privilege(:'api_role', 'commit.accounts_webhook_events', 'SELECT, INSERT')
+       AND NOT has_table_privilege(:'api_role', 'commit.accounts_webhook_events', 'UPDATE')
+       AND has_table_privilege(:'api_role', 'commit.silicon_allowed_accounts', 'SELECT, INSERT, DELETE')
+       AND has_function_privilege(:'api_role', 'commit.in_circle(text,text)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.circle_of(text)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.project_writable(uuid,text)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.project_access(uuid,text)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.todo_access(uuid,text)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.may_reach(text,text)', 'EXECUTE')
+       AND has_function_privilege(:'api_role', 'commit.forget_account(text,timestamptz,text,bigint,bigint)', 'EXECUTE')
+       -- IAM-era and Honeycomb objects keep their data but are out of the runtime's reach.
+       AND NOT has_table_privilege(:'api_role', 'commit.actor_projection', 'SELECT')
+       AND NOT has_table_privilege(:'api_role', 'commit.organization_projection', 'SELECT')
+       AND NOT has_table_privilege(:'api_role', 'commit.testing_environments', 'SELECT')
+       AND NOT has_table_privilege(:'api_role', 'commit.testing_organizations', 'SELECT')
+       AND NOT has_table_privilege(:'api_role', 'commit.iam_webhook_events', 'SELECT')
+       AND NOT has_table_privilege(:'api_role', 'commit.honeycomb_environments', 'SELECT')
+       AND NOT has_function_privilege(:'api_role', 'commit.clean_testing_environment(uuid,text)', 'EXECUTE')
        AND NOT has_schema_privilege(:'api_role', 'commit_private', 'USAGE')
        AND has_table_privilege(:'api_role', 'commit.project_versions', 'SELECT, INSERT, DELETE')
        AND has_table_privilege(:'api_role', 'commit.email_preferences', 'SELECT, INSERT, UPDATE')
        AND has_table_privilege(:'api_role', 'commit.telemetry_events', 'INSERT')
        AND NOT has_table_privilege(:'api_role', 'commit.telemetry_events', 'SELECT')
-       AND has_function_privilege(:'api_role', 'commit.reset_discovered_testing_environment(uuid,bigint)', 'EXECUTE')
+       AND NOT has_function_privilege(:'api_role', 'commit.reset_discovered_testing_environment(uuid,bigint)', 'EXECUTE')
        AND has_function_privilege(:'api_role', 'commit.admit_contract(integer,boolean)', 'EXECUTE')
        AND NOT has_function_privilege(:'api_role', 'commit.claim_email()', 'EXECUTE')
-       AND has_table_privilege(:'api_role', 'commit.honeycomb_operations', 'SELECT, INSERT, UPDATE')
-       AND has_function_privilege(:'api_role', 'commit.finish_honeycomb_operation(uuid,uuid,text,boolean)', 'EXECUTE')
+       AND NOT has_table_privilege(:'api_role', 'commit.honeycomb_operations', 'SELECT')
+       AND NOT has_function_privilege(:'api_role', 'commit.finish_honeycomb_operation(uuid,uuid,text,boolean)', 'EXECUTE')
        AND NOT has_function_privilege(:'api_role', 'commit.honeycomb_activity_outbox()', 'EXECUTE')
        AS api_grants_match
 \gset
@@ -128,8 +143,15 @@ SELECT has_schema_privilege(:'worker_role', 'commit', 'USAGE')
        AND has_function_privilege(:'worker_role', 'commit.lock_notification_access(uuid)', 'EXECUTE')
        AND NOT has_table_privilege(:'worker_role', 'commit.email_preferences', 'SELECT')
        AND NOT has_table_privilege(:'worker_role', 'commit.email_jobs', 'INSERT')
-       AND has_function_privilege(:'worker_role', 'commit.honeycomb_activity_outbox()', 'EXECUTE')
-       AND has_function_privilege(:'worker_role', 'commit.testing_delivery_allowed(uuid)', 'EXECUTE')
+       AND has_column_privilege(:'worker_role', 'commit.accounts', 'uuid', 'SELECT')
+       AND has_column_privilege(:'worker_role', 'commit.accounts', 'public_id', 'SELECT')
+       AND NOT has_column_privilege(:'worker_role', 'commit.accounts', 'email', 'SELECT')
+       AND NOT has_table_privilege(:'worker_role', 'commit.accounts', 'UPDATE')
+       AND NOT has_table_privilege(:'worker_role', 'commit.silicon_allowed_accounts', 'SELECT')
+       AND NOT has_function_privilege(:'worker_role', 'commit.forget_account(text,timestamptz,text,bigint,bigint)', 'EXECUTE')
+       AND NOT has_table_privilege(:'worker_role', 'commit.actor_projection', 'SELECT')
+       AND NOT has_function_privilege(:'worker_role', 'commit.honeycomb_activity_outbox()', 'EXECUTE')
+       AND NOT has_function_privilege(:'worker_role', 'commit.testing_delivery_allowed(uuid)', 'EXECUTE')
        AND NOT has_table_privilege(:'worker_role', 'commit.honeycomb_environments', 'SELECT')
        AND NOT has_function_privilege(:'worker_role', 'commit.finish_honeycomb_operation(uuid,uuid,text,boolean)', 'EXECUTE')
        AS worker_grants_match
@@ -202,7 +224,18 @@ BEGIN;
 SET LOCAL ROLE :"worker_role";
 SET LOCAL search_path TO commit, pg_catalog;
 SELECT count(*) FROM commit.outbox_events;
+SELECT count(recipient.public_id)
+  FROM commit.outbox_events AS event
+  JOIN commit.accounts AS recipient ON recipient.uuid = event.recipient_silicon_account;
 SELECT * FROM commit.run_retention_pass(1);
+ROLLBACK;
+
+BEGIN;
+SET LOCAL ROLE :"api_role";
+SET LOCAL search_path TO commit, pg_catalog;
+SELECT count(*) FROM commit.accounts;
+SELECT commit.in_circle('a', 'b'), commit.may_reach('a', 'b');
+SELECT count(*) FROM commit.todos AS todo WHERE commit.todo_access(todo.id, 'a');
 ROLLBACK;
 
 \set ON_ERROR_STOP off
@@ -247,51 +280,25 @@ SELECT :'worker_todo_update_sqlstate' = '42501'
 -- Seed one valid terminal row as the schema owner, then prove that the worker's
 -- queue-transition columns cannot reopen it or rewrite its stored purge
 -- deadline. The surrounding transaction keeps this contract test repeatable.
-SELECT pg_catalog.gen_random_uuid() AS terminal_fixture_organization_id,
-       pg_catalog.gen_random_uuid() AS terminal_fixture_principal_id,
+SELECT 'runtime-grants-' || substr(md5(pg_catalog.gen_random_uuid()::text), 1, 12) AS terminal_fixture_account,
        pg_catalog.gen_random_uuid() AS terminal_fixture_todo_id,
        pg_catalog.gen_random_uuid() AS terminal_fixture_event_id
 \gset
 
 BEGIN;
-INSERT INTO commit.organization_projection (organization_id, org_id)
-VALUES (
-    :'terminal_fixture_organization_id'::uuid,
-    'runtime-grants-' || :'terminal_fixture_organization_id'
-);
-INSERT INTO commit.actor_projection (
-    organization_id,
-    principal_id,
-    membership_id,
-    actor_type,
-    actor_id
-)
-VALUES (
-    :'terminal_fixture_organization_id'::uuid,
-    :'terminal_fixture_principal_id'::uuid,
-    'runtime-grants-silicon-' || :'terminal_fixture_principal_id' || '[runtime-grants-' || :'terminal_fixture_organization_id' || ']',
-    'silicon'::commit.actor_type,
-    'runtime-grants-silicon-' || :'terminal_fixture_principal_id'
-);
-INSERT INTO commit.todos (
-    id,
-    organization_id,
-    title,
-    assigned_by_principal_id,
-    assigned_to_principal_id
-)
+INSERT INTO commit.accounts (uuid, kind, public_id)
+VALUES (:'terminal_fixture_account', 'silicon'::commit.actor_type, 'si:' || :'terminal_fixture_account');
+INSERT INTO commit.todos (id, title, assigned_by_account, assigned_to_account)
 VALUES (
     :'terminal_fixture_todo_id'::uuid,
-    :'terminal_fixture_organization_id'::uuid,
     'runtime grant terminal fixture',
-    :'terminal_fixture_principal_id'::uuid,
-    :'terminal_fixture_principal_id'::uuid
+    :'terminal_fixture_account',
+    :'terminal_fixture_account'
 );
 INSERT INTO commit.outbox_events (
     id,
-    organization_id,
     todo_id,
-    recipient_silicon_principal_id,
+    recipient_silicon_account,
     event_type,
     payload,
     status,
@@ -301,9 +308,8 @@ INSERT INTO commit.outbox_events (
 )
 VALUES (
     :'terminal_fixture_event_id'::uuid,
-    :'terminal_fixture_organization_id'::uuid,
     :'terminal_fixture_todo_id'::uuid,
-    :'terminal_fixture_principal_id'::uuid,
+    :'terminal_fixture_account',
     'todo.runtime_grant_test',
     '{}'::jsonb,
     'delivered'::commit.outbox_status,

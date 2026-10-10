@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Check actual ELF version requirements without host-specific binutils."""
+"""Check actual ELF version requirements without host-specific binutils.
+
+Reads little-endian ELF64 (x86_64, aarch64) and ELF32 (i686, armv7hf) executables.
+"""
 
 import argparse
 from pathlib import Path
@@ -9,6 +12,13 @@ import struct
 
 GLIBC_BASELINE = (2, 28)
 SHT_GNU_VERNEED = 0x6FFFFFFE
+# EI_CLASS -> (e_shoff format, e_shoff position, e_shentsize/e_shnum position, section
+# header size, section header format). Both header formats keep sh_offset, sh_size, sh_link
+# and sh_info at indexes 4 to 7; the version-need records are the same in both classes.
+ELF_LAYOUTS = {
+    2: ("<Q", 40, 58, 64, "<IIQQQQIIQQ"),
+    1: ("<I", 32, 46, 40, "<IIIIIIIIII"),
+}
 
 
 def _unpack(layout: str, data: bytes, offset: int) -> tuple:
@@ -33,14 +43,15 @@ def required_glibc_versions(data: bytes) -> set[tuple[int, ...]]:
     Release GNU/Linux executables must retain their dynamic version metadata.
     Missing, truncated or unknown GLIBC requirements fail closed.
     """
-    if data[:6] != b"\x7fELF\x02\x01":
-        raise ValueError("expected a little-endian ELF64 executable")
-    (table_offset,) = _unpack("<Q", data, 40)
-    entry_size, count = _unpack("<HH", data, 58)
-    if entry_size != 64 or count == 0:
+    if data[:4] != b"\x7fELF" or len(data) < 6 or data[4] not in ELF_LAYOUTS or data[5] != 1:
+        raise ValueError("expected a little-endian ELF32 or ELF64 executable")
+    offset_layout, offset_at, sizes_at, header_size, section_layout = ELF_LAYOUTS[data[4]]
+    (table_offset,) = _unpack(offset_layout, data, offset_at)
+    entry_size, count = _unpack("<HH", data, sizes_at)
+    if entry_size != header_size or count == 0:
         raise ValueError("missing or unsupported ELF section table")
     sections = [
-        _unpack("<IIQQQQIIQQ", data, table_offset + index * entry_size)
+        _unpack(section_layout, data, table_offset + index * entry_size)
         for index in range(count)
     ]
 

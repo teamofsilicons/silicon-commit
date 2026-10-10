@@ -1,4 +1,4 @@
-//! Silicon notification-settings HTTP handlers.
+//! Silicon notification-settings HTTP handlers (the Silicon itself or its custodian).
 
 use axum::{
     Json,
@@ -10,7 +10,8 @@ use serde::Serialize;
 
 use crate::{
     domain::{
-        NotificationSettingsUpdate, NotificationVersion, TodoId, TodoNotificationSubscriptionUpdate,
+        ActorId, NotificationSettingsUpdate, NotificationVersion, TodoId,
+        TodoNotificationSubscriptionUpdate,
     },
     error::AppError,
 };
@@ -18,36 +19,69 @@ use crate::{
 use super::{
     AppState,
     auth::action,
-    extract::{NotificationIfMatch, StrictJson, StrictPath},
+    extract::{NotificationIfMatch, StrictJson, StrictPath, StrictQuery},
     required_request_id,
 };
 
-/// `GET /api/v1/notification-settings`.
+/// Which Silicon's settings: the caller's own (omit it) or, for a custodian, one of its Silicons.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SiliconQuery {
+    silicon: Option<String>,
+}
+
+impl SiliconQuery {
+    fn selector(&self) -> Result<Option<ActorId>, AppError> {
+        self.silicon
+            .as_deref()
+            .map(|value| {
+                ActorId::new(value).map_err(|error| AppError::Validation {
+                    details: serde_json::json!({ "silicon": error.to_string() }),
+                })
+            })
+            .transpose()
+    }
+}
+
+/// `GET /api/v1/notification-settings[?silicon=si:…]`.
 pub(crate) async fn get_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
+    StrictQuery(query): StrictQuery<SiliconQuery>,
 ) -> Result<Response, AppError> {
     let actor = state
         .authenticate(&headers, action::NOTIFICATION_SETTINGS_READ, None)
         .await?;
-    let settings = state.notifications.get_settings(&actor).await?;
+    let silicon = query.selector()?;
+    let settings = state
+        .notifications
+        .get_settings(&actor, silicon.as_ref())
+        .await?;
     versioned_response(settings.version, settings)
 }
 
-/// `PUT /api/v1/notification-settings`.
+/// `PUT /api/v1/notification-settings[?silicon=si:…]`.
 pub(crate) async fn replace_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
+    StrictQuery(query): StrictQuery<SiliconQuery>,
     NotificationIfMatch(expected_version): NotificationIfMatch,
     StrictJson(input): StrictJson<NotificationSettingsUpdate>,
 ) -> Result<Response, AppError> {
     let actor = state
         .authenticate(&headers, action::NOTIFICATION_SETTINGS_UPDATE, None)
         .await?;
+    let silicon = query.selector()?;
     let request_id = required_request_id()?;
     let settings = state
         .notifications
-        .replace_settings(&actor, input, expected_version, &request_id)
+        .replace_settings(
+            &actor,
+            silicon.as_ref(),
+            input,
+            expected_version,
+            &request_id,
+        )
         .await?;
     versioned_response(settings.version, settings)
 }

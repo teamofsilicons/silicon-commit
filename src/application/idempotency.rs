@@ -89,7 +89,7 @@ impl RequestFingerprint {
 pub struct MutationIdentity {
     /// Public `OpenAPI` operation identifier.
     pub operation: &'static str,
-    /// Concrete organization-scoped resource path.
+    /// Concrete resource path (idempotency is scoped to the calling account).
     pub resource_path: String,
     /// Validated caller key.
     pub key: IdempotencyKey,

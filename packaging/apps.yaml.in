@@ -1,0 +1,13 @@
+# Silicon Apps manifest template for one commit CLI package.
+#
+# scripts/package-apps.sh renders this file as apps.yaml at the root of each archive, with the comment lines removed
+# and the placeholders filled in: @VERSION@ is the CLI version (cli/Cargo.toml), @TARGET@ is one Silicon Apps target
+# and @BINARY@ is bin/commit (bin/commit.exe on Windows). Each archive lists only its own target, so every target
+# uploads and validates on its own. Reference: https://developers.teamofsilicons.com/docs/apps/reference/manifest
+schema_version: 1
+app_id: commit
+version: @VERSION@
+command: commit
+targets:
+  @TARGET@:
+    binary: @BINARY@

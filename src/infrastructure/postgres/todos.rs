@@ -1,4 +1,8 @@
 //! PostgreSQL persistence for todo use cases.
+//!
+//! Rows are keyed by their global ids and by Silicon Accounts uuids. Who may
+//! see a todo is decided by `commit.todo_access(todo, account)`: the circles of
+//! its owner and assignee, plus whoever can read its project.
 
 use std::time::Duration;
 
@@ -11,64 +15,57 @@ use uuid::Uuid;
 use crate::{
     application::{
         idempotency::{MutationIdentity, MutationResponse},
-        ports::{ActiveMember, VerifiedActor, WebhookRoutingSnapshot},
+        ports::{VerifiedActor, WebhookRoutingSnapshot},
     },
     domain::{
-        Actor, ActorId, ActorType, AttachmentUrl, CollectionQuery, CreatedAtRange, LimitedText,
-        OrganizationId, Page, PageCursor, PrincipalId, PublicOrganizationId, RequiredText, Todo,
-        TodoId, TodoNote, TodoNoteId, TodoPage, TodoQuery, TodoStatus, TodoView,
+        AccountUuid, Actor, ActorId, ActorType, AttachmentUrl, CollectionQuery, CreatedAtRange,
+        LimitedText, Page, PageCursor, RequiredText, Todo, TodoId, TodoNote, TodoNoteId, TodoPage,
+        TodoQuery, TodoStatus, TodoView,
     },
     error::AppError,
+    infrastructure::postgres::accounts::account_uuid,
 };
 
 const STORED_TITLE_CHARS: usize = 500;
 const STORED_DESCRIPTION_CHARS: usize = 100_000;
 const STORED_NOTE_CHARS: usize = 100_000;
 const ADVISORY_LOCK_SEED: i64 = 7_621_913_449_043_511_527;
+/// Version of the JSON delivered to Silicon webhooks (3: accounts, no organization).
+pub(crate) const OUTBOX_PAYLOAD_VERSION: i16 = 3;
 
 const TODO_PROJECTION: &str = r#"
     SELECT
         todo.id,
         todo.project_id,
-        todo.organization_id,
-        organization.org_id,
         todo.title,
         todo.description,
-        todo.assigned_by_principal_id,
-        assigned_by.actor_type AS assigned_by_actor_type,
-        assigned_by.actor_id AS assigned_by_actor_id,
-        todo.assigned_to_principal_id,
-        assigned_to.actor_type AS assigned_to_actor_type,
-        assigned_to.actor_id AS assigned_to_actor_id,
+        assigned_by.uuid AS assigned_by_uuid,
+        assigned_by.kind AS assigned_by_kind,
+        assigned_by.public_id AS assigned_by_id,
+        assigned_to.uuid AS assigned_to_uuid,
+        assigned_to.kind AS assigned_to_kind,
+        assigned_to.public_id AS assigned_to_id,
         todo.status,
         ARRAY(
             SELECT attachment.url
             FROM commit.todo_attachments AS attachment
-            WHERE attachment.organization_id = todo.organization_id
-              AND attachment.todo_id = todo.id
+            WHERE attachment.todo_id = todo.id
             ORDER BY attachment.position
         ) AS attachments,
         todo.created_at,
         todo.updated_at
     FROM commit.todos AS todo
-    INNER JOIN commit.organization_projection AS organization
-        ON organization.organization_id = todo.organization_id
-    INNER JOIN commit.actor_projection AS assigned_by
-        ON assigned_by.organization_id = todo.organization_id
-       AND assigned_by.principal_id = todo.assigned_by_principal_id
-    INNER JOIN commit.actor_projection AS assigned_to
-        ON assigned_to.organization_id = todo.organization_id
-       AND assigned_to.principal_id = todo.assigned_to_principal_id
+    INNER JOIN commit.accounts AS assigned_by ON assigned_by.uuid = todo.assigned_by_account
+    INNER JOIN commit.accounts AS assigned_to ON assigned_to.uuid = todo.assigned_to_account
 "#;
 
 /// Complete values needed to insert a todo aggregate.
 pub(crate) struct NewTodo<'a> {
     pub(crate) id: TodoId,
-    pub(crate) organization_id: OrganizationId,
     pub(crate) title: &'a RequiredText,
     pub(crate) description: Option<&'a LimitedText>,
-    pub(crate) assigned_by_principal_id: PrincipalId,
-    pub(crate) assigned_to_principal_id: PrincipalId,
+    pub(crate) assigned_by: &'a AccountUuid,
+    pub(crate) assigned_to: &'a AccountUuid,
     pub(crate) status: TodoStatus,
     pub(crate) attachments: &'a [AttachmentUrl],
     pub(crate) project_id: Option<crate::domain::ProjectId>,
@@ -78,19 +75,18 @@ pub(crate) struct NewTodo<'a> {
 pub(crate) struct TodoReplacement<'a> {
     pub(crate) title: &'a RequiredText,
     pub(crate) description: Option<&'a LimitedText>,
-    pub(crate) assigned_to_principal_id: PrincipalId,
+    pub(crate) assigned_to: &'a AccountUuid,
     pub(crate) status: TodoStatus,
     pub(crate) attachments: &'a [AttachmentUrl],
     pub(crate) replace_attachments: bool,
     pub(crate) project_id: Option<crate::domain::ProjectId>,
 }
 
-/// Complete immutable Hook event selected within a todo mutation transaction.
+/// Complete immutable webhook event selected within a todo mutation transaction.
 pub(crate) struct NewOutboxEvent<'a> {
     pub(crate) id: Uuid,
-    pub(crate) organization_id: OrganizationId,
     pub(crate) todo_id: TodoId,
-    pub(crate) recipient_silicon_principal_id: PrincipalId,
+    pub(crate) recipient_silicon: &'a AccountUuid,
     pub(crate) event_type: &'static str,
     pub(crate) payload: &'a Value,
     pub(crate) routing: &'a WebhookRoutingSnapshot,
@@ -102,10 +98,10 @@ pub(crate) struct StoredMutation {
     pub(crate) response: MutationResponse,
 }
 
-/// State of a tenant-qualified todo selected for DELETE.
+/// State of a todo selected for DELETE.
 pub(crate) enum DeleteTarget {
     Missing,
-    AlreadyDeleted(PrincipalId),
+    AlreadyDeleted(AccountUuid),
     Active(Box<Todo>),
 }
 
@@ -133,39 +129,36 @@ impl TodoActivityKind {
     }
 }
 
-/// Lists todos with stable descending keyset pagination.
+/// Lists todos visible to the caller with stable descending keyset pagination.
 pub(crate) async fn list_todos(
     pool: &PgPool,
     actor: &VerifiedActor,
     query: &TodoQuery,
     created_at: CreatedAtRange,
 ) -> Result<TodoPage, AppError> {
+    let me = actor.uuid().as_str();
     let mut builder = QueryBuilder::<Postgres>::new(TODO_PROJECTION);
     builder
-        .push(" WHERE todo.organization_id = ")
-        .push_bind(actor.organization_id.into_uuid())
-        .push(" AND todo.deleted_at IS NULL");
-
-    builder.push(" AND (todo.project_id IS NULL OR commit.project_access(todo.organization_id,todo.project_id,")
-        .push_bind(actor.actor.principal_id.into_uuid()).push(",")
-        .push_bind(actor.tags.iter().cloned().collect::<Vec<_>>()).push("))");
+        .push(" WHERE todo.deleted_at IS NULL AND commit.todo_access(todo.id, ")
+        .push_bind(me)
+        .push(")");
     if let Some(project_id) = query.project_id {
         builder
-            .push(" AND todo.project_id=")
+            .push(" AND todo.project_id = ")
             .push_bind(project_id.into_uuid());
     }
 
     match query.view {
         TodoView::AssignedToMe => {
             builder
-                .push(" AND todo.assigned_to_principal_id = ")
-                .push_bind(actor.actor.principal_id.into_uuid());
+                .push(" AND todo.assigned_to_account = ")
+                .push_bind(me);
         }
         TodoView::DelegatedByMe => {
             builder
-                .push(" AND todo.assigned_by_principal_id = ")
-                .push_bind(actor.actor.principal_id.into_uuid())
-                .push(" AND todo.assigned_to_principal_id <> todo.assigned_by_principal_id");
+                .push(" AND todo.assigned_by_account = ")
+                .push_bind(me)
+                .push(" AND todo.assigned_to_account <> todo.assigned_by_account");
         }
         TodoView::All => {}
     }
@@ -174,14 +167,10 @@ pub(crate) async fn list_todos(
         builder.push(" AND todo.status = ").push_bind(status);
     }
     if let Some(assigned_to) = &query.assigned_to {
-        builder
-            .push(" AND assigned_to.actor_id = ")
-            .push_bind(assigned_to.as_str());
+        push_account_filter(&mut builder, "assigned_to", assigned_to);
     }
     if let Some(assigned_by) = &query.assigned_by {
-        builder
-            .push(" AND assigned_by.actor_id = ")
-            .push_bind(assigned_by.as_str());
+        push_account_filter(&mut builder, "assigned_by", assigned_by);
     }
     if let Some(from) = created_at.from {
         builder.push(" AND todo.created_at >= ").push_bind(from);
@@ -225,74 +214,84 @@ pub(crate) async fn list_todos(
     Ok(Page::new(items, next_cursor))
 }
 
-/// Reads one active todo in the caller's organization.
-pub(crate) async fn get_todo(
+/// Filters by an account named by `c:`/`si:` id (current id) or by uuid.
+fn push_account_filter(builder: &mut QueryBuilder<Postgres>, alias: &'static str, value: &ActorId) {
+    if value.prefixed_kind().is_some() {
+        builder
+            .push(format_args!(" AND lower({alias}.public_id) = "))
+            .push_bind(value.as_str().to_ascii_lowercase());
+    } else {
+        builder
+            .push(format_args!(" AND {alias}.uuid = "))
+            .push_bind(value.as_str().to_owned());
+    }
+}
+
+/// Reads one active todo when the viewer may see it.
+pub(crate) async fn get_visible_todo(
     pool: &PgPool,
-    organization_id: OrganizationId,
     todo_id: TodoId,
+    viewer: &AccountUuid,
 ) -> Result<Option<Todo>, AppError> {
     let sql = format!(
-        "{TODO_PROJECTION} WHERE todo.organization_id = $1 AND todo.id = $2 AND todo.deleted_at IS NULL"
+        "{TODO_PROJECTION} WHERE todo.id = $1 AND todo.deleted_at IS NULL AND commit.todo_access(todo.id, $2)"
     );
     let record = sqlx::query_as::<_, TodoRecord>(AssertSqlSafe(sql))
-        .bind(organization_id.into_uuid())
         .bind(todo_id.into_uuid())
+        .bind(viewer.as_str())
         .fetch_optional(pool)
         .await?;
     record.map(TodoRecord::into_domain).transpose()
 }
 
+/// Whether the viewer may see the active todo.
+pub(crate) async fn can_see(
+    connection: &mut PgConnection,
+    todo_id: TodoId,
+    viewer: &AccountUuid,
+) -> Result<bool, AppError> {
+    Ok(
+        sqlx::query_scalar::<_, bool>("SELECT commit.todo_access($1, $2)")
+            .bind(todo_id.into_uuid())
+            .bind(viewer.as_str())
+            .fetch_one(connection)
+            .await?,
+    )
+}
+
 /// Locks and reads one active todo for a mutation transaction.
 pub(crate) async fn lock_todo(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
 ) -> Result<Option<Todo>, AppError> {
     let locked = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT id
-        FROM commit.todos
-        WHERE organization_id = $1
-          AND id = $2
-          AND deleted_at IS NULL
-        FOR UPDATE
-        "#,
+        "SELECT id FROM commit.todos WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
     .fetch_optional(&mut *connection)
     .await?;
     if locked.is_none() {
         return Ok(None);
     }
-    get_todo_on_connection(connection, organization_id, todo_id).await
+    get_todo_on_connection(connection, todo_id).await
 }
 
-/// Locks a todo for scoped, internally soft DELETE semantics.
+/// Locks a todo for internally soft DELETE semantics.
 pub(crate) async fn lock_delete_target(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
 ) -> Result<DeleteTarget, AppError> {
-    let target = sqlx::query_as::<_, (Option<OffsetDateTime>, Uuid)>(
-        r#"
-        SELECT deleted_at, assigned_by_principal_id
-        FROM commit.todos
-        WHERE organization_id = $1 AND id = $2
-        FOR UPDATE
-        "#,
+    let target = sqlx::query_as::<_, (Option<OffsetDateTime>, String)>(
+        "SELECT deleted_at, assigned_by_account FROM commit.todos WHERE id = $1 FOR UPDATE",
     )
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
     .fetch_optional(&mut *connection)
     .await?;
 
     match target {
         None => Ok(DeleteTarget::Missing),
-        Some((Some(_), assigned_by_principal_id)) => Ok(DeleteTarget::AlreadyDeleted(
-            PrincipalId::from_uuid(assigned_by_principal_id),
-        )),
-        Some((None, _)) => get_todo_on_connection(connection, organization_id, todo_id)
+        Some((Some(_), owner)) => Ok(DeleteTarget::AlreadyDeleted(account_uuid(owner)?)),
+        Some((None, _)) => get_todo_on_connection(connection, todo_id)
             .await?
             .map_or(Ok(DeleteTarget::Missing), |todo| {
                 Ok(DeleteTarget::Active(Box::new(todo)))
@@ -302,14 +301,10 @@ pub(crate) async fn lock_delete_target(
 
 async fn get_todo_on_connection(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
 ) -> Result<Option<Todo>, AppError> {
-    let sql = format!(
-        "{TODO_PROJECTION} WHERE todo.organization_id = $1 AND todo.id = $2 AND todo.deleted_at IS NULL"
-    );
+    let sql = format!("{TODO_PROJECTION} WHERE todo.id = $1 AND todo.deleted_at IS NULL");
     let record = sqlx::query_as::<_, TodoRecord>(AssertSqlSafe(sql))
-        .bind(organization_id.into_uuid())
         .bind(todo_id.into_uuid())
         .fetch_optional(&mut *connection)
         .await?;
@@ -319,8 +314,8 @@ async fn get_todo_on_connection(
 /// Lists append-only notes from the same snapshot that establishes parent visibility.
 pub(crate) async fn list_notes(
     pool: &PgPool,
-    organization_id: OrganizationId,
     todo_id: TodoId,
+    viewer: &AccountUuid,
     query: CollectionQuery,
 ) -> Result<Option<Vec<TodoNote>>, AppError> {
     let cursor_created_at = query.cursor.map(PageCursor::created_at);
@@ -331,37 +326,28 @@ pub(crate) async fn list_notes(
             todo.id AS parent_todo_id,
             note.id,
             note.body,
-            note.author_principal_id,
-            author.actor_type AS author_actor_type,
-            author.actor_id AS author_actor_id,
+            author.uuid AS author_uuid,
+            author.kind AS author_kind,
+            author.public_id AS author_id,
             note.created_at
         FROM commit.todos AS todo
         LEFT JOIN LATERAL (
-            SELECT candidate.id,
-                   candidate.body,
-                   candidate.author_principal_id,
-                   candidate.created_at
+            SELECT candidate.id, candidate.body, candidate.author_account, candidate.created_at
             FROM commit.todo_notes AS candidate
-            WHERE candidate.organization_id = todo.organization_id
-              AND candidate.todo_id = todo.id
-              AND (
-                  $3::timestamptz IS NULL
-                  OR (candidate.created_at, candidate.id) < ($3, $4)
-              )
+            WHERE candidate.todo_id = todo.id
+              AND ($3::timestamptz IS NULL OR (candidate.created_at, candidate.id) < ($3, $4))
             ORDER BY candidate.created_at DESC, candidate.id DESC
             LIMIT $5
         ) AS note ON TRUE
-        LEFT JOIN commit.actor_projection AS author
-            ON author.organization_id = todo.organization_id
-           AND author.principal_id = note.author_principal_id
-        WHERE todo.organization_id = $1
-          AND todo.id = $2
+        LEFT JOIN commit.accounts AS author ON author.uuid = note.author_account
+        WHERE todo.id = $1
           AND todo.deleted_at IS NULL
+          AND commit.todo_access(todo.id, $2)
         ORDER BY note.created_at DESC NULLS LAST, note.id DESC NULLS LAST
         "#,
     )
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
+    .bind(viewer.as_str())
     .bind(cursor_created_at)
     .bind(cursor_id)
     .bind(i64::from(query.limit.get()) + 1)
@@ -379,53 +365,6 @@ pub(crate) async fn list_notes(
         .map(Some)
 }
 
-/// Persists or verifies the caller's immutable IAM identity projection.
-pub(crate) async fn upsert_verified_actor(
-    connection: &mut PgConnection,
-    actor: &VerifiedActor,
-) -> Result<(), AppError> {
-    upsert_actor_projection(
-        connection,
-        actor.organization_id,
-        &actor.org_id,
-        &actor.membership_id,
-        &actor.actor,
-    )
-    .await
-}
-
-/// Persists or verifies an online-resolved assignee identity projection.
-pub(crate) async fn upsert_active_member(
-    connection: &mut PgConnection,
-    member: &ActiveMember,
-) -> Result<(), AppError> {
-    upsert_actor_projection(
-        connection,
-        member.organization_id,
-        &member.org_id,
-        &member.membership_id,
-        &member.actor,
-    )
-    .await
-}
-
-async fn upsert_actor_projection(
-    connection: &mut PgConnection,
-    organization_id: OrganizationId,
-    org_id: &PublicOrganizationId,
-    membership_id: &str,
-    actor: &Actor,
-) -> Result<(), AppError> {
-    super::identity_projection::persist_identity(
-        connection,
-        organization_id,
-        org_id,
-        membership_id,
-        actor,
-    )
-    .await
-}
-
 /// Inserts a todo and its ordered attachment set.
 pub(crate) async fn insert_todo(
     connection: &mut PgConnection,
@@ -434,54 +373,45 @@ pub(crate) async fn insert_todo(
     sqlx::query(
         r#"
         INSERT INTO commit.todos (
-            id,
-            organization_id,
-            title,
-            description,
-            assigned_by_principal_id,
-            assigned_to_principal_id,
-            status, project_id
+            id, title, description, assigned_by_account, assigned_to_account, status, project_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(todo.id.into_uuid())
-    .bind(todo.organization_id.into_uuid())
     .bind(todo.title.as_str())
     .bind(todo.description.map(LimitedText::as_str))
-    .bind(todo.assigned_by_principal_id.into_uuid())
-    .bind(todo.assigned_to_principal_id.into_uuid())
+    .bind(todo.assigned_by.as_str())
+    .bind(todo.assigned_to.as_str())
     .bind(todo.status)
     .bind(todo.project_id.map(crate::domain::ProjectId::into_uuid))
     .execute(&mut *connection)
     .await?;
-    insert_attachments(connection, todo.organization_id, todo.id, todo.attachments).await
+    insert_attachments(connection, todo.id, todo.attachments).await
 }
 
 /// Applies one complete, already-authorized desired todo state.
 pub(crate) async fn update_todo(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
     replacement: &TodoReplacement<'_>,
 ) -> Result<(), AppError> {
     let result = sqlx::query(
         r#"
         UPDATE commit.todos
-        SET title = $3,
-            description = $4,
-            assigned_to_principal_id = $5,
-            status = $6, project_id = $7
-        WHERE organization_id = $1
-          AND id = $2
+        SET title = $2,
+            description = $3,
+            assigned_to_account = $4,
+            status = $5,
+            project_id = $6
+        WHERE id = $1
           AND deleted_at IS NULL
         "#,
     )
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
     .bind(replacement.title.as_str())
     .bind(replacement.description.map(LimitedText::as_str))
-    .bind(replacement.assigned_to_principal_id.into_uuid())
+    .bind(replacement.assigned_to.as_str())
     .bind(replacement.status)
     .bind(
         replacement
@@ -495,27 +425,17 @@ pub(crate) async fn update_todo(
     }
 
     if replacement.replace_attachments {
-        sqlx::query(
-            "DELETE FROM commit.todo_attachments WHERE organization_id = $1 AND todo_id = $2",
-        )
-        .bind(organization_id.into_uuid())
-        .bind(todo_id.into_uuid())
-        .execute(&mut *connection)
-        .await?;
-        insert_attachments(
-            connection,
-            organization_id,
-            todo_id,
-            replacement.attachments,
-        )
-        .await?;
+        sqlx::query("DELETE FROM commit.todo_attachments WHERE todo_id = $1")
+            .bind(todo_id.into_uuid())
+            .execute(&mut *connection)
+            .await?;
+        insert_attachments(connection, todo_id, replacement.attachments).await?;
     }
     Ok(())
 }
 
 async fn insert_attachments(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
     attachments: &[AttachmentUrl],
 ) -> Result<(), AppError> {
@@ -533,11 +453,10 @@ async fn insert_attachments(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut builder = QueryBuilder::<Postgres>::new(
-        "INSERT INTO commit.todo_attachments (organization_id, todo_id, position, url) ",
+        "INSERT INTO commit.todo_attachments (todo_id, position, url) ",
     );
     builder.push_values(positioned, |mut row, (position, attachment_url)| {
-        row.push_bind(organization_id.into_uuid())
-            .push_bind(todo_id.into_uuid())
+        row.push_bind(todo_id.into_uuid())
             .push_bind(position)
             .push_bind(attachment_url);
     });
@@ -548,9 +467,8 @@ async fn insert_attachments(
 /// Soft-deletes the already-locked active todo and returns its new version.
 pub(crate) async fn soft_delete_todo(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
-    deleted_by: PrincipalId,
+    deleted_by: &AccountUuid,
     tombstone_retention: Duration,
 ) -> Result<i64, AppError> {
     let retention_seconds = i64::try_from(tombstone_retention.as_secs())
@@ -560,17 +478,15 @@ pub(crate) async fn soft_delete_todo(
         UPDATE commit.todos
         SET deleted_at = GREATEST(updated_at, clock_timestamp()),
             content_retain_until = GREATEST(updated_at, clock_timestamp())
-                + make_interval(secs => $4::double precision),
-            deleted_by_principal_id = $3
-        WHERE organization_id = $1
-          AND id = $2
+                + make_interval(secs => $3::double precision),
+            deleted_by_account = $2
+        WHERE id = $1
           AND deleted_at IS NULL
         RETURNING version
         "#,
     )
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
-    .bind(deleted_by.into_uuid())
+    .bind(deleted_by.as_str())
     .bind(retention_seconds)
     .fetch_optional(&mut *connection)
     .await?
@@ -580,7 +496,6 @@ pub(crate) async fn soft_delete_todo(
 /// Appends one note and returns its immutable public projection.
 pub(crate) async fn insert_note(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
     todo_id: TodoId,
     note_id: TodoNoteId,
     author: &Actor,
@@ -588,21 +503,14 @@ pub(crate) async fn insert_note(
 ) -> Result<TodoNote, AppError> {
     let created_at = sqlx::query_scalar::<_, OffsetDateTime>(
         r#"
-        INSERT INTO commit.todo_notes (
-            id,
-            organization_id,
-            todo_id,
-            author_principal_id,
-            body
-        )
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO commit.todo_notes (id, todo_id, author_account, body)
+        VALUES ($1, $2, $3, $4)
         RETURNING created_at
         "#,
     )
     .bind(note_id.into_uuid())
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
-    .bind(author.principal_id.into_uuid())
+    .bind(author.uuid.as_str())
     .bind(body.as_str())
     .fetch_one(&mut *connection)
     .await?;
@@ -632,8 +540,7 @@ pub(crate) async fn lock_idempotency_scope(
 
 fn advisory_lock_scope(actor: &VerifiedActor, mutation: &MutationIdentity) -> String {
     let values = [
-        actor.organization_id.to_string(),
-        actor.actor.principal_id.to_string(),
+        actor.uuid().as_str().to_owned(),
         mutation.operation.to_owned(),
         mutation.resource_path.clone(),
         mutation.key.as_str().to_owned(),
@@ -656,16 +563,14 @@ pub(crate) async fn load_idempotency_record(
     sqlx::query(
         r#"
         DELETE FROM commit.idempotency_records
-        WHERE organization_id = $1
-          AND actor_principal_id = $2
-          AND operation = $3
-          AND resource_path = $4
-          AND idempotency_key = $5
+        WHERE actor_account = $1
+          AND operation = $2
+          AND resource_path = $3
+          AND idempotency_key = $4
           AND expires_at <= transaction_timestamp()
         "#,
     )
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(actor.uuid().as_str())
     .bind(mutation.operation)
     .bind(&mutation.resource_path)
     .bind(mutation.key.as_str())
@@ -676,16 +581,14 @@ pub(crate) async fn load_idempotency_record(
         r#"
         SELECT request_fingerprint, response_status, response_body
         FROM commit.idempotency_records
-        WHERE organization_id = $1
-          AND actor_principal_id = $2
-          AND operation = $3
-          AND resource_path = $4
-          AND idempotency_key = $5
+        WHERE actor_account = $1
+          AND operation = $2
+          AND resource_path = $3
+          AND idempotency_key = $4
           AND expires_at > transaction_timestamp()
         "#,
     )
-    .bind(actor.organization_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(actor.uuid().as_str())
     .bind(mutation.operation)
     .bind(&mutation.resource_path)
     .bind(mutation.key.as_str())
@@ -715,37 +618,18 @@ pub(crate) async fn insert_idempotency_record(
     sqlx::query(
         r#"
         INSERT INTO commit.idempotency_records (
-            id,
-            organization_id,
-            todo_id,
-            actor_principal_id,
-            operation,
-            resource_path,
-            idempotency_key,
-            request_fingerprint,
-            response_status,
-            response_body,
-            expires_at
+            id, todo_id, actor_account, operation, resource_path, idempotency_key,
+            request_fingerprint, response_status, response_body, expires_at
         )
         VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            $7,
-            $8,
-            $9,
-            $10,
-            transaction_timestamp() + ($11::double precision * interval '1 second')
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            transaction_timestamp() + ($10::double precision * interval '1 second')
         )
         "#,
     )
     .bind(Uuid::now_v7())
-    .bind(actor.organization_id.into_uuid())
     .bind(todo_id.into_uuid())
-    .bind(actor.actor.principal_id.into_uuid())
+    .bind(actor.uuid().as_str())
     .bind(mutation.operation)
     .bind(&mutation.resource_path)
     .bind(mutation.key.as_str())
@@ -758,116 +642,102 @@ pub(crate) async fn insert_idempotency_record(
     Ok(())
 }
 
+/// Adds `via_app` to change details when another app acts for the account.
+pub(crate) fn annotate(actor: &VerifiedActor, details: &Value) -> Value {
+    match (actor.via_app(), details) {
+        (Some(app), Value::Object(fields)) => {
+            let mut fields = fields.clone();
+            fields.insert("via_app".to_owned(), Value::String(app.to_owned()));
+            Value::Object(fields)
+        }
+        _ => details.clone(),
+    }
+}
+
 /// Appends internal todo history in the domain transaction.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn insert_activity(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
+    actor: &VerifiedActor,
     todo_id: TodoId,
     kind: TodoActivityKind,
-    actor_principal_id: PrincipalId,
     request_id: &str,
     changes: &Value,
-    audit_retention: std::time::Duration,
+    audit_retention: Duration,
 ) -> Result<(), AppError> {
-    let retention_seconds = i64::try_from(audit_retention.as_secs()).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!(
-            "activity retention duration is too large: {error}"
-        ))
-    })?;
-    if retention_seconds == 0 {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "activity retention duration must be positive"
-        )));
-    }
+    let retention_seconds = positive_seconds(audit_retention, "activity")?;
     sqlx::query(
         r#"
         INSERT INTO commit.todo_activity (
-            id,
-            organization_id,
-            todo_id,
-            activity_type,
-            actor_principal_id,
-            request_id,
-            changes,
-            retain_until
+            id, todo_id, activity_type, actor_account, request_id, changes, retain_until
         )
         VALUES (
-            $1, $2, $3, $4::commit.todo_activity_type, $5, $6, $7,
-            transaction_timestamp() + make_interval(secs => $8::double precision)
+            $1, $2, $3::commit.todo_activity_type, $4, $5, $6,
+            transaction_timestamp() + make_interval(secs => $7::double precision)
         )
         "#,
     )
     .bind(Uuid::now_v7())
-    .bind(organization_id.into_uuid())
     .bind(todo_id.into_uuid())
     .bind(kind.as_str())
-    .bind(actor_principal_id.into_uuid())
+    .bind(actor.uuid().as_str())
     .bind(request_id)
-    .bind(changes)
+    .bind(annotate(actor, changes))
     .bind(retention_seconds)
     .execute(&mut *connection)
     .await?;
     Ok(())
 }
 
-/// Appends one minimal mutation audit event.
+/// Appends one minimal mutation audit event naming the acting account.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn insert_audit_event(
     connection: &mut PgConnection,
-    organization_id: OrganizationId,
-    actor_principal_id: PrincipalId,
+    actor: &VerifiedActor,
     action: &'static str,
     resource_type: &'static str,
     resource_id: Uuid,
     request_id: &str,
     change_summary: &Value,
-    audit_retention: std::time::Duration,
+    audit_retention: Duration,
 ) -> Result<(), AppError> {
-    let retention_seconds = i64::try_from(audit_retention.as_secs()).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!(
-            "audit retention duration is too large: {error}"
-        ))
-    })?;
-    if retention_seconds == 0 {
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "audit retention duration must be positive"
-        )));
-    }
+    let retention_seconds = positive_seconds(audit_retention, "audit")?;
     sqlx::query(
         r#"
         INSERT INTO commit.audit_events (
-            id,
-            organization_id,
-            actor_principal_id,
-            action,
-            resource_type,
-            resource_id,
-            request_id,
-            change_summary,
-            retain_until
+            id, actor_account, action, resource_type, resource_id, request_id, change_summary, retain_until
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
-            transaction_timestamp() + make_interval(secs => $9::double precision)
+            $1, $2, $3, $4, $5, $6, $7,
+            transaction_timestamp() + make_interval(secs => $8::double precision)
         )
         "#,
     )
     .bind(Uuid::now_v7())
-    .bind(organization_id.into_uuid())
-    .bind(actor_principal_id.into_uuid())
+    .bind(actor.uuid().as_str())
     .bind(action)
     .bind(resource_type)
     .bind(resource_id)
     .bind(request_id)
-    .bind(change_summary)
+    .bind(annotate(actor, change_summary))
     .bind(retention_seconds)
     .execute(&mut *connection)
     .await?;
     Ok(())
 }
 
-/// Enqueues one delegated-Silicon Hook event in the domain transaction.
+fn positive_seconds(duration: Duration, what: &str) -> Result<i64, AppError> {
+    let seconds = i64::try_from(duration.as_secs()).map_err(|error| {
+        AppError::Internal(anyhow!("{what} retention duration is too large: {error}"))
+    })?;
+    if seconds == 0 {
+        return Err(AppError::Internal(anyhow!(
+            "{what} retention duration must be positive"
+        )));
+    }
+    Ok(seconds)
+}
+
+/// Enqueues one delegated-Silicon webhook event in the domain transaction.
 pub(crate) async fn insert_outbox_event(
     connection: &mut PgConnection,
     event: &NewOutboxEvent<'_>,
@@ -875,27 +745,17 @@ pub(crate) async fn insert_outbox_event(
     sqlx::query(
         r#"
         INSERT INTO commit.outbox_events (
-            id,
-            organization_id,
-            todo_id,
-            recipient_silicon_principal_id,
-            event_type,
-            payload_version,
-            payload,
-            webhook_url,
-            destination_version,
-            subscription_level,
-            subscription_scope,
-            subscription_version
+            id, todo_id, recipient_silicon_account, event_type, payload_version, payload,
+            webhook_url, destination_version, subscription_level, subscription_scope, subscription_version
         )
-        VALUES ($1, $2, $3, $4, $5, 2, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
     .bind(event.id)
-    .bind(event.organization_id.into_uuid())
     .bind(event.todo_id.into_uuid())
-    .bind(event.recipient_silicon_principal_id.into_uuid())
+    .bind(event.recipient_silicon.as_str())
     .bind(event.event_type)
+    .bind(OUTBOX_PAYLOAD_VERSION)
     .bind(event.payload)
     .bind(event.routing.webhook_url().as_str())
     .bind(event.routing.destination_version().get())
@@ -910,16 +770,14 @@ pub(crate) async fn insert_outbox_event(
 #[derive(FromRow)]
 struct TodoRecord {
     id: Uuid,
-    organization_id: Uuid,
-    org_id: String,
     title: String,
     description: Option<String>,
-    assigned_by_principal_id: Uuid,
-    assigned_by_actor_type: ActorType,
-    assigned_by_actor_id: String,
-    assigned_to_principal_id: Uuid,
-    assigned_to_actor_type: ActorType,
-    assigned_to_actor_id: String,
+    assigned_by_uuid: String,
+    assigned_by_kind: ActorType,
+    assigned_by_id: String,
+    assigned_to_uuid: String,
+    assigned_to_kind: ActorType,
+    assigned_to_id: String,
     status: TodoStatus,
     attachments: Vec<String>,
     created_at: OffsetDateTime,
@@ -948,19 +806,17 @@ impl TodoRecord {
         Ok(Todo {
             project_id: self.project_id.map(crate::domain::ProjectId::from_uuid),
             id: TodoId::from_uuid(self.id),
-            organization_id: OrganizationId::from_uuid(self.organization_id),
-            org_id: PublicOrganizationId::new(self.org_id).map_err(corrupt_persisted_data)?,
             title,
             description,
             assigned_to: Actor::new(
-                PrincipalId::from_uuid(self.assigned_to_principal_id),
-                self.assigned_to_actor_type,
-                ActorId::new(self.assigned_to_actor_id).map_err(corrupt_persisted_data)?,
+                account_uuid(self.assigned_to_uuid)?,
+                self.assigned_to_kind,
+                ActorId::from_persisted(self.assigned_to_id),
             ),
             assigned_by: Actor::new(
-                PrincipalId::from_uuid(self.assigned_by_principal_id),
-                self.assigned_by_actor_type,
-                ActorId::new(self.assigned_by_actor_id).map_err(corrupt_persisted_data)?,
+                account_uuid(self.assigned_by_uuid)?,
+                self.assigned_by_kind,
+                ActorId::from_persisted(self.assigned_by_id),
             ),
             status: self.status,
             attachments,
@@ -975,9 +831,9 @@ struct TodoNoteJoinRecord {
     parent_todo_id: Uuid,
     id: Option<Uuid>,
     body: Option<String>,
-    author_principal_id: Option<Uuid>,
-    author_actor_type: Option<ActorType>,
-    author_actor_id: Option<String>,
+    author_uuid: Option<String>,
+    author_kind: Option<ActorType>,
+    author_id: Option<String>,
     created_at: Option<OffsetDateTime>,
 }
 
@@ -991,15 +847,12 @@ impl TodoNoteJoinRecord {
         let body = self
             .body
             .ok_or_else(|| corrupt_persisted_data("note body is null"))?;
-        let author_principal_id = self
-            .author_principal_id
-            .ok_or_else(|| corrupt_persisted_data("note author principal is null"))?;
-        let author_actor_type = self
-            .author_actor_type
-            .ok_or_else(|| corrupt_persisted_data("note author type is null"))?;
-        let author_actor_id = self
-            .author_actor_id
-            .ok_or_else(|| corrupt_persisted_data("note author public ID is null"))?;
+        let author_uuid = self
+            .author_uuid
+            .ok_or_else(|| corrupt_persisted_data("note author account is missing"))?;
+        let author_kind = self
+            .author_kind
+            .ok_or_else(|| corrupt_persisted_data("note author kind is null"))?;
         let created_at = self
             .created_at
             .ok_or_else(|| corrupt_persisted_data("note creation time is null"))?;
@@ -1009,9 +862,9 @@ impl TodoNoteJoinRecord {
             body: RequiredText::new("body", body, STORED_NOTE_CHARS)
                 .map_err(corrupt_persisted_data)?,
             author: Actor::new(
-                PrincipalId::from_uuid(author_principal_id),
-                author_actor_type,
-                ActorId::new(author_actor_id).map_err(corrupt_persisted_data)?,
+                account_uuid(author_uuid)?,
+                author_kind,
+                ActorId::from_persisted(self.author_id.unwrap_or_default()),
             ),
             created_at,
         })
@@ -1041,36 +894,29 @@ fn corrupt_persisted_data(error: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use secrecy::SecretString;
-    use uuid::Uuid;
-
-    use super::advisory_lock_scope;
+    use super::{advisory_lock_scope, annotate};
     use crate::{
         application::{
             idempotency::{IdempotencyKey, MutationIdentity},
-            ports::{CapabilitySet, InboundCredential, OrganizationRole, VerifiedActor},
+            ports::{Grant, VerifiedActor},
         },
-        domain::{Actor, ActorId, ActorType, OrganizationId, PrincipalId, PublicOrganizationId},
+        domain::{AccountUuid, Actor, ActorId, ActorType},
     };
 
-    fn verified_actor(principal_id: Uuid) -> Option<VerifiedActor> {
-        let actor_id = ActorId::new("silicon-test").ok()?;
-        let org_id = PublicOrganizationId::new("test-org").ok()?;
+    fn verified_actor(uuid: &str, grant: Grant) -> Option<VerifiedActor> {
         let actor = Actor::new(
-            PrincipalId::from_uuid(principal_id),
+            AccountUuid::new(uuid).ok()?,
             ActorType::Silicon,
-            actor_id,
+            ActorId::new("si:test").ok()?,
         );
-        let grant = InboundCredential::Bearer(SecretString::from("test-token".to_owned()));
-        Some(VerifiedActor::new(
-            OrganizationId::from_uuid(Uuid::from_u128(1)),
-            org_id.clone(),
-            format!("{}[{}]", actor.id.as_str(), org_id.as_str()),
-            actor,
-            OrganizationRole::Member,
-            CapabilitySet::default(),
-            grant,
-        ))
+        Some(VerifiedActor::new(actor, grant))
+    }
+
+    fn bearer() -> Grant {
+        Grant::Bearer {
+            issued_at: None,
+            family: None,
+        }
     }
 
     fn mutation(path: &str, key: &str) -> Option<MutationIdentity> {
@@ -1085,20 +931,18 @@ mod tests {
 
     #[test]
     fn advisory_scope_is_length_framed_and_bound_to_every_identity_dimension() {
-        let Some(actor) = verified_actor(Uuid::from_u128(3)) else {
-            return;
+        let (Some(actor), Some(other_actor)) = (
+            verified_actor("aaa", bearer()),
+            verified_actor("aaA", bearer()),
+        ) else {
+            panic!("fixture accounts are valid");
         };
-        let Some(other_actor) = verified_actor(Uuid::from_u128(4)) else {
-            return;
-        };
-        let Some(first) = mutation("/todos/one", "request-one") else {
-            return;
-        };
-        let Some(other_path) = mutation("/todos/two", "request-one") else {
-            return;
-        };
-        let Some(other_key) = mutation("/todos/one", "request-two") else {
-            return;
+        let (Some(first), Some(other_path), Some(other_key)) = (
+            mutation("/todos/one", "request-one"),
+            mutation("/todos/two", "request-one"),
+            mutation("/todos/one", "request-two"),
+        ) else {
+            panic!("fixture mutations are valid");
         };
 
         let scope = advisory_lock_scope(&actor, &first);
@@ -1106,5 +950,29 @@ mod tests {
         assert_ne!(scope, advisory_lock_scope(&actor, &other_path));
         assert_ne!(scope, advisory_lock_scope(&actor, &other_key));
         assert!(scope.contains("10:updateTodo"));
+    }
+
+    #[test]
+    fn proof_callers_are_recorded_on_audit_details() {
+        let Some(actor) = verified_actor(
+            "aaa",
+            Grant::Proof {
+                issuing_app: "interface".to_owned(),
+                proof_id: "p1".to_owned(),
+                scopes: vec!["commit.todos.create".to_owned()],
+            },
+        ) else {
+            panic!("fixture account is valid");
+        };
+        let details = annotate(&actor, &serde_json::json!({ "fields": ["title"] }));
+        assert_eq!(details["via_app"], "interface");
+        let Some(direct) = verified_actor("aaa", bearer()) else {
+            panic!("fixture account is valid");
+        };
+        assert!(
+            annotate(&direct, &serde_json::json!({}))
+                .get("via_app")
+                .is_none()
+        );
     }
 }

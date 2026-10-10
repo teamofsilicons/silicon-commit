@@ -1,0 +1,178 @@
+name: release
+
+# Builds the commit CLI for every release target and packs one Silicon Apps archive per target, with SHA256SUMS,
+# as the workflow artifact commit-silicon-apps-release. It publishes nothing: a Carbon uploads, releases and
+# promotes the archives with the silicon-apps CLI (docs/RELEASES.md).
+on:
+  push:
+    branches: ['release/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SILICON_APPS_CLI_VERSION: 0.2.0
+  RELEASE_TARGETS: linux-x86_64 linux-aarch64 windows-x86_64 windows-aarch64 macos-x86_64 macos-aarch64
+  GLIBC_IMAGE: debian:buster-slim@sha256:bb3dc79fddbca7e8903248ab916bb775c96ec61014b3d02b4f06043b604726dc
+
+jobs:
+  version:
+    name: Check the release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read the version every manifest agrees on (a tag must be exactly v<version>)
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            version=$(python scripts/package_apps.py version --tag "$REF_NAME")
+          else
+            version=$(python scripts/package_apps.py version)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing the commit CLI $version"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+            triple: x86_64-unknown-linux-gnu
+            executable: commit
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+            triple: aarch64-unknown-linux-gnu
+            executable: commit
+          - runner: windows-2025
+            target: windows-x86_64
+            triple: x86_64-pc-windows-msvc
+            executable: commit.exe
+          - runner: windows-11-arm
+            target: windows-aarch64
+            triple: aarch64-pc-windows-msvc
+            executable: commit.exe
+          - runner: macos-15-intel
+            target: macos-x86_64
+            triple: x86_64-apple-darwin
+            executable: commit
+          - runner: macos-15
+            target: macos-aarch64
+            triple: aarch64-apple-darwin
+            executable: commit
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      BINARY: target/${{ matrix.triple }}/release/${{ matrix.executable }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.triple }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned Linux baseline toolchain
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install 'cargo-zigbuild==0.23.4' 'ziglang==0.15.2'
+          python -c 'from pathlib import Path; import ziglang; print("CARGO_ZIGBUILD_ZIG_PATH=" + str(Path(ziglang.__file__).with_name("zig")))' >> "$GITHUB_ENV"
+          cargo-zigbuild --version
+          python -m ziglang version
+      - name: Build Linux CLI for glibc 2.28
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --locked --release -p silicon-commit-cli --bin commit --target ${{ matrix.triple }}.2.28
+      - name: Build native CLI
+        if: runner.os != 'Linux'
+        run: cargo build --locked --release -p silicon-commit-cli --bin commit --target ${{ matrix.triple }}
+      - name: Verify Linux ABI requirements
+        if: runner.os == 'Linux'
+        run: |
+          python scripts/test_linux_abi.py
+          python scripts/check_linux_abi.py "$BINARY"
+      - name: Run the discovery commands on glibc 2.28 without a network
+        if: runner.os == 'Linux'
+        run: |
+          test "$(docker run --rm "$GLIBC_IMAGE" getconf GNU_LIBC_VERSION)" = "glibc 2.28"
+          runner=$(python -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \
+            docker run --rm --network none --tmpfs /home/empty --workdir /home/empty \
+            --env HOME=/home/empty --env SILICON_HOME=/home/empty \
+            --volume "$PWD/$BINARY:/usr/local/bin/commit:ro" "$GLIBC_IMAGE" /usr/local/bin/commit)
+          python scripts/package_apps.py discover ${{ matrix.target }} "$BINARY" --version "$VERSION" --runner "$runner"
+      - name: Run the discovery commands natively in an empty home
+        run: >-
+          python scripts/package_apps.py discover ${{ matrix.target }} "$BINARY" --version "$VERSION"
+          --require --receipt-out discovery.json
+      - name: Collect the executable and its discovery receipt
+        run: |
+          mkdir -p "out/${{ matrix.target }}"
+          cp "$BINARY" discovery.json "out/${{ matrix.target }}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commit-cli-${{ matrix.target }}
+          path: out/${{ matrix.target }}/
+          if-no-files-found: error
+
+  package:
+    name: Pack the Silicon Apps archives
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the Silicon Apps packer
+        run: cargo install --locked silicon-apps-cli --version "$SILICON_APPS_CLI_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: commit-cli-*
+          path: artifacts
+      - name: Pack one archive per target
+        run: |
+          for target in $RELEASE_TARGETS; do
+            executable=commit
+            case "$target" in windows-*) executable=commit.exe ;; esac
+            scripts/package-apps.sh "$VERSION" "$target" "artifacts/commit-cli-$target/$executable" \
+              --discovery require --receipt "artifacts/commit-cli-$target/discovery.json"
+          done
+          # shellcheck disable=SC2086 # one word per target
+          python scripts/package_apps.py checksums dist/apps --version "$VERSION" --expect $RELEASE_TARGETS
+          git rev-parse HEAD > dist/apps/SOURCE_REVISION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commit-silicon-apps-release
+          path: dist/apps/
+          if-no-files-found: error

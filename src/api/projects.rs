@@ -47,7 +47,7 @@ pub(crate) async fn create(
     StrictJson(input): StrictJson<ProjectCreate>,
 ) -> Result<Response, AppError> {
     let actor = state
-        .authenticate(&headers, action::PROJECTS_CREATE, None)
+        .authenticate_sensitive(&headers, action::PROJECTS_CREATE, None)
         .await?;
     let request_id = required_request_id()?;
     let mutation = state
@@ -80,9 +80,19 @@ pub(crate) async fn update(
     StrictJson(input): StrictJson<ProjectPatch>,
 ) -> Result<Response, AppError> {
     let locator = parse_locator(&raw_locator)?;
-    let actor = state
-        .authenticate(&headers, action::PROJECTS_UPDATE, Some(raw_locator))
-        .await?;
+    // Changing who can see the project (visibility, members) is checked online, so a
+    // sign-in that just ended cannot widen access.
+    let sensitive =
+        input.private.is_some() || input.silicon_ids.is_some() || input.carbon_ids.is_some();
+    let actor = if sensitive {
+        state
+            .authenticate_sensitive(&headers, action::PROJECTS_UPDATE, Some(raw_locator))
+            .await?
+    } else {
+        state
+            .authenticate(&headers, action::PROJECTS_UPDATE, Some(raw_locator))
+            .await?
+    };
     let request_id = required_request_id()?;
     let mutation = state
         .projects
@@ -171,7 +181,7 @@ pub(crate) async fn create_task(
 ) -> Result<Response, AppError> {
     let locator = parse_locator(&raw_locator)?;
     let actor = state
-        .authenticate(&headers, action::PROJECT_TASKS_CREATE, Some(raw_locator))
+        .authenticate_sensitive(&headers, action::PROJECT_TASKS_CREATE, Some(raw_locator))
         .await?;
     let request_id = required_request_id()?;
     let mutation = state
@@ -192,7 +202,7 @@ pub(crate) async fn update_task(
     let locator = parse_locator(&path.project_id)?;
     let resource = format!("{}/tasks/{}", path.project_id, path.task_id);
     let actor = state
-        .authenticate(&headers, action::PROJECT_TASKS_UPDATE, Some(resource))
+        .authenticate_sensitive(&headers, action::PROJECT_TASKS_UPDATE, Some(resource))
         .await?;
     let request_id = required_request_id()?;
     state
@@ -335,9 +345,9 @@ pub(crate) async fn claim_task(
 ) -> Result<Response, AppError> {
     let locator = parse_locator(&path.project_id)?;
     let actor = state
-        .authenticate(
+        .authenticate_sensitive(
             &headers,
-            "commit.project_tasks.claim",
+            action::PROJECT_TASKS_CLAIM,
             Some(format!("{}/tasks/{}", path.project_id, path.task_id)),
         )
         .await?;
@@ -357,7 +367,7 @@ pub(crate) async fn delete_task(
     let actor = state
         .authenticate(
             &headers,
-            "commit.project_tasks.delete",
+            action::PROJECT_TASKS_DELETE,
             Some(format!("{}/tasks/{}", path.project_id, path.task_id)),
         )
         .await?;

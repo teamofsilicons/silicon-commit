@@ -1,0 +1,51 @@
+name: Verify existing native Apps archives
+on:
+  push:
+    branches: ['proof/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+env:
+  RELEASE_APP_ID: commit
+  RELEASE_VERSION: 0.5.0
+  BUILD_RUN_ID: '38056545219'
+  BUILD_SOURCE_COMMIT: 524c89cc855c8be0ec63ee8ea0c906d27c328dee
+jobs:
+  native:
+    name: Verify ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, target: linux-x86_64}
+          - {runner: ubuntu-24.04-arm, target: linux-aarch64}
+          - {runner: windows-2025, target: windows-x86_64}
+          - {runner: windows-11-arm, target: windows-aarch64}
+          - {runner: macos-15-intel, target: macos-x86_64}
+          - {runner: macos-15, target: macos-aarch64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.2
+      - name: Check the original build identity and conclusion
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/verify_native_apps_release.py --check-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: commit-silicon-apps-release
+          run-id: ${{ env.BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: release
+      - name: Execute the exact archive in an empty home
+        run: python scripts/verify_native_apps_release.py --target ${{ matrix.target }} --output reports/commit-${{ matrix.target }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commit-native-proof-${{ matrix.target }}
+          path: reports/*.json
+          if-no-files-found: error

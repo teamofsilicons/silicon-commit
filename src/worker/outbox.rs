@@ -13,8 +13,8 @@ use crate::{
     },
     config::WorkerSettings,
     domain::{
-        ActorId, NotificationScope, NotificationSubscriptionLevel, NotificationVersion,
-        PublicOrganizationId, WebhookUrl,
+        AccountUuid, ActorId, NotificationScope, NotificationSubscriptionLevel,
+        NotificationVersion, WebhookUrl,
     },
 };
 
@@ -81,27 +81,22 @@ impl OutboxProcessor {
         let publisher = Arc::clone(&self.publisher);
         let pool = self.pool.clone();
         deliveries.spawn(async move {
-            let result = if claim.testing {
-                Ok(())
-            } else {
-                // Keep the project visibility lock through dispatch so a revoke
-                // cannot commit between the authorization check and the webhook.
-                match pool.begin().await {
-                    Ok(mut tx) => {
-                        let allowed = sqlx::query_scalar::<_, bool>(
-                            "SELECT commit.lock_notification_access($1)",
-                        )
-                        .bind(claim.event.event_id)
-                        .fetch_one(&mut *tx)
-                        .await;
-                        match allowed {
-                            Ok(true) => publisher.publish(&claim.event).await,
-                            Ok(false) => Ok(()),
-                            Err(_) => Err(WebhookPublishError::Unavailable),
-                        }
+            // Keep the project visibility lock through dispatch so a revoke
+            // cannot commit between the authorization check and the webhook.
+            let result = match pool.begin().await {
+                Ok(mut tx) => {
+                    let allowed =
+                        sqlx::query_scalar::<_, bool>("SELECT commit.lock_notification_access($1)")
+                            .bind(claim.event.event_id)
+                            .fetch_one(&mut *tx)
+                            .await;
+                    match allowed {
+                        Ok(true) => publisher.publish(&claim.event).await,
+                        Ok(false) => Ok(()),
+                        Err(_) => Err(WebhookPublishError::Unavailable),
                     }
-                    Err(_) => Err(WebhookPublishError::Unavailable),
                 }
+                Err(_) => Err(WebhookPublishError::Unavailable),
             };
             (claim, result)
         });
@@ -189,9 +184,9 @@ impl OutboxProcessor {
                 SELECT event.id
                 FROM commit.outbox_events AS event
                 WHERE event.status = 'pending'
+                  AND NOT EXISTS(SELECT 1 FROM commit.accounts a WHERE a.uuid=event.recipient_silicon_account AND a.status='unlinked')
                   AND event.available_at <= transaction_timestamp()
                   AND event.attempt_count < $4
-                  AND EXISTS (SELECT 1 FROM commit.organization_projection o WHERE o.organization_id=event.organization_id AND commit.testing_delivery_allowed(o.environment_id))
                 ORDER BY event.available_at, event.created_at, event.id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $1
@@ -211,9 +206,8 @@ impl OutboxProcessor {
                 RETURNING event.*
             )
             SELECT claimed.id,
-                   organization.org_id,
-                   (organization.environment_id IS NOT NULL) AS testing,
-                   recipient.actor_id AS silicon_id,
+                   recipient.uuid AS silicon_uuid,
+                   recipient.public_id AS silicon_id,
                    claimed.event_type,
                    claimed.payload_version,
                    claimed.webhook_url,
@@ -225,11 +219,8 @@ impl OutboxProcessor {
                    claimed.created_at,
                    claimed.attempt_count
             FROM claimed
-            JOIN commit.organization_projection AS organization
-              ON organization.organization_id = claimed.organization_id
-            JOIN commit.actor_projection AS recipient
-              ON recipient.organization_id = claimed.organization_id
-             AND recipient.principal_id = claimed.recipient_silicon_principal_id
+            JOIN commit.accounts AS recipient
+              ON recipient.uuid = claimed.recipient_silicon_account
             ORDER BY claimed.created_at, claimed.id
             "#,
         )
@@ -347,9 +338,8 @@ impl OutboxProcessor {
 
 #[derive(FromRow)]
 struct ClaimedRow {
-    testing: bool,
     id: Uuid,
-    org_id: String,
+    silicon_uuid: String,
     silicon_id: String,
     event_type: String,
     payload_version: i16,
@@ -364,7 +354,6 @@ struct ClaimedRow {
 }
 
 struct ClaimedEvent {
-    testing: bool,
     event: WebhookEvent,
     attempt_count: i32,
 }
@@ -373,10 +362,9 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
     type Error = sqlx::Error;
 
     fn try_from(row: ClaimedRow) -> Result<Self, Self::Error> {
-        let org_id = PublicOrganizationId::new(row.org_id)
+        let silicon_uuid = AccountUuid::new(row.silicon_uuid)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
-        let silicon_id =
-            ActorId::new(row.silicon_id).map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+        let silicon_id = ActorId::from_persisted(row.silicon_id);
         let payload_version = u16::try_from(row.payload_version)
             .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
         let routing_snapshot = match (
@@ -425,10 +413,9 @@ impl TryFrom<ClaimedRow> for ClaimedEvent {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         Ok(Self {
-            testing: row.testing,
             event: WebhookEvent {
                 event_id: row.id,
-                org_id,
+                silicon_uuid,
                 silicon_id,
                 event_type: row.event_type,
                 payload_version,
@@ -477,10 +464,9 @@ mod tests {
     fn claimed_event_promotes_the_persisted_request_correlation() {
         let request_id = "01900000-0000-7000-8000-000000000001";
         let row = ClaimedRow {
-            testing: false,
             id: Uuid::now_v7(),
-            org_id: "test-org".to_owned(),
-            silicon_id: "silicon-one".to_owned(),
+            silicon_uuid: "K1E".to_owned(),
+            silicon_id: "si:one".to_owned(),
             event_type: "todo.updated".to_owned(),
             payload_version: 1,
             webhook_url: None,
@@ -503,10 +489,9 @@ mod tests {
     #[test]
     fn claimed_event_reconstructs_the_immutable_routing_snapshot() {
         let row = ClaimedRow {
-            testing: false,
             id: Uuid::now_v7(),
-            org_id: "test-org".to_owned(),
-            silicon_id: "silicon-one".to_owned(),
+            silicon_uuid: "K1E".to_owned(),
+            silicon_id: "si:one".to_owned(),
             event_type: "todo.status_changed".to_owned(),
             payload_version: 2,
             webhook_url: Some("https://hook.example.com/silicon/silicon-one/A1B2C3".to_owned()),
@@ -539,10 +524,9 @@ mod tests {
     #[test]
     fn claimed_event_rejects_an_incomplete_routing_snapshot() {
         let row = ClaimedRow {
-            testing: false,
             id: Uuid::now_v7(),
-            org_id: "test-org".to_owned(),
-            silicon_id: "silicon-one".to_owned(),
+            silicon_uuid: "K1E".to_owned(),
+            silicon_id: "si:one".to_owned(),
             event_type: "todo.updated".to_owned(),
             payload_version: 2,
             webhook_url: Some("https://hook.example.com/silicon/silicon-one/A1B2C3".to_owned()),

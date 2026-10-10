@@ -1,19 +1,22 @@
 # Silicon Commit
 
-[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md)
+[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md) · [Release Commit](docs/RELEASES.md)
 
 ```sh
-honeycomb install 'commit'
-commit iam --json
-commit login "<IAM-SLT>"
+silicon-apps install commit
+commit login                                                        # a Carbon approves a code at Silicon Accounts
+silicon-accounts login --app commit -q | commit login --slt-stdin   # a Silicon hands over a short-lived token
+commit accounts --json
 ```
 
-Version 0.2 adds Carbon/Silicon collaboration, private projects, linked todo assignments, retained history, automatic IAM sandbox selection, email, and configurable Space Station telemetry.
+Version 0.5 signs Carbons and Silicons in with Silicon Accounts, keys all work to personal accounts (a custodian
+manages the work of the Silicons it looks after), and ships the CLI through Silicon Apps, which keeps it up to date.
 
-A SolidJS web interface is available in [frontend/](frontend/README.md), with local preview and hosting instructions.
+The web app is being rebuilt with Next.js and Silicon Accounts sign-in; until it lands, `frontend/` holds the
+previous web, which does not work with this release's service.
 
-Silicon Commit is the organization-scoped work manager for Carbons and
-Silicons. It implements the v1 todo, note, notification-subscription, project,
+Silicon Commit is the work manager for Carbons and Silicons, signed in with
+Silicon Accounts. It implements the v1 todo, note, notification-subscription, project,
 diary, project-work, contract in Rust.
 
 The product intent lives in [`UNDERSTANDING.md`](./UNDERSTANDING.md), the HTTP
@@ -31,12 +34,12 @@ Commit is a modular monolith with three processes:
 - `commit-migrate` applies embedded forward PostgreSQL migrations with a
   separately privileged database credential.
 
-PostgreSQL is the consistency boundary. Every domain relationship is qualified
-by IAM's internal organization UUID. IAM is consulted online for request
-authentication and current membership; its local identity projection retains
-stable relationship keys but never grants authority. Before any product data
-access, Commit checks the freshly verified organization and actor against both
-directions of every retained public/internal identity mapping. Todo
+PostgreSQL is the consistency boundary. Every relationship is keyed by the
+permanent Silicon Accounts uuid of the accounts involved (`commit.accounts`);
+`c:`/`si:` ids are display data refreshed from Accounts. Access tokens are
+verified locally against Accounts' published keys, and who may see or change
+what (custodians and their Silicons, project membership, a Silicon's allow-list) is
+decided by SQL policy functions inside the same transaction as the work. Todo
 notifications that match an assigning Silicon's subscription are committed to
 an outbox with an immutable destination snapshot and delivered directly to each snapshotted webhook endpoint at least once.
 
@@ -56,9 +59,9 @@ cargo run --bin commit-migrate
 cargo run --bin commit-api
 ```
 
-For isolated local HTTP work, `COMMIT_AUTH_MODE=trusted_headers` accepts the
-documented development identity headers. That mode is rejected when
-`COMMIT_ENVIRONMENT=production`.
+Point `ACCOUNTS_URL` at Silicon Accounts (a local stack may use
+`http://localhost:…`) and set `COMMIT_APP_SECRET`; see
+[Silicon Accounts integration](docs/ACCOUNTS.md).
 
 Run the complete local quality gate with:
 
@@ -81,16 +84,19 @@ make test
 
 ## Security model
 
-- Bearer and OBO credentials are mutually exclusive and verified by IAM.
-- Reusable OBO access tokens are verified online for every request, using the
-  handler's endpoint ID and matched route. Verification does not consume a token
-  or bypass Commit's resource permissions; revoked grants fail on the next check.
-- `X-Org-ID` is matched to the verified active IAM membership. Existing
-  organization, principal, membership, actor-type, and public-ID projections
-  must agree exactly before any read or write.
-- Private project access requires invitation, matching IAM tags, or creation; ownership alone does not bypass it. Todo management retains its existing owner policy. IAM admins need explicit
-  `commit.todos.manage` or `commit.projects.manage` capabilities.
-- All resource lookups are organization-qualified and return scoped absence.
+- Every request carries exactly one credential: a Silicon Accounts access token
+  issued to Commit (verified locally: signature, audience, issuer, expiry) or a
+  User verification proof from an app allowed for that action (verified online).
+- Tokens issued before an account signed out or removed Commit's access are
+  refused; changing visibility, members or a Silicon's allow-list also checks the
+  token online.
+- Todos are visible to their owner and assignee, to the accounts close to either
+  (for a Carbon, the Silicons it looks after; for a Silicon, its custodian and the
+  custodian's other Silicons) and to readers of their project; projects to the
+  owner, the accounts close to it and their members (members only when private).
+  A custodian manages its Silicons' work as itself. A Silicon takes work only from
+  the accounts close to it and from accounts it allowed.
+- Resources a caller cannot see answer 404; visible but unchangeable ones 403.
 - Todo attachments are canonical HTTPS URLs from any provider. Commit stores and returns the URL list; uploads and temporary URL exchanges are outside its scope.
 - Notification settings belong to the authenticated Silicon. Webhook destinations
   are optional HTTPS endpoints; Commit stores no endpoint signing secret. Per-todo rules exclusively override the list rule until a
@@ -98,7 +104,7 @@ make test
 - Secrets, authorization headers, bodies, and provider payloads are excluded
   from telemetry.
 
-Commit authenticates with Silicon IAM; Postmark delivers email, and optional diagnostics use a dedicated Space Station table. Webhook delivery is direct from the worker to the stored HTTPS destination, with durable outbox retries and idempotency.
+Commit authenticates with Silicon Accounts; Postmark delivers email, and optional diagnostics use a dedicated Space Station table. Webhook delivery is direct from the worker to the stored HTTPS destination, with durable outbox retries and idempotency.
 
 ## Configuration
 
@@ -111,11 +117,11 @@ enforces:
 - HTTPS for the public base URL and each platform adapter used by the process;
 - exactly one `sslmode=verify-full` or `ssl-mode=verify-full` parameter in each
   runtime or migrator PostgreSQL URL;
-- real IAM authentication rather than trusted headers for the API;
-- IAM credentials for the API; Postmark and Space Station credentials belong only to the worker.
+- HTTPS Silicon Accounts URLs and the account webhook secret for the API;
+- the Commit app secret for the API; Postmark and Space Station credentials belong only to the worker.
 
 Production API and worker deployments should use separate environment and
-secret sets. `commit-api` reads IAM configuration. `commit-worker` needs database and worker settings plus enabled delivery integrations; it delivers directly to snapshotted webhook URLs. Both processes
+secret sets. `commit-api` reads the Silicon Accounts configuration. `commit-worker` needs database and worker settings plus enabled delivery integrations; it delivers directly to snapshotted webhook URLs. Both processes
 retain the shared database, domain-limit, retention, provider-timeout, and
 worker-policy validation used by the application services.
 
@@ -187,7 +193,7 @@ two terminal outbox minima. Once an outbox event is delivered or dead-lettered,
 PostgreSQL rejects every later update; the bounded retention capability is the
 only path that removes it after its stored deadline.
 
-Todo idempotency records carry an organization-qualified `todo_id`. A deleted
+Todo idempotency records carry the `todo_id`. A deleted
 todo's title/description, notes, attachments, and activity change details are
 not purged while any linked replay remains live according to PostgreSQL's
 clock. This persisted gate survives API/worker configuration drift and later
@@ -205,28 +211,10 @@ both traceable and deduplicatable.
 
 ## Cross-service release gates
 
-Commit's own behavior is implemented and fail-closed. A production platform
-release still requires these contracts from the sibling services:
-
-- IAM needs an application-authenticated, organization-aware exact or batch
-  member lookup suitable for long-running services. Its public member reads
-  currently require a 15-minute user bearer and expose only a paginated
-  directory using the authenticated user bearer. Commit performs one bounded
-  directory scan per requested participant set; organizations whose active
-  directory exceeds 10,000 members fail closed until IAM supplies server-side
-  lookup.
-- Register Commit’s documented OBO endpoint definitions in Honeycomb and
-  approve the exact delegated features independently of ordinary login.
-- Cross-account OBO selection requires explicit per-provider account and
-  organization consent for the declared and approved identity, membership,
-  and tag disclosures along the delegation path. Commit applies its resource
-  ACLs to that selected context and fails closed when required disclosures
-  are absent; it never substitutes the initiating account.
-- IAM's closed capability catalog must add `commit.todos.manage` and
-  `commit.projects.manage` before non-owner admins can receive those powers.
-
-These dependencies are also captured, without credentials or implementation
-guesswork, in [`decisions.md`](./decisions.md).
+The Silicon Accounts build must ship together with the Silicon Interface change
+that calls Commit with User verification proofs, and with the Accounts-era CLI
+and web. The [cutover runbook](docs/migration/cutover.md) lists the steps,
+including linking existing data with `commit-migrate link-identities`.
 
 ## Deployment
 
@@ -238,7 +226,7 @@ version response, for example:
 ```sh
 docker build \
   --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" \
-  --tag silicon-commit:0.1.0 \
+  --tag silicon-commit:0.5.0 \
   .
 ```
 

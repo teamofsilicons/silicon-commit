@@ -1,11 +1,11 @@
-//! Hardened HTTP adapters for Silicon IAM and direct webhooks.
+//! Hardened HTTP adapters for Silicon Accounts and direct webhooks.
 
 use std::time::Duration;
 
 use http::{HeaderMap, header};
 use thiserror::Error;
 
-pub mod iam;
+pub mod accounts;
 pub mod webhook;
 
 /// Redacted adapter construction failure.
@@ -77,5 +77,3 @@ pub(crate) fn retry_after(headers: &HeaderMap) -> Option<Duration> {
         .ok()?;
     (seconds <= MAX_RETRY_AFTER_SECONDS).then(|| Duration::from_secs(seconds))
 }
-
-pub mod scoped_identity;

@@ -1,1226 +1,628 @@
-mod daemon;
-mod runtime;
+//! `commit`: the Silicon Commit CLI. Built only on the `silicon-commit-client` crate.
+
+mod api;
+mod docs;
+mod login;
+mod output;
+mod session;
+mod state;
+
 use clap::{Args, Parser, Subcommand};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use silicon_commit_client::{Client, Mutation, validate_session_context};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
+
+pub use output::CliError;
+
+const ROOT_HELP: &str = "\
+Sign in (once per profile; the session is saved and refreshed for you):
+  commit login                        Carbon: approve a code on the account site
+  silicon-accounts login --app commit -q | commit login --slt-stdin
+                                      Silicon: exchange a short-lived token
+  commit login status --json          who is signed in ({\"authenticated\":false} if nobody)
+  commit accounts --json              app id, Silicon Accounts URL and API URL
+
+Everyday work:
+  commit todos list --view assigned_to_me
+  commit todos create --data '{\"title\":\"Review the release\",\"assigned_to\":\"si:builder\"}'
+  commit todos update TODO --data '{\"status\":\"completed\"}'
+  commit projects create --data '{\"name\":\"Release\",\"description\":\"Ship version two\"}'
+  commit projects tasks PROJECT
+
+Accounts are named by c:/si: id (or account uuid). A Silicon takes work only from its
+custodian, the custodian's other Silicons, and accounts it allowed (commit silicons --help).
+
+Output is JSON on stdout. Errors go to stderr with the HTTP status, a stable code, the
+request ID and a hint, and exit 1. Writes take --data '<json>' or --data @FILE; reuse
+--idempotency-key when you retry the same write.
+
+State lives in $SILICON_HOME/.commit (or ~/.commit); change it with `commit config home`.
+Guides: commit docs start, commit <command> --help, https://docs.commit.teamofsilicons.com
+Source: https://github.com/teamofsilicons/silicon-commit
+Rust client: https://crates.io/crates/silicon-commit-client
+Report a bug: commit report \"what happened\" [--pr <link to your fix>]";
 
 #[derive(Parser, Clone)]
 #[command(
     name = "commit",
     bin_name = "commit",
     version,
-    about = "Silicon Commit work manager",
-    after_help = "Quick start:\n  commit iam --json\n  commit login <slt>\n  commit login status --json\n  commit todos list\n\nSet COMMIT_API_URL, COMMIT_ACCESS_TOKEN, and COMMIT_ORG_ID for non-interactive use.\nState defaults to $SILICON_HOME/.commit or $HOME/.commit; override with commit config home LOCATION.\nWrites accept --data '<json>' or --data @FILE and support --if-match.\nUse --test APP_SECRET for a sandbox. Install and update with honeycomb install 'commit'.\nRun commit <command> --help for arguments and subcommands."
+    about = "Silicon Commit: todos and projects for Carbons and Silicons",
+    long_about = "Silicon Commit keeps todos and collaborative projects for Carbons and Silicons. \
+Everything the website does, this CLI does: sign in, assign and track todos, run projects \
+with tasks, a diary, blockers and updates, and choose how you are notified.",
+    after_help = ROOT_HELP,
+    max_term_width = 100
 )]
-struct Root {
-    #[arg(
-        long,
-        env = "COMMIT_API_URL",
-        help = "Commit API origin or /api/v1 URL"
-    )]
-    api_url: Option<String>,
-    #[arg(long, env = "COMMIT_ACCESS_TOKEN", hide_env_values = true)]
-    token: Option<String>,
-    #[arg(long, env = "COMMIT_ORG_ID")]
-    org_id: Option<String>,
-    #[arg(long, global = true, env = "COMMIT_PROFILE", default_value = "default", value_parser = runtime::profile_name,
-        help = "Named account/organization profile; keeps production and each sandbox independent")]
-    profile: String,
+pub struct Root {
+    /// Commit API origin [default: the saved session's, else https://api.commit.teamofsilicons.com]
+    #[arg(long, global = true, env = "COMMIT_API_URL", value_name = "URL")]
+    pub api_url: Option<String>,
+    /// Silicon Accounts origin used to sign in [default: the saved session's, else https://accounts.teamofsilicons.com]
+    #[arg(long, global = true, env = "ACCOUNTS_URL", value_name = "URL")]
+    pub accounts_url: Option<String>,
+    /// Use this Silicon Accounts access token (issued to commit) instead of the saved session; never saved or refreshed
     #[arg(
         long,
         global = true,
-        env = "COMMIT_TEST_KEY",
+        env = "COMMIT_ACCESS_TOKEN",
         hide_env_values = true,
-        help = "IAM test app_secret; selects a sandbox without an IAM root key"
+        value_name = "TOKEN"
     )]
-    test: Option<String>,
-    #[arg(long, global = true, help = "Reuse a key when retrying the same write")]
-    idempotency_key: Option<String>,
-    #[arg(long, global = true, help = "Expected resource version for an update")]
-    if_match: Option<i64>,
-    #[arg(
-        long,
-        global = true,
-        help = "Compatibility flag; Honeycomb manages CLI updates"
-    )]
-    no_update: bool,
+    pub token: Option<String>,
+    /// Saved session to use; each profile holds one signed-in account
+    #[arg(long, global = true, env = "COMMIT_PROFILE", default_value = "default", value_parser = state::profile_name, value_name = "NAME")]
+    pub profile: String,
+    /// Reuse this key when retrying the same write, so it is applied once
+    #[arg(long, global = true, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
+    /// Apply an update only if the resource is still at this version (diaries, notification settings)
+    #[arg(long, global = true, value_name = "VERSION")]
+    pub if_match: Option<i64>,
     #[command(subcommand)]
-    command: Command,
+    pub command: Command,
 }
+
 #[derive(Subcommand, Clone)]
-enum Command {
-    /// Browse bundled usage and development guides without network access.
-    Docs {
-        #[arg(default_value = "start")]
-        topic: String,
-    },
-    /// Select an IAM sandbox, inspect it, or return to the production session.
-    Testing {
-        #[command(subcommand)]
-        command: runtime::TestingCommand,
-    },
-    /// Inspect or remove the legacy updater; Honeycomb manages updates.
-    Daemon {
-        #[command(subcommand)]
-        command: daemon::DaemonCommand,
-    },
-    /// Submit a GitHub bug report, optionally with a patch PR.
-    Report {
-        message: String,
-        #[arg(long)]
-        pr: Option<String>,
-        #[arg(long)]
-        save_only: bool,
-    },
-    /// Exchange an IAM short-lived token, or check the current login.
-    Login(Login),
-    /// Revoke the saved session and remove its local credentials.
-    Logout(JsonOutput),
-    /// Show public IAM application details, including the app_id for login.
-    Iam(JsonOutput),
-    /// Configure local session storage.
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Check whether the API process is alive.
-    Health,
-    /// Check whether the API is ready to serve requests.
-    Ready,
-    /// Show backend build metadata.
-    Version,
-    /// Manage todos, notes, and notification subscriptions.
+pub enum Command {
+    /// Sign in to Commit: Carbons approve a code, Silicons exchange a short-lived token
+    #[command(after_help = login::LOGIN_HELP)]
+    Login(LoginArgs),
+    /// End this profile's sign-in at Silicon Accounts and delete its saved session
+    #[command(
+        after_help = "Examples:\n  commit logout\n  commit --profile work logout --json\n  commit logout --force      # Silicon Accounts unreachable: delete the local session anyway"
+    )]
+    Logout(LogoutArgs),
+    /// Show how to sign in to Commit: app id, Silicon Accounts URL, API URL (works signed out)
+    #[command(
+        after_help = "Prints the same object with or without --json and always exits 0, so tools can\ndiscover Commit before anyone signs in:\n  commit accounts --json\n  {\"app_id\":\"commit\",\"accounts_url\":\"https://accounts.teamofsilicons.com\",\"api_url\":\"https://api.commit.teamofsilicons.com\",\"version\":\"…\",…}"
+    )]
+    Accounts(JsonFlag),
+    /// Deprecated name of `accounts`; kept one release for older Silicon runtimes
+    #[command(hide = true)]
+    Iam(JsonFlag),
+    /// Show the signed-in account as Commit sees it (custodian, Silicons, shared email)
+    Me,
+    /// Create, read, update and delete todos, their notes and notification rules
+    #[command(subcommand_required = true, arg_required_else_help = true, after_help = api::TODOS_HELP)]
     Todos {
         #[command(subcommand)]
         command: TodoCommand,
     },
-    /// Manage projects, diaries, tasks, and milestone entries.
+    /// Run projects together: tasks and subtasks, diary, blockers, updates, versions
+    #[command(subcommand_required = true, arg_required_else_help = true, after_help = api::PROJECTS_HELP)]
     Projects {
         #[command(subcommand)]
         command: ProjectCommand,
     },
-    /// Read notification settings, or replace them with --data JSON.
-    /// Configure the email used for this organization and subscribed event kinds.
-    Email {
-        #[arg(long)]
-        data: Option<String>,
-    },
+    /// Read or replace a Silicon's webhook notification settings (yours, or as its custodian)
+    #[command(after_help = api::NOTIFICATIONS_HELP)]
     Notifications {
-        #[arg(long)]
+        /// Replace the settings with this JSON object (or @FILE); without it, read them
+        #[arg(long, value_name = "JSON|@FILE")]
+        data: Option<String>,
+        /// The Silicon whose settings to use (you are its custodian); default: your own
+        #[arg(long, value_name = "SI_ID")]
+        silicon: Option<String>,
+    },
+    /// Read or replace your email notification preferences
+    #[command(after_help = api::EMAIL_HELP)]
+    Email {
+        /// Replace the preferences with this JSON object (or @FILE); without it, read them
+        #[arg(long, value_name = "JSON|@FILE")]
         data: Option<String>,
     },
-    /// Inspect legacy environments; create shared sandboxes through Honeycomb.
-    TestEnvironments {
+    /// Choose who besides its custodian and the custodian's other Silicons may assign work to a Silicon
+    #[command(subcommand_required = true, arg_required_else_help = true, after_help = api::SILICONS_HELP)]
+    Silicons {
         #[command(subcommand)]
-        command: TestCommand,
+        command: SiliconCommand,
     },
+    /// Send a bug report to Commit's maintainers, optionally with a link to your fix
+    #[command(
+        after_help = "Describe what you did, what you expected and what happened; never include tokens.\nIf sending fails, a private copy is saved under the state directory.\n\nExamples:\n  commit report 'todos list returns 500 after creating a project; request ID 7f…'\n  commit report 'Wrong status after claim' --pr https://github.com/teamofsilicons/silicon-commit/pull/123\n  commit report 'Draft details' --save-only\n\nCommit is open source: reproduce, patch and open a pull request at\nhttps://github.com/teamofsilicons/silicon-commit, then attach it with --pr."
+    )]
+    Report {
+        /// What happened, how to reproduce it, and what you expected
+        message: String,
+        /// Link to a pull request in teamofsilicons/silicon-commit that fixes it
+        #[arg(long, value_name = "URL")]
+        pr: Option<String>,
+        /// Only save a local draft; contact nobody
+        #[arg(long)]
+        save_only: bool,
+    },
+    /// Local settings: state directory and telemetry
+    #[command(subcommand_required = true, arg_required_else_help = true)]
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Read the bundled guides offline (start, projects, notifications, cli, client, api, …)
+    #[command(after_help = docs::DOCS_HELP)]
+    Docs {
+        /// Guide to print
+        #[arg(default_value = "start")]
+        topic: String,
+    },
+    /// Check that the Commit API process is alive (no sign-in needed)
+    Health,
+    /// Check that the Commit API is ready to serve requests (no sign-in needed)
+    Ready,
+    /// Show the Commit API's build metadata (no sign-in needed)
+    Version,
 }
-#[derive(Subcommand, Clone)]
-enum ConfigCommand {
-    /// Set the home directory used for Commit's local state.
-    #[command(name = "home", visible_alias = "set_home_dir")]
-    Home { location: PathBuf },
-    /// Inspect non-secret local configuration.
-    Show,
-    /// Disable legacy self-updates; configure managed updates in Honeycomb.
-    Updates {
-        #[arg(value_parser=["on","off"])]
-        value: String,
-    },
-    /// Enable or disable diagnostics for all subsequent CLI requests.
-    Telemetry {
-        #[arg(value_parser=["on","off"])]
-        value: String,
-    },
-}
+
 #[derive(Args, Clone)]
 #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
-struct Login {
-    #[arg(
-        required = true,
-        help = "Single-use short-lived token issued by Silicon IAm"
-    )]
-    slt: Option<String>,
-    #[arg(long, help = "Print tokens instead of saving them locally")]
-    no_save: bool,
+pub struct LoginArgs {
+    /// A short-lived token as a positional argument (same as --slt)
+    #[arg(value_name = "SLT", conflicts_with_all = ["slt", "slt_stdin"])]
+    pub positional_slt: Option<String>,
+    /// Sign in with a short-lived token from `silicon-accounts login --app commit -q`
+    #[arg(long, value_name = "SLT", conflicts_with = "slt_stdin")]
+    pub slt: Option<String>,
+    /// Read the short-lived token from standard input (keeps it out of process lists)
+    #[arg(long)]
+    pub slt_stdin: bool,
+    /// Extra account details to share with Commit, space-separated (e.g. "email"); device sign-in only
+    #[arg(long, value_name = "SCOPES")]
+    pub scope: Option<String>,
+    /// Open the approval page in a browser (device sign-in)
+    #[arg(long)]
+    pub open: bool,
+    /// Print the tokens instead of saving them (treat the output as a secret)
+    #[arg(long)]
+    pub no_save: bool,
+    /// Print progress and the result as JSON
+    #[arg(long)]
+    pub json: bool,
     #[command(subcommand)]
-    command: Option<LoginCommand>,
-}
-#[derive(Subcommand, Clone)]
-enum LoginCommand {
-    /// Verify the current token and show the authenticated Carbon or Silicon.
-    Status(JsonOutput),
-}
-#[derive(Args, Clone)]
-struct JsonOutput {
-    #[arg(
-        long,
-        help = "Print machine-readable JSON (also the default output format)"
-    )]
-    json: bool,
-}
-#[derive(Args, Default, Clone)]
-struct TodoList {
-    #[arg(long, help = "assigned_to_me, delegated_by_me, or all")]
-    view: Option<String>,
-    #[arg(long)]
-    status: Option<String>,
-    #[arg(long)]
-    assigned_to: Option<String>,
-    #[arg(long)]
-    assigned_by: Option<String>,
-    #[arg(long, help = "RFC 3339 lower creation bound")]
-    created_from: Option<String>,
-    #[arg(long, help = "RFC 3339 upper creation bound")]
-    created_to: Option<String>,
-    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
-    limit: u16,
-    #[arg(long)]
-    cursor: Option<String>,
-}
-
-#[derive(Args, Clone)]
-struct PageArgs {
-    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
-    limit: u16,
-    #[arg(long)]
-    cursor: Option<String>,
+    pub command: Option<LoginCommand>,
 }
 
 #[derive(Subcommand, Clone)]
-enum TodoCommand {
-    /// List resources in the current organization.
+pub enum LoginCommand {
+    /// Show who is signed in on this profile (refreshes and checks the session unless --offline)
+    #[command(after_help = login::STATUS_HELP)]
+    Status(StatusArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct StatusArgs {
+    /// Print JSON; always exits 0 ({"authenticated":false} when signed out)
+    #[arg(long)]
+    pub json: bool,
+    /// Read only the saved session: no refresh, no network
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct LogoutArgs {
+    /// Print JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Delete the saved session even if Silicon Accounts cannot be reached to end the sign-in
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct JsonFlag {
+    /// Print JSON (the output is the same object either way)
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct Data {
+    /// The request body: a JSON object, or @path/to/file.json
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub data: String,
+}
+
+#[derive(Args, Clone)]
+pub struct Page {
+    /// Items per page (1-100)
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub limit: u16,
+    /// Continue after this cursor (from the previous page's next_cursor)
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct TodoList {
+    /// assigned_to_me (default), delegated_by_me, or all (everything you can see)
+    #[arg(long, value_name = "VIEW")]
+    pub view: Option<String>,
+    /// yet_to_do, in_progress, blocked, completed or canceled
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Only todos assigned to this account (c:/si: id or uuid)
+    #[arg(long, value_name = "ACCOUNT")]
+    pub assigned_to: Option<String>,
+    /// Only todos created by this account (c:/si: id or uuid)
+    #[arg(long, value_name = "ACCOUNT")]
+    pub assigned_by: Option<String>,
+    /// Created at or after this RFC 3339 time
+    #[arg(long, value_name = "TIME")]
+    pub created_from: Option<String>,
+    /// Created at or before this RFC 3339 time
+    #[arg(long, value_name = "TIME")]
+    pub created_to: Option<String>,
+    #[command(flatten)]
+    pub page: Page,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum TodoCommand {
+    /// List todos you can see (assigned to you by default)
     List(TodoList),
-    /// Fetch a resource by its public ID.
+    /// Read one todo
     Get { id: String },
-    /// Create a todo. Requires title and assigned_to in --data JSON or @FILE.
-    #[command(
-        after_help = "Required fields:\n  title: string\n  assigned_to: public IAM ID string (Carbon or Silicon from your team)\n\nOptional fields:\n  description: string or null\n  status: yet_to_do (default), in_progress, blocked, completed, canceled\n  attachments: array of HTTPS URL strings\n\nExamples:\n  commit todos create --data '{\"title\":\"Eat\",\"assigned_to\":\"alex\"}'\n  commit todos create --data '{\"title\":\"Eat\",\"assigned_to\":\"assistant:example-org\"}'\n\nUse assigned_to, not assignee_id or assignee. Unknown fields are rejected."
-    )]
+    /// Create a todo for yourself or someone else (title and assigned_to required)
+    #[command(after_help = api::TODO_CREATE_HELP)]
     Create(Data),
-    /// Update a resource using --data JSON or @FILE.
+    /// Change a todo: title, description, status, attachments, assigned_to
+    #[command(
+        after_help = "Examples:\n  commit todos update TODO --data '{\"status\":\"in_progress\"}'\n  commit todos update TODO --data '{\"assigned_to\":\"c:alice\",\"description\":null}'\n\nThe todo's creator (or its custodian) changes everything; the assignee (or its\ncustodian) may change the status."
+    )]
     Update {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Delete the specified resource.
+    /// Delete a todo you created
     Delete { id: String },
-    /// List notes attached to a todo.
+    /// List a todo's notes, oldest first
     Notes {
         id: String,
         #[command(flatten)]
-        page: PageArgs,
+        page: Page,
     },
-    /// Append a note to a todo using --data JSON.
+    /// Add a note to a todo: --data '{"body":"…"}'
     AddNote {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Read a todo notification subscription.
+    /// Read the webhook rule for one todo you delegated (Silicons)
     Subscription { id: String },
-    /// Replace a todo notification subscription using --data JSON.
+    /// Replace the webhook rule for one todo you delegated (Silicons), with --if-match VERSION
+    #[command(
+        after_help = "Examples:\n  commit --if-match 0 todos set-subscription TODO --data '{\"subscription\":{\"scope\":\"specific_statuses\",\"statuses\":[\"completed\",\"blocked\"]}}'\n  commit --if-match 1 todos set-subscription TODO --data '{\"subscription\":null}'   # back to the list-wide rule\n\nScopes: any_update, status_updates, specific_statuses (with statuses). Read the current\nrule and its version first with `commit todos subscription TODO`; see `commit docs notifications`."
+    )]
     SetSubscription {
         id: String,
         #[command(flatten)]
         data: Data,
     },
 }
-#[derive(Args, Default, Clone)]
-struct ProjectList {
+
+#[derive(Args, Clone)]
+pub struct ProjectList {
+    /// yet_to_start, in_progress, blocked, canceled or completed
     #[arg(long)]
-    status: Option<String>,
-    #[arg(long)]
-    silicon_id: Option<String>,
-    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
-    limit: u16,
-    #[arg(long)]
-    cursor: Option<String>,
+    pub status: Option<String>,
+    /// Only projects this Silicon is a member of (si: id or uuid)
+    #[arg(long, value_name = "SI_ID")]
+    pub silicon_id: Option<String>,
+    #[command(flatten)]
+    pub page: Page,
 }
 
 #[derive(Subcommand, Clone)]
-enum ProjectCommand {
-    /// Atomically take an unassigned project task or subtask.
-    Claim { project: String, task: String },
-    /// Remove a task subtree and its linked todos.
-    DeleteTask { project: String, task: String },
-    /// List the latest project revisions; use --before to page backward.
-    Versions {
-        id: String,
-        #[arg(long)]
-        before: Option<i64>,
-    },
-    /// Read a complete retained project snapshot.
-    Version { id: String, version: i64 },
-    /// List resources in the current organization.
+pub enum ProjectCommand {
+    /// List projects you can see
     List(ProjectList),
-    /// Fetch a resource by its public ID.
+    /// Read one project (by id or UID)
     Get { id: String },
-    /// Create a resource using --data JSON or @FILE.
+    /// Create a project, optionally private, with members and initial tasks
+    #[command(after_help = api::PROJECT_CREATE_HELP)]
     Create(Data),
-    /// Update a resource using --data JSON or @FILE.
+    /// Change a project: name, description, attachments, private, members
+    #[command(
+        after_help = "Examples:\n  commit projects update PROJECT --data '{\"private\":true,\"carbon_ids\":[\"c:alice\"],\"silicon_ids\":[\"si:builder\"]}'\n  commit projects update PROJECT --data '{\"description\":\"Ship version two by Friday\"}'"
+    )]
     Update {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Read the project diary.
+    /// Read the project diary (Markdown, up to 100,000 words)
     Diary { id: String },
-    /// Replace the diary using --data JSON and --if-match VERSION.
+    /// Replace the diary: --data '{"markdown":"…"}' with --if-match VERSION
+    #[command(
+        after_help = "Example:\n  commit --if-match 3 projects set-diary PROJECT --data '{\"markdown\":\"# Plan\\n\\nFirst steps\"}'\n\nRead the diary first: its `version` is what --if-match needs."
+    )]
     SetDiary {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// List project tasks and subtasks.
+    /// List the project's tasks and subtasks
     Tasks {
         id: String,
         #[command(flatten)]
-        page: PageArgs,
+        page: Page,
     },
-    /// List project blockers, updates, and completion entries.
-    Entries {
-        id: String,
-        #[command(flatten)]
-        page: PageArgs,
-    },
-    /// Create a project task using --data JSON.
+    /// Add a task: --data '{"title":"…","assigned_to":"si:…","parent_task_id":"…"}'
     CreateTask {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Update a project task using --data JSON.
+    /// Change a task; assigning it creates or updates the linked todo
     UpdateTask {
         project: String,
         task: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Add a project blocker using --data JSON.
+    /// Take an unassigned task (atomic; the first claim wins)
+    Claim { project: String, task: String },
+    /// Remove a task, its subtasks and their linked todos
+    DeleteTask { project: String, task: String },
+    /// List blockers, updates and the completion entry
+    Entries {
+        id: String,
+        #[command(flatten)]
+        page: Page,
+    },
+    /// Record a blocker: --data '{"title":"…","description":"…","status":"open"}'
     Blocker {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Add a project milestone update using --data JSON.
+    /// Record a milestone update: --data '{"title":"…","description":"…"}'
     CreateUpdate {
         id: String,
         #[command(flatten)]
         data: Data,
     },
-    /// Record project completion using --data JSON.
+    /// Complete the project for good: --data '{"title":"…","description":"…"}'
     Complete {
         id: String,
         #[command(flatten)]
         data: Data,
     },
+    /// List retained versions, newest first (--before to page back)
+    Versions {
+        id: String,
+        /// Only versions older than this one
+        #[arg(long)]
+        before: Option<i64>,
+    },
+    /// Read one retained version in full
+    Version { id: String, version: i64 },
 }
+
 #[derive(Subcommand, Clone)]
-enum TestCommand {
-    List,
-    /// Create a resource using --data JSON or @FILE.
-    Create(Data),
-    /// Rotate the test environment access key.
-    Rotate {
-        id: String,
+pub enum SiliconCommand {
+    /// List the accounts a Silicon accepts work from besides its custodian's Silicons
+    AllowedAccounts {
+        /// The Silicon (si: id or uuid)
+        silicon: String,
     },
-    /// Retrieve the test environment access key.
-    Key {
-        id: String,
+    /// Let an account assign todos to the Silicon and invite it to projects
+    Allow {
+        /// The Silicon (si: id or uuid)
+        silicon: String,
+        /// The account to allow (c:/si: id or uuid)
+        account: String,
     },
-    /// Restore a deleted test environment during its retention period.
-    Restore {
-        id: String,
-    },
-    /// Clear all data from a test environment.
-    Clean {
-        id: String,
-    },
-    /// Delete the specified resource.
-    Delete {
-        id: String,
+    /// Take an account off the Silicon's list
+    Disallow {
+        /// The Silicon (si: id or uuid)
+        silicon: String,
+        /// The account to remove (c:/si: id or uuid)
+        account: String,
     },
 }
-#[derive(Args, Clone)]
-struct Data {
-    #[arg(long, help = "JSON object or @path/to/file")]
-    data: String,
-}
-#[derive(Default, Serialize, Deserialize)]
-struct Session {
-    access_token: String,
-    refresh_token: String,
-    api_url: String,
-    org_id: Option<String>,
-    #[serde(default)]
-    actor: Value,
-    #[serde(default)]
-    test_key: Option<String>,
-    #[serde(default)]
-    expires_at: u64,
-    #[serde(default)]
-    refresh_started_at: Option<u64>,
+
+#[derive(Subcommand, Clone)]
+pub enum ConfigCommand {
+    /// Keep Commit's state in LOCATION/.commit instead of $SILICON_HOME or ~
+    #[command(
+        name = "home",
+        visible_alias = "set_home_dir",
+        after_help = "LOCATION must be an existing directory. The choice is remembered in\n$SILICON_HOME/.commit/home_dir (or ~/.commit/home_dir)."
+    )]
+    Home { location: PathBuf },
+    /// Show the local configuration (no secrets)
+    Show,
+    /// Turn diagnostics on or off for every later command (COMMIT_TELEMETRY overrides it)
+    Telemetry {
+        #[arg(value_parser = ["on", "off"])]
+        value: String,
+    },
 }
 
-struct SavedRequestContext {
-    api: String,
-    access_token: String,
-    actor: Value,
-    org_id: Option<String>,
-}
-
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-async fn session_lock() -> Result<fs::File, Box<dyn std::error::Error>> {
-    let path = session_path();
-    Ok(
-        tokio::task::spawn_blocking(move || -> std::io::Result<fs::File> {
-            let directory = path.parent().expect("session path has a parent");
-            fs::create_dir_all(directory)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-            }
-            let mut options = fs::OpenOptions::new();
-            options.read(true).write(true).create(true).truncate(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                options.mode(0o600);
-            }
-            let file = options.open(path.with_extension("lock"))?;
-            file.lock()?;
-            Ok(file)
-        })
-        .await??,
-    )
-}
-
-async fn refresh_saved_session(
-    api: &str,
-    rejected_access: Option<&str>,
-    actor: &Value,
-    org: Option<&str>,
-) -> Result<Option<Session>, Box<dyn std::error::Error>> {
-    let _lock = session_lock().await?;
-    // Re-read after acquiring the process lock: another command may already
-    // have rotated the single-use refresh token.
-    let Some(mut session) = load_session() else {
-        return Ok(None);
-    };
-    validate_saved_session(&session)?;
-    if session.org_id.as_deref() != org
-        || session.actor["type"] != actor["type"]
-        || session.actor["public_id"] != actor["public_id"]
-    {
-        return Err("this profile changed accounts or organizations while the command was running; retry explicitly".into());
-    }
-    let mut client = Client::new(api)?;
-    if client.base_url() != Client::new(&session.api_url)?.base_url() {
-        return Err("the selected API does not match the saved session; sign in for this API or supply an explicit token".into());
-    }
-    if session.test_key.as_deref() != runtime::selected_key().as_deref() {
-        return Err("saved session environment mismatch; sign in again".into());
-    }
-    let force = rejected_access.is_some_and(|token| token == session.access_token);
-    if (!force
-        && session.expires_at > now().saturating_add(60)
-        && session.refresh_started_at.is_none())
-        || session.refresh_token.is_empty()
-    {
-        return Ok(Some(session));
-    }
-    if let Some(key) = &session.test_key {
-        client = client.with_test_key(key)?;
-    }
-    use sha2::{Digest as _, Sha256};
-    // Retrying after a lost response must replay the same rotation, not mark
-    // this refresh family compromised by consuming its old token twice.
-    for _ in 0..2 {
-        let started_at = *session.refresh_started_at.get_or_insert_with(now);
-        save_session(&session)?;
-        let key = format!(
-            "commit-refresh-{:x}",
-            Sha256::digest(session.refresh_token.as_bytes())
-        );
-        let tokens = client
-            .clone()
-            .with_mutation(Mutation::with_key(key)?)
-            .refresh_session(&session.refresh_token)
-            .await?;
-        if tokens.org_id != session.org_id
-            || tokens.actor["type"] != session.actor["type"]
-            || tokens.actor["public_id"] != session.actor["public_id"]
-        {
-            return Err(
-                "refresh changed this profile's actor or organization; sign in again".into(),
-            );
-        }
-        session.access_token = tokens.access_token;
-        session.refresh_token = tokens.refresh_token;
-        session.expires_at = started_at.saturating_add(tokens.expires_in.max(0) as u64);
-        session.refresh_started_at = None;
-        save_session(&session)?;
-        if session.expires_at > now().saturating_add(60) {
-            return Ok(Some(session));
-        }
-    }
-    Err("refreshed access token has no usable lifetime; retry the command".into())
-}
-fn parse_data(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let text = input
-        .strip_prefix('@')
-        .map(fs::read_to_string)
-        .transpose()?
-        .unwrap_or_else(|| input.to_owned());
-    Ok(serde_json::from_str(&text)?)
-}
-// Check the required creation shape without duplicating server-side business limits.
-fn parse_todo_create(input: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let value = parse_data(input)?;
-    let object = value.as_object().ok_or(
-        "todos create requires a JSON object with title and assigned_to; run commit todos create --help",
-    )?;
-    if object.contains_key("assignee_id") || object.contains_key("assignee") {
-        return Err("todo not created: use assigned_to as a public IAM ID string, not assignee_id or assignee; example: {\"title\":\"Eat\",\"assigned_to\":\"alex\"}".into());
-    }
-    for field in ["title", "assigned_to"] {
-        if !object.get(field).is_some_and(Value::is_string) {
-            return Err(format!(
-                "todo not created: {field} is required and must be a string; run commit todos create --help"
-            ).into());
-        }
-    }
-    Ok(value)
-}
-
-fn session_path() -> PathBuf {
-    runtime::profile_directory().join(runtime::session_file())
-}
-fn validate_saved_session(session: &Session) -> Result<(), Box<dyn std::error::Error>> {
-    validate_session_context(&session.actor, session.org_id.as_deref())?;
-    if session.access_token.is_empty() || session.refresh_token.is_empty() {
-        return Err("saved profile has no usable IAM 5 session; sign in again".into());
-    }
-    Ok(())
-}
-fn default_home_dir() -> PathBuf {
-    std::env::var_os("SILICON_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-fn home_dir_config_path() -> PathBuf {
-    default_home_dir().join(".commit/home_dir")
-}
-fn configured_home_dir() -> Option<PathBuf> {
-    let path = fs::read_to_string(home_dir_config_path()).ok()?;
-    let path = PathBuf::from(path.trim());
-    (!path.as_os_str().is_empty()).then_some(path)
-}
-fn set_home_dir(location: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let location = expand_home(location);
-    if !location.is_dir() {
-        return Err(format!("not a directory: {}", location.display()).into());
-    }
-    let location = fs::canonicalize(location)?;
-    let config = home_dir_config_path();
-    if let Some(parent) = config.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&config, location.to_string_lossy().as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
-    }
-    println!("Commit home directory set to {}", location.display());
-    Ok(())
-}
-fn expand_home(location: PathBuf) -> PathBuf {
-    let Some(text) = location.to_str().map(str::to_owned) else {
-        return location;
-    };
-    if text == "~" {
-        return default_home_dir();
-    }
-    text.strip_prefix("~/")
-        .map_or(location, |rest| default_home_dir().join(rest))
-}
-fn load_session() -> Option<Session> {
-    fs::read_to_string(session_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-}
-fn save_session(s: &Session) -> Result<(), Box<dyn std::error::Error>> {
-    runtime::private_write(&session_path(), &serde_json::to_vec_pretty(s)?)
-}
-fn organization_from_status(status: &Value) -> Result<String, Box<dyn std::error::Error>> {
-    if status["authenticated"] != true {
-        return Err(
-            "Your Commit session expired or was revoked. Run commit login <slt> to sign in again."
-                .into(),
-        );
-    }
-    if let Some(org) = status["org_id"].as_str().filter(|s| !s.is_empty()) {
-        return Ok(org.to_owned());
-    }
-    Err("IAM 5 requires a login for one organization; sign in to a separate --profile for each organization".into())
-}
-async fn logout(a: &Root) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = match fs::read_to_string(home_dir_config_path()) {
-        Ok(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
-        Ok(_) => return Err("the configured Commit home directory is empty".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_home_dir(),
-        Err(error) => return Err(error.into()),
-    };
-    let directory = directory.join(".commit");
-    let directory = if runtime::profile() == "default" {
-        directory
-    } else {
-        directory.join("profiles").join(runtime::profile())
-    };
-    let path = directory.join(runtime::session_file());
-    if !path.exists() {
-        return Ok(());
-    }
-    let _lock = session_lock().await?;
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let saved: Session = serde_json::from_slice(&bytes)?;
-    validate_saved_session(&saved)?;
-    if a.org_id
-        .as_ref()
-        .is_some_and(|org| Some(org) != saved.org_id.as_ref())
-    {
-        return Err(
-            "--org-id does not match this saved profile; select a different --profile".into(),
-        );
-    }
-    let mut client = Client::new(&saved.api_url)?;
-    if let Some(api) = &a.api_url
-        && Client::new(api)?.base_url() != client.base_url()
-    {
-        return Err("the selected API does not match the saved session".into());
-    }
-    client = client.with_mutation(match &a.idempotency_key {
-        Some(key) => Mutation::with_key(key)?,
-        None => Mutation::new(),
-    });
-    if saved.test_key.as_deref() != runtime::selected_key().as_deref() {
-        return Err("saved session belongs to a different environment; sign in again".into());
-    }
-    if let Some(key) = &saved.test_key {
-        client = client.with_test_key(key)?;
-    }
-    client.logout(&saved.refresh_token).await?;
-    fs::remove_file(path)?;
-    Ok(())
-}
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let result = match Root::try_parse() {
-        Ok(mut args) => {
-            runtime::initialize(args.profile.clone(), args.test.clone());
-            args.test = runtime::selected_key();
-            let report = match &args.command {
-                Command::Report {
-                    message,
-                    pr,
-                    save_only: false,
-                } => Some((message.clone(), pr.clone())),
-                _ => None,
-            };
-            let result = run_with_session_recovery(args).await;
-            if result.is_err()
-                && let Some((message, pr)) = report
-            {
-                match runtime::save_report(&message, pr.as_deref()) {
-                    Ok(path) => eprintln!(
-                        "Report could not be submitted. Saved locally: {}",
-                        path.display()
-                    ),
-                    Err(error) => eprintln!("Could not save the report locally: {error}"),
-                }
-            }
-            result
-        }
+    let root = match Root::try_parse() {
+        Ok(root) => root,
         Err(error) => {
             let code = error.exit_code();
             let _ = error.print();
-            runtime::footer();
             return std::process::ExitCode::from(u8::try_from(code).unwrap_or(2));
         }
     };
-    if let Err(error) = &result {
-        if matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { status, .. }) if status.as_u16() == 401)
-        {
-            eprintln!(
-                "Your Commit session expired or was revoked. Run commit login <slt> to sign in again."
-            );
-        }
-        if matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { code, .. }) if code == "honeycomb_manages_testing_lifecycle")
-        {
-            eprintln!(
-                "Manage this environment in Honeycomb, then select Commit with commit testing use '<app_secret>'. See commit docs testing."
-            );
-        }
-        eprintln!(
-            "commit: {error}\nSee commit docs or commit <command> --help for usage and recovery steps."
-        );
-    }
-    runtime::footer();
-    if result.is_ok() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::FAILURE
-    }
-}
-fn inactive_access() -> Box<dyn std::error::Error> {
-    silicon_commit_client::Error::Api {
-        status: 401_u16.try_into().expect("valid HTTP status"),
-        code: "inactive_access_token".into(),
-        request_id: None,
-    }
-    .into()
-}
-
-fn access_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
-    error
-        .downcast_ref::<silicon_commit_client::Error>()
-        .is_some_and(silicon_commit_client::Error::is_unauthenticated)
-}
-
-// Freeze file-backed JSON before the first request. A retry must use the same
-// payload even if the source file is replaced while refresh is in flight.
-fn freeze_command_data(command: &mut Command) -> Result<(), Box<dyn std::error::Error>> {
-    let input = match command {
-        Command::Todos {
-            command:
-                TodoCommand::Create(data)
-                | TodoCommand::Update { data, .. }
-                | TodoCommand::AddNote { data, .. }
-                | TodoCommand::SetSubscription { data, .. },
-        } => Some(&mut data.data),
-        Command::Projects {
-            command:
-                ProjectCommand::Create(data)
-                | ProjectCommand::Update { data, .. }
-                | ProjectCommand::SetDiary { data, .. }
-                | ProjectCommand::CreateTask { data, .. }
-                | ProjectCommand::UpdateTask { data, .. }
-                | ProjectCommand::Blocker { data, .. }
-                | ProjectCommand::CreateUpdate { data, .. }
-                | ProjectCommand::Complete { data, .. },
-        } => Some(&mut data.data),
-        Command::TestEnvironments {
-            command: TestCommand::Create(data),
-        } => Some(&mut data.data),
-        Command::Email { data } | Command::Notifications { data } => data.as_mut(),
-        _ => None,
+    state::set_profile(root.profile.clone());
+    let json_errors = match &root.command {
+        Command::Login(args) => match &args.command {
+            Some(LoginCommand::Status(status)) => status.json,
+            None => args.json,
+        },
+        Command::Logout(args) => args.json,
+        _ => false,
     };
-    if let Some(input) = input {
-        *input = serde_json::to_string(&parse_data(input)?)?;
-    }
-    Ok(())
-}
-
-async fn run_with_session_recovery(mut args: Root) -> Result<(), Box<dyn std::error::Error>> {
-    freeze_command_data(&mut args.command)?;
-    args.idempotency_key
-        .get_or_insert_with(Client::new_idempotency_key);
-    let is_status = matches!(
-        args.command,
-        Command::Login(Login {
-            command: Some(LoginCommand::Status(_)),
-            ..
-        })
-    );
-    let mut used_access = None;
-    let first = run(args.clone(), &mut used_access, true, None).await;
-    if let Err(error) = first {
-        let Some(context) = used_access.filter(|_| access_rejected(error.as_ref())) else {
-            return Err(error);
-        };
-        // Reload under the same process lock used for proactive refresh. Adopt
-        // another command's replacement instead of rotating a newer generation.
-        match refresh_saved_session(
-            &context.api,
-            Some(&context.access_token),
-            &context.actor,
-            context.org_id.as_deref(),
-        )
-        .await
-        {
-            Ok(Some(_)) => run(args, &mut None, false, Some(&context)).await,
-            Ok(None) => Err(error),
-            Err(refresh_error) if is_status && access_rejected(refresh_error.as_ref()) => {
-                println!(
-                    "{}",
-                    serde_json::json!({"authenticated":false,"actor":null,"org_id":null})
-                );
-                Ok(())
-            }
-            Err(refresh_error) => Err(refresh_error),
+    match run(root).await {
+        Ok(code) => std::process::ExitCode::from(code),
+        Err(error) => {
+            error.print(json_errors);
+            std::process::ExitCode::from(error.exit)
         }
-    } else {
-        first
     }
 }
 
-async fn run(
-    a: Root,
-    rejected_access: &mut Option<SavedRequestContext>,
-    retry_inactive_status: bool,
-    expected_context: Option<&SavedRequestContext>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let login_status = matches!(
-        a.command,
-        Command::Login(Login {
-            command: Some(LoginCommand::Status(_)),
-            ..
-        })
-    );
-    if let Command::Todos {
-        command: TodoCommand::Create(data),
-    } = &a.command
-    {
-        parse_todo_create(&data.data)?;
-    }
-    match &a.command {
-        Command::Config {
-            command: ConfigCommand::Telemetry { value },
-        } => {
-            runtime::private_write(&runtime::directory().join("telemetry"), value.as_bytes())?;
-            println!("Telemetry {value}");
-            return Ok(());
+/// Runs a command; returns the exit code on success (0, or 1 for "signed out" status text).
+async fn run(root: Root) -> Result<u8, CliError> {
+    match &root.command {
+        Command::Login(args) => match &args.command {
+            Some(LoginCommand::Status(status)) => login::status(&root, status).await,
+            None => login::login(&root, args).await.map(|()| 0),
+        },
+        Command::Logout(args) => login::logout(args).await.map(|()| 0),
+        Command::Accounts(flag) | Command::Iam(flag) => {
+            login::accounts(&root, flag.json);
+            Ok(0)
         }
-
-        Command::Docs { topic } => return runtime::docs(topic),
+        Command::Docs { topic } => docs::print(topic).map(|()| 0),
+        Command::Config { command } => config(command).map(|()| 0),
         Command::Report {
             message,
             pr,
             save_only: true,
-        } => return runtime::report(message, pr.as_deref()),
-        Command::Testing { command } => {
-            return runtime::testing(command, a.api_url.as_deref()).await;
-        }
-        Command::Daemon { command } => return daemon::command(command).await,
-        Command::Config {
-            command: ConfigCommand::Show,
-        } => {
-            println!(
-                "{}",
-                serde_json::json!({"home":configured_home_dir().unwrap_or_else(default_home_dir),"profile":runtime::profile(),"auto_update":daemon::updates_enabled(),"update_manager":"honeycomb","docs":"https://docs.commit.teamofsilicons.com","repository":"https://github.com/teamofsilicons/silicon-commit"})
-            );
-            return Ok(());
-        }
-        Command::Config {
-            command: ConfigCommand::Updates { value },
-        } => return daemon::configure_updates(value == "on"),
-        _ => {}
+        } => docs::save_report_draft(message, pr.as_deref()).map(|()| 0),
+        _ => api::run(root).await.map(|()| 0),
     }
-    if let Command::Config {
-        command: ConfigCommand::Home { location },
-    } = &a.command
-    {
-        return set_home_dir(location.clone());
-    }
-    if matches!(a.command, Command::Logout(_)) {
-        logout(&a).await?;
-        println!("{}", serde_json::json!({"removed": true}));
-        return Ok(());
-    }
-    let mut saved = load_session();
-    if saved
-        .as_ref()
-        .is_some_and(|s| s.test_key.as_deref() != runtime::selected_key().as_deref())
-    {
-        return Err("saved session environment mismatch; sign in again".into());
-    }
-    let api = a
-        .api_url
-        .clone()
-        .or_else(|| saved.as_ref().map(|s| s.api_url.clone()))
-        .unwrap_or_else(|| "https://backend.commit.teamofsilicons.com".to_owned());
-    let uses_saved_session = a.token.is_none()
-        && saved.is_some()
-        && !matches!(
-            a.command,
-            Command::Login(Login { command: None, .. })
-                | Command::Iam(_)
-                | Command::Health
-                | Command::Ready
-                | Command::Version
-                | Command::Report {
-                    save_only: true,
-                    ..
-                }
-        );
-    if let Some(expected) = expected_context {
-        let matches = saved.as_ref().is_some_and(|saved| {
-            uses_saved_session
-                && saved.actor["type"] == expected.actor["type"]
-                && saved.actor["public_id"] == expected.actor["public_id"]
-                && saved.org_id == expected.org_id
-        });
-        if !matches || Client::new(&api)?.base_url() != Client::new(&expected.api)?.base_url() {
-            return Err(
-                "this profile changed while the command was running; retry explicitly".into(),
-            );
-        }
-    }
-    if uses_saved_session {
-        let selected = saved
-            .as_ref()
-            .ok_or("saved session disappeared; sign in again")?;
-        validate_saved_session(selected)?;
-        if a.org_id
-            .as_ref()
-            .is_some_and(|org| Some(org) != selected.org_id.as_ref())
-        {
-            return Err("--org-id does not match this saved profile; log in to another --profile for that organization".into());
-        }
-        saved = match refresh_saved_session(&api, None, &selected.actor, selected.org_id.as_deref())
-            .await
-        {
-            Ok(saved) => saved,
-            Err(error)
-                if matches!(
-                    &a.command,
-                    Command::Login(Login {
-                        command: Some(LoginCommand::Status(_)),
-                        ..
-                    })
-                ) && matches!(error.downcast_ref::<silicon_commit_client::Error>(), Some(silicon_commit_client::Error::Api { status, .. }) if status.as_u16() == 401) =>
-            {
-                None
-            }
-            Err(error) => return Err(error),
-        };
-    }
-    let token = a.token.clone().or_else(|| {
-        if uses_saved_session {
-            saved.as_ref().map(|s| s.access_token.clone())
-        } else {
-            None
-        }
-    });
-    if uses_saved_session {
-        *rejected_access = token.clone().and_then(|token| {
-            saved.as_ref().map(|saved| SavedRequestContext {
-                api: api.clone(),
-                access_token: token,
-                actor: saved.actor.clone(),
-                org_id: saved.org_id.clone(),
-            })
-        });
-    }
-    let org = a.org_id.clone().or_else(|| {
-        if uses_saved_session {
-            saved.as_ref().and_then(|s| s.org_id.clone())
-        } else {
-            None
-        }
-    });
-    let mut c = Client::new(&api)?
-        .with_source("cli")?
-        .with_telemetry(runtime::telemetry_enabled())
-        .with_mutation({
-            let mut m = if let Some(k) = a.idempotency_key {
-                Mutation::with_key(k)?
-            } else {
-                Mutation::new()
-            };
-            if let Some(v) = a.if_match {
-                m = m.if_match(v)?;
-            }
-            m
-        });
-    if let Some(t) = &token {
-        c = c.with_bearer(t.clone());
-    }
-    if let Some(o) = &org {
-        c = c.with_org_id(o.clone());
-    }
-    if let Some(k) = a.test {
-        c = c.with_test_key(k)?;
-    }
-    let needs_organization = !matches!(
-        &a.command,
-        Command::Login(_)
-            | Command::Iam(_)
-            | Command::Health
-            | Command::Ready
-            | Command::Version
-            | Command::Report {
-                save_only: true,
-                ..
-            }
-            | Command::TestEnvironments {
-                command: TestCommand::Create(_)
-                    | TestCommand::Rotate { .. }
-                    | TestCommand::Restore { .. }
-                    | TestCommand::Clean { .. }
-                    | TestCommand::Delete { .. }
-            }
-    );
-    if needs_organization && org.is_none() {
-        let status = c.login_status().await?;
-        if uses_saved_session && retry_inactive_status && status["authenticated"] == false {
-            return Err(inactive_access());
-        }
-        let selected = organization_from_status(&status)?;
-        c = c.with_org_id(selected);
-    }
-    let output = match a.command {
-        Command::Docs { .. }
-        | Command::Testing { .. }
-        | Command::Daemon { .. }
-        | Command::Config { .. }
-        | Command::Logout(_)
-        | Command::Report {
-            save_only: true, ..
-        } => {
-            unreachable!("local session commands return before API setup")
-        }
-        Command::Report {
-            message,
-            pr,
-            save_only: false,
-        } => {
-            let result = c
-                .report(&serde_json::json!({"message":message,"pr":pr}))
-                .await?;
-            if pr.is_none() {
-                eprintln!(
-                    "You can also attach a fix with --pr https://github.com/teamofsilicons/silicon-commit/pull/NUMBER"
-                );
-            }
-            result
-        }
-        Command::Email { data: d } => {
-            if let Some(d) = d {
-                c.set_email_settings(&parse_data(&d)?).await?
-            } else {
-                c.email_settings().await?
-            }
-        }
-        Command::Iam(_) => c.iam().await?,
-        Command::Login(Login {
-            command: Some(LoginCommand::Status(_)),
-            ..
-        }) => c.login_status().await?,
-        Command::Login(x) => {
-            let _lock = if x.no_save {
-                None
-            } else {
-                Some(session_lock().await?)
-            };
-            let slt = x.slt.as_deref().ok_or("a short-lived token is required")?;
-            let s = c.login_with_slt(slt).await?;
-            if !x.no_save {
-                save_session(&Session {
-                    access_token: s.access_token.clone(),
-                    refresh_token: s.refresh_token.clone(),
-                    api_url: api,
-                    org_id: s.org_id.clone(),
-                    actor: s.actor.clone(),
-                    test_key: runtime::selected_key(),
-                    expires_at: now().saturating_add(s.expires_in.max(0) as u64),
-                    refresh_started_at: None,
-                })?;
-            }
-            if runtime::selected_key().is_some() {
-                runtime::remember_context(&c).await;
-            }
-            if x.no_save {
-                serde_json::to_value(s)?
-            } else {
-                serde_json::json!({"authenticated":true,"actor":s.actor,"org_id":s.org_id})
-            }
-        }
-        Command::Health => c.health().await?,
-        Command::Ready => c.ready().await?,
-        Command::Version => c.version().await?,
-        Command::Todos { command } => match command {
-            TodoCommand::List(q) => {
-                let mut params = Vec::new();
-                if let Some(v) = q.view.as_deref() {
-                    params.push(("view", v));
-                }
-                if let Some(v) = q.status.as_deref() {
-                    params.push(("status", v));
-                }
-                if let Some(v) = q.assigned_to.as_deref() {
-                    params.push(("assigned_to", v));
-                }
-                if let Some(v) = q.assigned_by.as_deref() {
-                    params.push(("assigned_by", v));
-                }
-                if let Some(v) = q.created_from.as_deref() {
-                    params.push(("created_from", v));
-                }
-                if let Some(v) = q.created_to.as_deref() {
-                    params.push(("created_to", v));
-                }
-                let limit = q.limit.to_string();
-                params.push(("limit", &limit));
-                if let Some(v) = q.cursor.as_deref() {
-                    params.push(("cursor", v));
-                }
-                c.list_todos(&params).await?
-            }
-            TodoCommand::Get { id } => c.get_todo(&id).await?,
-            TodoCommand::Create(d) => {
-                let payload = parse_todo_create(&d.data)?;
-                match c.create_todo(&payload).await {
-                    Err(ref error @ silicon_commit_client::Error::Api { ref status, .. })
-                        if status.as_u16() == 422 =>
-                    {
-                        return Err(format!("{error}; todo not created. Check the fields and values against commit todos create --help; required fields are title and assigned_to.").into());
-                    }
-                    result => result?,
-                }
-            }
-            TodoCommand::Update { id, data } => {
-                c.update_todo(&id, &parse_data(&data.data)?).await?
-            }
-            TodoCommand::Delete { id } => c.delete_todo(&id).await?,
-            TodoCommand::Notes { id, page } => {
-                let limit = page.limit.to_string();
-                let mut params = vec![("limit", limit.as_str())];
-                if let Some(cursor) = page.cursor.as_deref() {
-                    params.push(("cursor", cursor));
-                }
-                c.list_notes(&id, &params).await?
-            }
-            TodoCommand::AddNote { id, data } => c.add_note(&id, &parse_data(&data.data)?).await?,
-            TodoCommand::Subscription { id } => c.todo_subscription(&id).await?,
-            TodoCommand::SetSubscription { id, data } => {
-                c.replace_todo_subscription(&id, &parse_data(&data.data)?)
-                    .await?
-            }
-        },
-        Command::Projects { command } => match command {
-            ProjectCommand::Claim { project, task } => {
-                c.claim_project_task(&project, &task).await?
-            }
-            ProjectCommand::DeleteTask { project, task } => {
-                c.delete_project_task(&project, &task).await?
-            }
-            ProjectCommand::Versions { id, before } => {
-                let value = before.map(|v| v.to_string());
-                let query = value
-                    .as_deref()
-                    .map(|v| vec![("before", v)])
-                    .unwrap_or_default();
-                c.project_versions(&id, &query).await?
-            }
-            ProjectCommand::Version { id, version } => c.project_version(&id, version).await?,
-            ProjectCommand::List(q) => {
-                let mut params = Vec::new();
-                if let Some(v) = q.status.as_deref() {
-                    params.push(("status", v));
-                }
-                if let Some(v) = q.silicon_id.as_deref() {
-                    params.push(("silicon_id", v));
-                }
-                let limit = q.limit.to_string();
-                params.push(("limit", &limit));
-                if let Some(v) = q.cursor.as_deref() {
-                    params.push(("cursor", v));
-                }
-                c.list_projects(&params).await?
-            }
-            ProjectCommand::Get { id } => c.get_project(&id).await?,
-            ProjectCommand::Create(d) => c.create_project(&parse_data(&d.data)?).await?,
-            ProjectCommand::Update { id, data } => {
-                c.update_project(&id, &parse_data(&data.data)?).await?
-            }
-            ProjectCommand::Diary { id } => c.project_diary(&id).await?,
-            ProjectCommand::SetDiary { id, data } => {
-                c.replace_project_diary(&id, &parse_data(&data.data)?)
-                    .await?
-            }
-            ProjectCommand::Tasks { id, page } => {
-                let limit = page.limit.to_string();
-                let mut params = vec![("limit", limit.as_str())];
-                if let Some(cursor) = page.cursor.as_deref() {
-                    params.push(("cursor", cursor));
-                }
-                c.project_tasks(&id, &params).await?
-            }
-            ProjectCommand::Entries { id, page } => {
-                let limit = page.limit.to_string();
-                let mut params = vec![("limit", limit.as_str())];
-                if let Some(cursor) = page.cursor.as_deref() {
-                    params.push(("cursor", cursor));
-                }
-                c.project_entries(&id, &params).await?
-            }
-            ProjectCommand::CreateTask { id, data } => {
-                c.create_project_task(&id, &parse_data(&data.data)?).await?
-            }
-            ProjectCommand::UpdateTask {
-                project,
-                task,
-                data,
-            } => {
-                c.update_project_task(&project, &task, &parse_data(&data.data)?)
-                    .await?
-            }
-            ProjectCommand::Blocker { id, data } => {
-                c.create_project_blocker(&id, &parse_data(&data.data)?)
-                    .await?
-            }
-            ProjectCommand::CreateUpdate { id, data } => {
-                c.create_project_update(&id, &parse_data(&data.data)?)
-                    .await?
-            }
-            ProjectCommand::Complete { id, data } => {
-                c.complete_project(&id, &parse_data(&data.data)?).await?
-            }
-        },
-        Command::Notifications { data: d } => {
-            if let Some(d) = d {
-                c.update_notification_settings(&parse_data(&d)?).await?
-            } else {
-                c.notification_settings().await?
-            }
-        }
-        Command::TestEnvironments { command } => match command {
-            TestCommand::List => c.list_test_environments().await?,
-            TestCommand::Create(d) => c.create_test_environment(&parse_data(&d.data)?).await?,
-            TestCommand::Rotate { id } => c.rotate_test_environment(&id).await?,
-            TestCommand::Key { id } => c.retrieve_test_environment_key(&id).await?,
-            TestCommand::Restore { id } => c.restore_test_environment(&id).await?,
-            TestCommand::Clean { id } => c.clean_test_environment(&id).await?,
-            TestCommand::Delete { id } => c.delete_test_environment(&id).await?,
-        },
-    };
-    if uses_saved_session
-        && token.is_some()
-        && login_status
-        && retry_inactive_status
-        && output["authenticated"] == false
-    {
-        return Err(inactive_access());
-    }
-    println!("{}", serde_json::to_string_pretty(&output)?);
+}
 
+fn config(command: &ConfigCommand) -> Result<(), CliError> {
+    match command {
+        ConfigCommand::Home { location } => {
+            let home = state::set_home(location)?;
+            println!("Commit home directory set to {}", home.display());
+        }
+        ConfigCommand::Telemetry { value } => {
+            state::private_write(&state::directory().join("telemetry"), value.as_bytes())?;
+            println!("Telemetry {value}");
+        }
+        ConfigCommand::Show => {
+            let saved = match session::load() {
+                Ok(session::Loaded::Session(s)) => {
+                    Some((s.api_url.clone(), s.accounts_url.clone()))
+                }
+                _ => None,
+            };
+            output::print_json(&serde_json::json!({
+                "home": state::home(),
+                "state_dir": state::directory(),
+                "profile": state::profile(),
+                "session_file": session::path(),
+                "signed_in": saved.is_some(),
+                "api_url": saved.as_ref().map(|s| s.0.clone()),
+                "accounts_url": saved.as_ref().map(|s| s.1.clone()),
+                "telemetry": if state::telemetry_enabled() { "on" } else { "off" },
+                "docs": docs::DOCS_URL,
+                "repository": docs::REPOSITORY_URL,
+            }));
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Root, clap::Error> {
+        Root::try_parse_from(std::iter::once("commit").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn login_takes_a_token_three_ways_or_starts_the_device_flow() {
+        let Command::Login(login) = parse(&["login"]).unwrap().command else {
+            panic!()
+        };
+        assert!(
+            login.positional_slt.is_none()
+                && login.slt.is_none()
+                && !login.slt_stdin
+                && login.command.is_none()
+        );
+        let Command::Login(login) = parse(&["login", "slt_abc"]).unwrap().command else {
+            panic!()
+        };
+        assert_eq!(login.positional_slt.as_deref(), Some("slt_abc"));
+        let Command::Login(login) = parse(&["login", "--slt", "slt_abc", "--json"])
+            .unwrap()
+            .command
+        else {
+            panic!()
+        };
+        assert_eq!(login.slt.as_deref(), Some("slt_abc"));
+        let Command::Login(login) = parse(&["login", "status", "--json", "--offline"])
+            .unwrap()
+            .command
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            login.command,
+            Some(LoginCommand::Status(StatusArgs {
+                json: true,
+                offline: true
+            }))
+        ));
+        for conflict in [
+            vec!["login", "--slt", "slt_a", "--slt-stdin"],
+            vec!["login", "slt_a", "--slt", "slt_b"],
+            vec!["login", "slt_a", "--slt-stdin"],
+            vec!["login", "status", "--no-save"],
+        ] {
+            assert!(parse(&conflict).is_err(), "{conflict:?}");
+        }
+    }
+
+    #[test]
+    fn global_options_work_after_the_subcommand_and_profiles_are_validated() {
+        let root = parse(&[
+            "todos",
+            "list",
+            "--api-url",
+            "http://127.0.0.1:4141",
+            "--profile",
+            "work",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        assert_eq!(root.api_url.as_deref(), Some("http://127.0.0.1:4141"));
+        assert_eq!(root.profile, "work");
+        assert!(parse(&["--profile", "Work", "me"]).is_err());
+        assert!(parse(&["--profile", "../x", "me"]).is_err());
+        assert!(parse(&["todos", "list", "--limit", "0"]).is_err());
+        assert!(parse(&["todos", "list", "--limit", "101"]).is_err());
+        assert!(parse(&["iam", "--json"]).is_ok(), "hidden alias");
+        assert!(parse(&["--org-id", "tos", "me"]).is_err());
+    }
+
+    #[test]
+    fn the_command_tree_is_consistent() {
+        use clap::CommandFactory as _;
+        Root::command().debug_assert();
+    }
 }

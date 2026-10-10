@@ -1,4 +1,4 @@
-//! Bounded durable Postmark delivery; sandbox messages are simulated in SQL.
+//! Bounded durable Postmark delivery; messages no longer allowed are suppressed in SQL.
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Value, json};
 use sqlx::PgPool;

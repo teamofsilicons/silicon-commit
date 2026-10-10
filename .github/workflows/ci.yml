@@ -31,7 +31,6 @@ jobs:
           --health-retries 10
     env:
       COMMIT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/silicon_commit_test
-      COMMIT_IAM_APP_SECRET: local-test-only-encryption-key-not-an-iam-credential
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -79,6 +78,33 @@ jobs:
           --tag silicon-commit:ci
           .
 
+  package:
+    # The release packs every target the same way (release.yml); this proves the Linux archive on every change.
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the pinned glibc 2.28 toolchain and the Silicon Apps packer
+        run: |
+          python -m pip install 'cargo-zigbuild==0.23.4' 'ziglang==0.15.2'
+          python -c 'from pathlib import Path; import ziglang; print("CARGO_ZIGBUILD_ZIG_PATH=" + str(Path(ziglang.__file__).with_name("zig")))' >> "$GITHUB_ENV"
+          cargo install --locked silicon-apps-cli --version 0.2.0
+      - run: cargo zigbuild --locked -p silicon-commit-cli --bin commit --target x86_64-unknown-linux-gnu.2.28
+      - name: Pack the CLI for linux-x86_64 with the discovery commands required
+        run: >-
+          scripts/package-apps.sh "$(python scripts/package_apps.py version)" linux-x86_64
+          target/x86_64-unknown-linux-gnu/debug/commit --discovery require
+
   dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -91,17 +117,22 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: frontend
+        working-directory: web
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm test
-      - run: npm run build
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm build
 
   docs:
     runs-on: ubuntu-latest
@@ -125,7 +156,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python3 deploy/aws/test_testing_credentials.py
       - run: python3 deploy/aws/test_bootstrap.py
+      - run: python3 deploy/aws/test_cutover.py
+      - run: python3 deploy/aws/test_host.py
       - run: python3 scripts/test_linux_abi.py
-      - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py scripts/check_linux_abi.py scripts/test_linux_abi.py
+      - run: python3 scripts/test_package_apps.py
+      - run: python3 scripts/test_dev_accounts.py
+      - run: python3 scripts/test_accounts_uuid128.py
+      - run: >-
+          python3 -m py_compile deploy/aws/bootstrap.py deploy/aws/deploy_docs.py deploy/aws/host.py
+          deploy/aws/cutover.py scripts/package_apps.py scripts/check_linux_abi.py scripts/dev_accounts.py
+          tests/e2e/accounts_e2e.py
+      - run: >-
+          for script in scripts/package-apps.sh scripts/build-release-macos.sh docs/install.sh
+          scripts/dev-accounts.sh scripts/dev-accounts-stop.sh scripts/e2e-accounts.sh; do bash -n "$script"; done

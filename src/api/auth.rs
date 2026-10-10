@@ -1,252 +1,149 @@
-//! HTTP authentication extraction and IAM request construction.
+//! HTTP authentication extraction.
+//!
+//! Every product route accepts exactly one `Authorization` header:
+//! `Bearer <Silicon Accounts access token issued to Commit>` or
+//! `Proof <sap_… User verification proof>` from an app allowed to act for the
+//! account (`COMMIT_PROOF_ISSUERS`). Headers of the IAM era are refused with a
+//! precise message instead of being silently ignored.
 
 use axum::http::HeaderMap;
 use secrecy::SecretString;
-use uuid::Uuid;
 
 use crate::{
-    application::ports::{
-        AuthenticationRequest, CapabilitySet, CredentialError, InboundCredential, OrganizationRole,
-        TrustedIdentity,
-    },
-    config::AuthenticationMode,
-    domain::{Actor, ActorId, ActorType, OrganizationId, PrincipalId, PublicOrganizationId},
+    application::ports::{AuthenticationRequest, InboundCredential},
     error::AppError,
 };
 
-/// Stable IAM OBO action names for each Commit operation.
-pub mod action {
-    /// Create a testing environment.
-    pub const TEST_ENVIRONMENTS_CREATE: &str = "commit.test_environments.create";
-    /// Manage a testing environment.
-    pub const TEST_ENVIRONMENTS_MANAGE: &str = "commit.test_environments.manage";
-    /// Read the represented Silicon's notification settings.
-    pub const NOTIFICATION_SETTINGS_READ: &str = "commit.notification_settings.read";
-    /// Replace the represented Silicon's notification settings.
-    pub const NOTIFICATION_SETTINGS_UPDATE: &str = "commit.notification_settings.update";
-    /// List todos.
-    pub const TODOS_LIST: &str = "commit.todos.list";
-    /// Create a todo.
-    pub const TODOS_CREATE: &str = "commit.todos.create";
-    /// Read one todo.
-    pub const TODOS_READ: &str = "commit.todos.read";
-    /// Update one todo.
-    pub const TODOS_UPDATE: &str = "commit.todos.update";
-    /// Delete one todo.
-    pub const TODOS_DELETE: &str = "commit.todos.delete";
-    /// List todo notes.
-    pub const TODO_NOTES_LIST: &str = "commit.todo_notes.list";
-    /// Append a todo note.
-    pub const TODO_NOTES_CREATE: &str = "commit.todo_notes.create";
-    /// Read a todo-specific notification subscription.
-    pub const TODO_SUBSCRIPTION_READ: &str = "commit.todo_subscription.read";
-    /// Replace a todo-specific notification subscription.
-    pub const TODO_SUBSCRIPTION_UPDATE: &str = "commit.todo_subscription.update";
-    /// List projects.
-    pub const PROJECTS_LIST: &str = "commit.projects.list";
-    /// Create a project.
-    pub const PROJECTS_CREATE: &str = "commit.projects.create";
-    /// Read one project.
-    pub const PROJECTS_READ: &str = "commit.projects.read";
-    /// Update one project.
-    pub const PROJECTS_UPDATE: &str = "commit.projects.update";
-    /// Read a diary.
-    pub const DIARY_READ: &str = "commit.project_diary.read";
-    /// Replace a diary.
-    pub const DIARY_UPDATE: &str = "commit.project_diary.update";
-    /// List project tasks.
-    pub const PROJECT_TASKS_LIST: &str = "commit.project_tasks.list";
-    /// Create a project task.
-    pub const PROJECT_TASKS_CREATE: &str = "commit.project_tasks.create";
-    /// Update a project task.
-    pub const PROJECT_TASKS_UPDATE: &str = "commit.project_tasks.update";
-    /// Add a blocker.
-    pub const PROJECT_BLOCKERS_CREATE: &str = "commit.project_blockers.create";
-    /// Add a milestone update.
-    pub const PROJECT_UPDATES_CREATE: &str = "commit.project_updates.create";
-    /// Complete a project.
-    pub const PROJECT_COMPLETION_CREATE: &str = "commit.project_completion.create";
-}
+/// Commit's action ids, which are also the proof scopes routes require.
+pub use crate::application::scopes as action;
 
-/// Parses authentication headers under the configured runtime safety mode.
+/// Longest credential accepted (access tokens and proofs are far shorter).
+const MAX_CREDENTIAL_BYTES: usize = 8_192;
+
+/// Headers of the IAM era and of Honeycomb testing environments.
+const RETIRED_HEADERS: [(&str, &str); 6] = [
+    (
+        "x-org-id",
+        "the access token or proof alone says which account is calling",
+    ),
+    (
+        "x-app-id",
+        "apps act for an account with Authorization: Proof <sap_…>",
+    ),
+    (
+        "x-iam-obo-access-token",
+        "apps act for an account with Authorization: Proof <sap_…>",
+    ),
+    (
+        "x-iam-obo-access-proof",
+        "apps act for an account with Authorization: Proof <sap_…>",
+    ),
+    (
+        "x-testing-environment-key",
+        "Commit has no testing environments any more",
+    ),
+    (
+        "x-testing-app-secret",
+        "Commit has no testing environments any more",
+    ),
+];
+
+/// Parses the request's credential for an action.
 ///
 /// # Errors
 ///
-/// Returns a normalized protocol or authentication error when organization or
-/// credential headers are missing, duplicated, malformed, or mixed.
+/// Returns a precise error for a missing, duplicated, malformed or retired credential.
 pub fn request(
     headers: &HeaderMap,
-    mode: AuthenticationMode,
-    action: &str,
-    resource: Option<String>,
+    scope: &str,
+    sensitive: bool,
 ) -> Result<AuthenticationRequest, AppError> {
-    let environment_key = optional_header(headers, "x-testing-environment-key")?;
-    if let Some(key) = environment_key.as_deref()
-        && (!key.starts_with("ask_")
-            && (key.len() != 32 || !key.bytes().all(|byte| byte.is_ascii_alphanumeric())))
-    {
-        return Err(AppError::BadRequest {
-            code: "invalid_testing_environment_key".into(),
-        });
+    for (name, why) in RETIRED_HEADERS {
+        if headers.contains_key(name) {
+            return Err(AppError::Invalid {
+                code: "retired_header".into(),
+                message: format!(
+                    "The {name} header is no longer accepted: {why}. Remove it and send Authorization: Bearer <Silicon Accounts access token for Commit>."
+                ),
+            });
+        }
     }
-    crate::request_context::set_environment_key(environment_key);
-    let org_id = required_header(headers, "x-org-id")?
-        .parse::<PublicOrganizationId>()
-        .map_err(|_| invalid_header("x-org-id"))?;
-
-    let credential = match mode {
-        AuthenticationMode::Iam => iam_credential(headers)?,
-        AuthenticationMode::TrustedHeaders => trusted_credential(headers, org_id.clone())?,
-    };
-    let bearer = match &credential {
-        InboundCredential::Bearer(token) => Some(token.clone()),
-        _ => None,
-    };
-    crate::request_context::set_iam_bearer_token(bearer);
+    let credential = credential(headers)?;
     Ok(AuthenticationRequest {
         credential,
-        org_id,
-        action: action.to_owned(),
-        resource,
+        scope: scope.to_owned(),
+        sensitive,
     })
 }
 
-pub(super) fn iam_credential(headers: &HeaderMap) -> Result<InboundCredential, AppError> {
-    if headers.contains_key("x-iam-obo-access-proof") {
-        return Err(AppError::BadRequest {
-            code: "legacy_obo_proof_unsupported".into(),
-        });
-    }
-    if TRUSTED_HEADERS
-        .iter()
-        .any(|name| headers.contains_key(*name))
-    {
-        return Err(AppError::BadRequest {
-            code: "trusted_identity_headers_forbidden".into(),
-        });
-    }
-
-    let bearer = unique_header(headers, http::header::AUTHORIZATION.as_str())?
-        .map(|value| {
-            let (scheme, token) = value.split_once(' ').ok_or(AppError::Unauthenticated)?;
-            if !scheme.eq_ignore_ascii_case("bearer")
-                || token.is_empty()
-                || token.bytes().any(|byte| byte.is_ascii_whitespace())
-            {
-                return Err(AppError::Unauthenticated);
-            }
-            Ok::<SecretString, AppError>(SecretString::from(token.to_owned()))
-        })
-        .transpose()?;
-    let app_id = optional_header(headers, "x-app-id")?;
-    let proof = optional_header(headers, "x-iam-obo-access-token")?.map(SecretString::from);
-
-    InboundCredential::from_external_parts(bearer, app_id, proof).map_err(map_credential_error)
-}
-
-fn trusted_credential(
-    headers: &HeaderMap,
-    org_id: PublicOrganizationId,
-) -> Result<InboundCredential, AppError> {
-    if headers.contains_key(http::header::AUTHORIZATION)
-        || headers.contains_key("x-app-id")
-        || headers.contains_key("x-iam-obo-access-token")
-        || headers.contains_key("x-iam-obo-access-proof")
-    {
-        return Err(AppError::BadRequest {
-            code: "mixed_authentication".into(),
-        });
-    }
-
-    let organization_id = parse_uuid_header(headers, "x-test-organization-id")?;
-    let membership_id = required_header(headers, "x-test-membership-id")?.to_owned();
-    let principal_id = parse_uuid_header(headers, "x-test-principal-id")?;
-    let actor_type = required_header(headers, "x-test-actor-type")?
-        .parse::<ActorType>()
-        .map_err(|_| invalid_header("x-test-actor-type"))?;
-    let actor_id = required_header(headers, "x-test-actor-id")?
-        .parse::<ActorId>()
-        .map_err(|_| invalid_header("x-test-actor-id"))?;
-    let organization_role = match required_header(headers, "x-test-org-role")? {
-        "owner" => OrganizationRole::Owner,
-        "admin" => OrganizationRole::Admin,
-        "member" => OrganizationRole::Member,
-        _ => return Err(invalid_header("x-test-org-role")),
+fn credential(headers: &HeaderMap) -> Result<InboundCredential, AppError> {
+    let mut values = headers.get_all(http::header::AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return Err(AppError::Unauthenticated);
     };
-    let capability_names = optional_header(headers, "x-test-capabilities")?
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let capabilities = CapabilitySet::try_from_names(capability_names)
-        .map_err(|_| invalid_header("x-test-capabilities"))?;
-    if organization_id.is_nil()
-        || principal_id.is_nil()
-        || membership_id != format!("{actor_id}[{org_id}]")
-    {
-        return Err(AppError::BadRequest {
-            code: "invalid_trusted_identity".into(),
+    if values.next().is_some() {
+        return Err(AppError::Invalid {
+            code: "duplicate_authorization".into(),
+            message: "Send exactly one Authorization header.".to_owned(),
         });
     }
-
-    Ok(InboundCredential::trusted(TrustedIdentity {
-        organization_id: OrganizationId::from_uuid(organization_id),
-        org_id,
-        membership_id,
-        actor: Actor::new(PrincipalId::from_uuid(principal_id), actor_type, actor_id),
-        organization_role,
-        capabilities,
-    }))
-}
-
-fn map_credential_error(error: CredentialError) -> AppError {
-    match error {
-        CredentialError::Missing | CredentialError::Malformed => AppError::Unauthenticated,
-        CredentialError::Multiple => AppError::BadRequest {
-            code: "mixed_authentication".into(),
-        },
-        CredentialError::IncompleteObo => AppError::BadRequest {
-            code: "incomplete_obo_authentication".into(),
-        },
+    let value = value.to_str().map_err(|_| malformed())?;
+    let (scheme, token) = value.split_once(' ').ok_or_else(malformed)?;
+    if token.is_empty()
+        || token.len() > MAX_CREDENTIAL_BYTES
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(malformed());
     }
-}
-
-fn required_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a str, AppError> {
-    unique_header(headers, name)?.ok_or_else(|| AppError::BadRequest {
-        code: format!("{}_required", name.replace('-', "_")).into(),
+    if scheme.eq_ignore_ascii_case("bearer") {
+        return Ok(InboundCredential::Bearer(SecretString::from(
+            token.to_owned(),
+        )));
+    }
+    if scheme.eq_ignore_ascii_case("proof") {
+        if !token.starts_with("sap_") {
+            return Err(AppError::Authentication {
+                code: "proof_malformed".into(),
+                message: "A proof is the sap_… token Silicon Accounts issued to the acting app (the sapr_… refresh token stays with that app).".to_owned(),
+            });
+        }
+        return Ok(InboundCredential::Proof(SecretString::from(
+            token.to_owned(),
+        )));
+    }
+    Err(AppError::Authentication {
+        code: "unsupported_authorization_scheme".into(),
+        message: "Authorization scheme is not accepted. Use Bearer <Silicon Accounts access token for Commit> or Proof <sap_… proof>.".to_owned(),
     })
 }
 
+fn malformed() -> AppError {
+    AppError::Authentication {
+        code: "authorization_malformed".into(),
+        message: "The Authorization header must be `Bearer <token>` or `Proof <sap_…>`, with one space and no other whitespace.".to_owned(),
+    }
+}
+
+/// Reads an optional single-valued header.
 pub(super) fn optional_header(
     headers: &HeaderMap,
     name: &'static str,
 ) -> Result<Option<String>, AppError> {
-    unique_header(headers, name).map(|value| value.map(str::to_owned))
-}
-
-fn unique_header<'a>(
-    headers: &'a HeaderMap,
-    name: &'static str,
-) -> Result<Option<&'a str>, AppError> {
     let mut values = headers.get_all(name).iter();
     let value = values.next();
     if values.next().is_some() {
         return Err(invalid_header(name));
     }
     value
-        .map(|value| value.to_str().map_err(|_| invalid_header(name)))
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| invalid_header(name))
+        })
         .transpose()
-}
-
-fn parse_uuid_header(headers: &HeaderMap, name: &'static str) -> Result<Uuid, AppError> {
-    required_header(headers, name)?
-        .parse()
-        .map_err(|_| invalid_header(name))
 }
 
 fn invalid_header(name: &'static str) -> AppError {
@@ -255,54 +152,71 @@ fn invalid_header(name: &'static str) -> AppError {
     }
 }
 
-const TRUSTED_HEADERS: [&str; 7] = [
-    "x-test-organization-id",
-    "x-test-membership-id",
-    "x-test-principal-id",
-    "x-test-actor-type",
-    "x-test-actor-id",
-    "x-test-org-role",
-    "x-test-capabilities",
-];
-
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
     use super::request;
-    use crate::config::AuthenticationMode;
+    use crate::{application::ports::InboundCredential, error::AppError};
 
-    #[test]
-    fn iam_mode_rejects_mixed_bearer_and_obo_credentials() {
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert("x-org-id", HeaderValue::from_static("example"));
-        headers.insert(
-            http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer opaque"),
-        );
-        headers.insert("x-app-id", HeaderValue::from_static("silicon-dm"));
-        headers.insert("x-iam-obo-access-token", HeaderValue::from_static("proof"));
-
-        assert!(request(&headers, AuthenticationMode::Iam, "commit.test", None).is_err());
+        for (name, value) in pairs {
+            headers.append(*name, HeaderValue::from_static(value));
+        }
+        headers
     }
 
     #[test]
-    fn legacy_obo_proof_is_rejected_even_with_a_valid_new_credential() {
-        for new_token in [false, true] {
-            let mut headers = HeaderMap::new();
-            headers.insert("x-org-id", HeaderValue::from_static("example"));
-            headers.insert("x-app-id", HeaderValue::from_static("interface"));
-            headers.insert(
-                "x-iam-obo-access-proof",
-                HeaderValue::from_static("obo_old"),
-            );
-            if new_token {
-                headers.insert(
-                    "x-iam-obo-access-token",
-                    HeaderValue::from_static("oba_new"),
-                );
-            }
-            assert!(request(&headers, AuthenticationMode::Iam, "commit.todos.list", None).is_err());
-        }
+    fn bearer_and_proof_credentials_are_recognised() {
+        let bearer = request(
+            &headers(&[("authorization", "Bearer eyJ.a.b")]),
+            "commit.todos.list",
+            false,
+        );
+        assert!(matches!(
+            bearer.map(|r| r.credential),
+            Ok(InboundCredential::Bearer(_))
+        ));
+        let proof = request(
+            &headers(&[("authorization", "Proof sap_abc")]),
+            "commit.todos.list",
+            true,
+        );
+        assert!(
+            proof.is_ok_and(|r| r.sensitive && matches!(r.credential, InboundCredential::Proof(_)))
+        );
+    }
+
+    #[test]
+    fn missing_malformed_and_retired_credentials_are_refused_precisely() {
+        assert!(matches!(
+            request(&HeaderMap::new(), "commit.todos.list", false),
+            Err(AppError::Unauthenticated)
+        ));
+        assert!(matches!(
+            request(&headers(&[("authorization", "Basic abc")]), "s", false),
+            Err(AppError::Authentication { code, .. }) if code == "unsupported_authorization_scheme"
+        ));
+        assert!(matches!(
+            request(&headers(&[("authorization", "Proof sapr_refresh")]), "s", false),
+            Err(AppError::Authentication { code, .. }) if code == "proof_malformed"
+        ));
+        assert!(matches!(
+            request(&headers(&[("authorization", "Bearer a"), ("authorization", "Bearer b")]), "s", false),
+            Err(AppError::Invalid { code, .. }) if code == "duplicate_authorization"
+        ));
+        assert!(matches!(
+            request(&headers(&[("authorization", "Bearer a"), ("x-org-id", "tos")]), "s", false),
+            Err(AppError::Invalid { code, .. }) if code == "retired_header"
+        ));
+        assert!(matches!(
+            request(
+                &headers(&[("x-iam-obo-access-token", "oba"), ("x-app-id", "interface")]),
+                "s",
+                false
+            ),
+            Err(AppError::Invalid { .. })
+        ));
     }
 }

@@ -4,14 +4,15 @@
 import importlib.util
 from pathlib import Path
 import struct
-import tempfile
 import unittest
 
 from check_linux_abi import required_glibc_versions, verify_glibc_requirements
 
 
-def elf_requirements(versions, machine=183, extra=b""):
-    """A small ELF with real GNU version-need records and linked string table."""
+def elf_requirements(versions, machine=183, elf_class=2, extra=b""):
+    """A small ELF with real GNU version-need records and linked string table.
+
+    elf_class 2 builds ELF64 (x86_64, aarch64), 1 builds ELF32 (i686, armv7hf)."""
     strings = bytearray(b"\0libc.so.6\0")
     names = []
     for version in versions:
@@ -21,21 +22,27 @@ def elf_requirements(versions, machine=183, extra=b""):
     for index, name in enumerate(names):
         needs.extend(struct.pack("<IHHII", 0, 0, index + 2, name,
                                  16 if index + 1 < len(names) else 0))
-    strings_offset = 64
+    header_size, section_size = (64, 64) if elf_class == 2 else (52, 40)
+    strings_offset = header_size
     needs_offset = strings_offset + len(strings)
     extra_offset = needs_offset + len(needs)
     table_offset = extra_offset + len(extra)
-    header = struct.pack(
-        "<16sHHIQQQIHHHHHH", b"\x7fELF\x02\x01\x01" + bytes(9),
-        2, machine, 1, 0, 0, table_offset, 0, 64, 0, 0, 64, 4, 0,
-    )
-    sections = bytes(64)
+    ident = b"\x7fELF" + bytes([elf_class, 1, 1]) + bytes(9)
+    if elf_class == 2:
+        header = struct.pack("<16sHHIQQQIHHHHHH", ident, 2, machine, 1, 0, 0, table_offset,
+                             0, header_size, 0, 0, section_size, 4, 0)
+        layout = "<IIQQQQIIQQ"
+    else:
+        header = struct.pack("<16sHHIIIIIHHHHHH", ident, 2, machine, 1, 0, 0, table_offset,
+                             0, header_size, 0, 0, section_size, 4, 0)
+        layout = "<IIIIIIIIII"
+    sections = bytes(section_size)
     for kind, offset, size, link, info in [
         (3, strings_offset, len(strings), 0, 0),
         (0x6FFFFFFE, needs_offset, len(needs), 1, 1),
         (1, extra_offset, len(extra), 0, 0),
     ]:
-        sections += struct.pack("<IIQQQQIIQQ", 0, kind, 0, 0, offset, size, link, info, 1, 0)
+        sections += struct.pack(layout, 0, kind, 0, 0, offset, size, link, info, 1, 0)
     return header + strings + needs + extra + sections
 
 
@@ -71,20 +78,34 @@ class LinuxAbiTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     verify_glibc_requirements(bad)
 
+    def test_reads_32_bit_executables(self):
+        for machine in [3, 40]:  # i686, armv7hf
+            with self.subTest(machine=machine):
+                data = elf_requirements(["GLIBC_2.0", "GLIBC_2.4", "GLIBC_2.28"], machine, elf_class=1)
+                self.assertEqual(verify_glibc_requirements(data), (2, 28))
+                with self.assertRaisesRegex(ValueError, "requires GLIBC_2.34"):
+                    verify_glibc_requirements(elf_requirements(["GLIBC_2.34"], machine, elf_class=1))
+
+    def test_rejects_big_endian_and_unknown_elf_classes(self):
+        data = bytearray(elf_requirements(["GLIBC_2.28"]))
+        for index, value in [(5, 2), (4, 3)]:
+            changed = bytearray(data)
+            changed[index] = value
+            with self.subTest(index=index), self.assertRaisesRegex(ValueError, "little-endian ELF32 or ELF64"):
+                verify_glibc_requirements(bytes(changed))
+
     def test_packager_rejects_bad_linux_abi_before_packing(self):
         spec = importlib.util.spec_from_file_location(
-            "package_release", Path(__file__).with_name("package-release.py")
+            "package_apps", Path(__file__).with_name("package_apps.py")
         )
         package = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(package)
-        with tempfile.TemporaryDirectory() as directory:
-            binary = Path(directory) / "commit"
-            for target, machine in [("linux-aarch64", 183), ("linux-x86_64", 62)]:
-                binary.write_bytes(elf_requirements(["GLIBC_2.28"], machine))
-                package.verify_binary(binary, target)
-                binary.write_bytes(elf_requirements(["GLIBC_2.39"], machine))
-                with self.assertRaisesRegex(SystemExit, "Unsupported Linux ABI"):
-                    package.verify_binary(binary, target)
+        for target, machine, elf_class in [("linux-aarch64", 183, 2), ("linux-x86_64", 62, 2),
+                                           ("linux-i686", 3, 1), ("linux-armv7hf", 40, 1)]:
+            with self.subTest(target=target):
+                package.verify_binary(elf_requirements(["GLIBC_2.28"], machine, elf_class), target)
+                with self.assertRaisesRegex(package.PackageError, "must run on glibc 2.28"):
+                    package.verify_binary(elf_requirements(["GLIBC_2.39"], machine, elf_class), target)
 
 
 if __name__ == "__main__":

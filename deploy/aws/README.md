@@ -1,11 +1,13 @@
 # Commit AWS deployment
 
-Production API: https://backend.commit.teamofsilicons.com/api/v1/
+Production API: https://backend.commit.teamofsilicons.com/api/v1/ (Silicon Accounts events arrive at
+https://backend.commit.teamofsilicons.com/webhook/). Documentation: https://docs.commit.teamofsilicons.com.
 
 This is a standalone EC2 deployment without a load balancer. Caddy terminates
 HTTPS and forwards to the API on `127.0.0.1:8080`. API and worker run as separate
 non-root containers. PostgreSQL runs privately in RDS with encrypted storage,
-seven days of automated backups, deletion protection, and verified TLS.
+seven days of automated backups, deletion protection, and verified TLS. The web
+app is a separate Vercel project (see [the cutover runbook](../../docs/migration/cutover.md)).
 
 ## Resources
 
@@ -32,7 +34,9 @@ stacks independently.
 
 ## Release procedure
 
-Build and push an ARM64 image with the source revision embedded:
+Build an ARM64 image with the source revision embedded: the **Build pinned ARM64
+backend image** workflow (`backend-image.yml`, on a `release/**` branch) leaves it as
+an artifact, or build and push it yourself:
 
 ```sh
 aws ecr get-login-password --profile silicon-production --region us-east-1 |
@@ -43,14 +47,18 @@ docker buildx build --platform linux/arm64 --push \
   -t "234951665042.dkr.ecr.us-east-1.amazonaws.com/silicon-commit:$(git rev-parse --short HEAD)" .
 ```
 
-Use SSM to copy these files to the root-owned `/opt/commit` directory:
+Copy the deployment files to the root-owned `/opt/commit` directory and run the
+bootstrap there as root. `host.py` does both through Systems Manager (it uses the
+`silicon-production` profile and prints the host's output):
 
-- `deploy/aws/bootstrap.py` → `bootstrap.py`
-- `deploy/postgres_runtime_grants.sql` → `postgres_runtime_grants.sql`
-- `tests/postgres_runtime_grants.sql` → `test_runtime_grants.sql`
+```sh
+python3 deploy/aws/host.py copy deploy/aws/bootstrap.py /opt/commit/bootstrap.py
+python3 deploy/aws/host.py copy deploy/postgres_runtime_grants.sql /opt/commit/postgres_runtime_grants.sql
+python3 deploy/aws/host.py copy tests/postgres_runtime_grants.sql /opt/commit/test_runtime_grants.sql
+python3 deploy/aws/host.py run "python3 /opt/commit/bootstrap.py SECRET_ARN DATABASE_HOST IMAGE"
+```
 
-Run `python3 /opt/commit/bootstrap.py SECRET_ARN DATABASE_HOST IMAGE_DIGEST` as
-root through SSM. Pass the immutable ECR `repository@sha256:...` image reference.
+Pass the immutable ECR `repository@sha256:...` image reference as `IMAGE`.
 The script retrieves secrets on the server, pulls images, prepares environment
 files and grant scripts, and creates dedicated database roles if absent. It then
 stops both old API and worker processes before migrating, applies and tests runtime
@@ -62,82 +70,47 @@ are root-readable only; temporary migration and administrator environment files
 are removed even when database setup fails. The test role checks intentionally
 exercise denied writes inside rolled-back transactions.
 
-For migrations 0029–0030, prepare the release first, stop API and worker, and take
-and verify a recoverable database backup before invoking bootstrap. Bootstrap does
-not create backups. Migration 0029 changes retained membership IDs from UUIDs to
-canonical text, so an old backend image cannot run against the upgraded schema.
-Recovery requires either the upgraded backend or restoration of the database
-backup before starting an older image. Migration 0030 also repairs existing orphaned
-task descendants and retains an audit record of those repairs.
+Before a release with new migrations, stop API and worker and take and verify a
+recoverable database backup; bootstrap does not create backups. Migration 0033
+(Silicon Accounts) adds account columns that older images cannot write, so after it
+runs, recovery means the upgraded image or restoring the backup together with the
+previous image.
 
-The deployment secret contains the confirmed IAM application and webhook secrets,
-the IAM backend URL, and generated database passwords. Do not place its values in
+Two cutover steps need the database, which accepts only this host: draining the
+webhook and email queues before 0033, and linking the existing data to Silicon
+Accounts accounts after it. `cutover.py` runs both on the host (`queues` with psql;
+`plan`, `dry-run` and `apply` run `commit-migrate link-identities` in the deployed image):
+
+```sh
+python3 deploy/aws/host.py copy deploy/aws/cutover.py /opt/commit/cutover.py
+python3 deploy/aws/host.py run "python3 /opt/commit/cutover.py SECRET_ARN DATABASE_HOST queues"
+python3 deploy/aws/host.py run "python3 /opt/commit/cutover.py SECRET_ARN DATABASE_HOST IMAGE plan"
+```
+
+The [cutover runbook](../../docs/migration/cutover.md) has the whole sequence:
+reviewing the mapping, the dry run, applying it and checking the result.
+
+The deployment secret contains Commit's Silicon Accounts app secret
+(`COMMIT_APP_SECRET`), the account webhook secret (`COMMIT_ACCOUNTS_WEBHOOK_SECRET`),
+optionally `COMMIT_PROOF_ISSUERS`, `ACCOUNTS_URL` and `ACCOUNTS_API_URL`, and generated
+database passwords. Bootstrap refuses to deploy without the two Accounts secrets and
+copies no variables of the previous sign-in or packaging systems. Do not place its values in
 CloudFormation, user data, SSM command arguments, or Git. Caddy certificate state
 persists in Docker volumes on the EC2 disk. Keep that disk when maintaining the
 host; an instance replacement obtains a new certificate after DNS is updated.
 
-Verify `/healthz`, `/readyz`, `/api/v1/version`, IAM login/refresh/revocation,
-worker logs, database grants, and DNS after every rollout. An image rollback does
-not undo database migrations; review schema compatibility first.
+Verify `/healthz`, `/readyz`, `/api/v1/version`, `/api/v1/accounts`, a signed-in
+`/api/v1/me`, an account webhook test delivery, worker logs, database grants, and DNS
+after every rollout. An image rollback does not undo database migrations; review
+schema compatibility first.
 
-## Historical integration gaps (September 8)
+## Documentation
 
-The API uses `https://backend.iam.teamofsilicons.com/api/v1/` and
-`POST /oauth/introspect`. Current authorization snapshots authenticate requests
-without using IAM's administrative membership APIs. Snapshot bindings are checked
-against the introspected subject, organization, membership, actor type, and audience.
-Undisclosed or unknown roles never become elevated privileges, and OAuth scopes
-are not treated as Commit management capabilities.
+`npm ci --prefix docs-site && npm run build --prefix docs-site`, then
+`python3 deploy/aws/deploy_docs.py` publishes `docs-site/dist` into the Caddy container
+on the same host and keeps the previous copy as `/config/commit-docs-previous`.
 
-1. IAM application tokens still receive 403 from the existing organization and
-   administrative member read endpoints. The app-readable `/directory/*` projection
-   omits internal organization, membership, and principal UUIDs. Commit needs those
-   identifiers to resolve assignees and project participants. Complete product
-   mutation verification therefore remains blocked on the IAM directory contract.
-2. IAM sandbox imports issue a separate test application secret. Commit currently
-   stores only the IAM environment root key and uses its deployment application
-   secret in sandbox requests. Supporting the new isolated application credentials
-   needs an agreed provisioning contract and implementation; sandbox product login
-   is not ready. Sandbox management and cleanup were verified independently.
-3. IAM's `commit` webhook is `pending_review`, with pending URL
-   `https://backend.commit.teamofsilicons.com/webhook/`. An eligible IAM operator
-   must perform verified step-up approval. The existing signing secret is deployed.
+## History
 
-The following release adds current IAM directory usage and automatic sandbox discovery. See [the September 13 release verification](verification-2026-09-13.md) for the deployed behavior, checks, and remaining verification boundaries. The September 8 report remains historical evidence.
-
-
-## Honeycomb lifecycle deployment
-
-Provision the participant token and registry entry with the deployment operator's
-credentials. The helper reuses existing credentials and rejects conflicting
-identities, destinations or tokens instead of overwriting them:
-
-```sh
-python3 deploy/aws/testing_credentials.py --profile PROFILE \
-  --honeycomb-region us-east-2 \
-  --honeycomb-secret silicon-honeycomb/production/runtime \
-  --commit-region us-east-1 --commit-secret silicon-commit/production \
-  --commit-public-base-url https://backend.commit.teamofsilicons.com
-```
-
-The current production deployment uses this separate stage with the deployment
-operator's credentials. Its Commit runtime secret contains
-`COMMIT_HONEYCOMB_URL=https://backend.honeycomb.teamofsilicons.com` and the paired
-service token; `COMMIT_HONEYCOMB_SECRET_ID` stays unset. The runtime instance does
-not need write access to Honeycomb's deployment secret. After provisioning,
-reload the Commit API and worker configuration, and add only the Commit token
-and participant entry to Honeycomb's live backend environment. Preserve its
-existing participants, environment, image and container settings during that
-reload; do not activate unrelated staged configuration.
-
-Bootstrap can alternatively perform provisioning when `testing_credentials.py` is
-uploaded next to it and `COMMIT_HONEYCOMB_SECRET_ID`, optional
-`COMMIT_HONEYCOMB_REGION`, and `COMMIT_HONEYCOMB_URL` are configured. That mode
-requires the bootstrap execution role to read and write both deployment secrets.
-The current runtime instance is intentionally not configured for that mode.
-
-API and worker must share the stable sandbox encryption key. Bootstrap passes the
-worker `COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY`, preserving existing ciphertext
-compatibility without passing IAM application authentication to the worker.
-See [the participant contract](../../docs/HONEYCOMB.md). These steps configure
-future deployment; local tests do not establish live cross-service readiness.
+Earlier verification reports and the first deployment's integration gaps are in
+[`docs/history/aws/`](../../docs/history/aws/).

@@ -965,3 +965,39 @@ IAM 1.8 testing application secrets select a sandbox without root-key pairing. E
 Organization notification email is explicitly configured per identity and organization rather than falling back to personal Carbon contact data. Postmark sends completion and opt-in events; reports queue to the requested maintainers.
 
 Contract 1 remains additive for 0.1 consumers. Deprecated contracts retire only after seven idle production days; active versions never retire automatically. Space Station telemetry uses tos.committelemetry with deployment and per-client opt-out; sandbox diagnostics are local and isolated.
+
+## D-056 — Silicon Accounts replaces Silicon IAM and organizations
+
+**Status:** Accepted (2026-10-10); supersedes D-002, D-005, D-006, D-021, D-022, D-024, D-027, D-028, D-038,
+D-045 and D-055, the IAM parts of D-054, and the sandbox and organization-email parts of the 2026-09-13 notes
+
+Commit signs people in with Silicon Accounts and has no organizations, roles, tags or testing environments. Rows are
+keyed by permanent account uuids; IAM-era organization and principal columns stay as provenance and are linked to
+accounts by `commit-migrate link-identities`. Visibility follows the custodian circle, explicit sharing (assignment,
+project membership) and a Silicon's allow-list; other apps act for an account with User verification proofs.
+Contract 2 replaces contract 1. The full mapping and each decision are in
+[`docs/migration/decisions.md`](docs/migration/decisions.md).
+
+## D-057 — Silicon Apps distributes the CLI
+
+**Status:** Accepted (2026-10-10); supersedes the previous package manager's release packaging, the single
+multi-target release archive and the release notes now kept in `docs/history/`
+
+The `commit` CLI ships as one Silicon Apps archive per target: `apps.yaml` at the root listing only that target,
+the executable at `bin/commit` (`bin/commit.exe` on Windows). The release workflow builds the six targets Commit
+already shipped with the same toolchains, runs `--help`, `accounts --json` and `login status --json` signed out on
+each target's own runner, packs with `silicon-apps validate` and `silicon-apps pack`, and publishes nothing; a
+Carbon uploads, releases and promotes with `silicon-apps`. Silicon Apps' updater is the only updater. Each call is
+in [`docs/migration/decisions.md`](docs/migration/decisions.md) (A-40 to A-54).
+
+## D-058 — Account data only moves forward, and access-widening checks are always online
+
+**Status:** Accepted (2026-10-10); refines D-056 (A-07 to A-09 in the migration decisions)
+
+Stored account details (id, custodian, profile) take an answer from Silicon Accounts only when it is at least as new
+as what is stored, so a cached lookup never undoes a webhook event; an account first seen through someone else's
+lookup reads its own view on its first sign-in. A token issued in the same second as a sign-out is decided by
+introspection, and changes that widen who can see something (project visibility or members, a Silicon's allow-list)
+check the token or proof online every time. The end-to-end run against a local Silicon Accounts stack found these;
+`scripts/e2e-accounts.sh` reruns it. Details in [`docs/migration/decisions.md`](docs/migration/decisions.md)
+(A-55 to A-64).
