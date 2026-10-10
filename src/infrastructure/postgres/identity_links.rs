@@ -602,7 +602,7 @@ async fn ensure_account(
     let kind = existing
         .or_else(|| known.map(|account| account.kind))
         .unwrap_or(link_kind);
-    if kind != link_kind {
+    if kind != link_kind || known.is_some_and(|account| account.kind != link_kind) {
         bail!(
             "line {line}: {} ({}) was a {} in IAM, but the Silicon Accounts account {target} is a {}; a Carbon links to a Carbon and a Silicon to a Silicon",
             link.iam_public_id,

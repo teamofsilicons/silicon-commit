@@ -491,7 +491,7 @@ impl AccountService {
         Ok(match event {
             AccountEvent::IdChanged { uuid, new_id } => {
                 if store::apply_id_change(connection, uuid, new_id, at).await? {
-                    format!("id is now {new_id}")
+                    "id changed".to_owned()
                 } else {
                     "ignored: unknown account or newer data already stored".to_owned()
                 }
@@ -519,7 +519,7 @@ impl AccountService {
                     )
                     .await?
                     {
-                        format!("custodian is now {custodian_id}")
+                        format!("custodian is now {custodian}")
                     } else {
                         "ignored: unknown Silicon or newer data already stored".to_owned()
                     }
@@ -541,10 +541,11 @@ impl AccountService {
                 }
             },
             AccountEvent::AccessRemoved { uuid } => {
-                store::revoke_before(connection, uuid, at).await?;
+                store::block_access(connection, uuid, at, false).await?;
                 "access removed: every earlier sign-in is refused".to_owned()
             }
             AccountEvent::Deleted { uuid } => {
+                store::block_access(connection, uuid, at, true).await?;
                 let summary = store::forget(
                     connection,
                     uuid,

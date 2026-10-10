@@ -1,0 +1,53 @@
+{
+  "app": "commit",
+  "schema": "commit",
+  "schemas": [
+    "commit",
+    "commit_private"
+  ],
+  "columns": [
+    "commit.accounts.uuid",
+    "commit.accounts.custodian_uuid",
+    "commit.account_lifecycle.uuid",
+    "commit.accounts_webhook_events.account_uuid",
+    "commit.audit_events.actor_account",
+    "commit.email_jobs.account",
+    "commit.email_preferences.account",
+    "commit.idempotency_records.actor_account",
+    "commit.outbox_events.recipient_silicon_account",
+    "commit.project_collaborators.account",
+    "commit.project_diaries.updated_by_account",
+    "commit.project_entries.created_by_account",
+    "commit.project_participants.participant_account",
+    "commit.project_participants.added_by_account",
+    "commit.project_participants.removed_by_account",
+    "commit.project_tasks.created_by_account",
+    "commit.project_tasks.assigned_to_account",
+    "commit.projects.created_by_account",
+    "commit.projects.owner_account",
+    "commit.silicon_allowed_accounts.silicon_account",
+    "commit.silicon_allowed_accounts.allowed_account",
+    "commit.silicon_allowed_accounts.added_by_account",
+    "commit.silicon_notification_settings.silicon_account",
+    "commit.todo_activity.actor_account",
+    "commit.todo_notes.author_account",
+    "commit.todo_notification_subscriptions.silicon_account",
+    "commit.todos.assigned_by_account",
+    "commit.todos.assigned_to_account",
+    "commit.todos.deleted_by_account",
+    "commit_private.identity_links.accounts_uuid"
+  ],
+  "json_columns": [
+    "commit.idempotency_records.response_body",
+    "commit.project_versions.actor",
+    "commit.project_versions.snapshot",
+    "commit.todo_activity.changes",
+    "commit.audit_events.change_summary"
+  ],
+  "preserved": [
+    "outbox_events.payload: immutable delivery snapshot, event identity and retries retain original body",
+    "email_jobs.body: archived notification prose",
+    "IAM projections and placeholder_uuid: prior authority and provenance",
+    "project resource UUIDs, public slugs, private todo/project keys and artifact URLs"
+  ]
+}

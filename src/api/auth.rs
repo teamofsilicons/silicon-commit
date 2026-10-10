@@ -115,9 +115,7 @@ fn credential(headers: &HeaderMap) -> Result<InboundCredential, AppError> {
     }
     Err(AppError::Authentication {
         code: "unsupported_authorization_scheme".into(),
-        message: format!(
-            "Authorization scheme `{scheme}` is not accepted. Use Bearer <Silicon Accounts access token for Commit> or Proof <sap_… proof>."
-        ),
+        message: "Authorization scheme is not accepted. Use Bearer <Silicon Accounts access token for Commit> or Proof <sap_… proof>.".to_owned(),
     })
 }
 

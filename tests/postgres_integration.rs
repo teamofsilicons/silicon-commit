@@ -2142,3 +2142,47 @@ async fn project_history_retains_only_the_latest_thousand_snapshots() -> anyhow:
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn shared_email_defaults_queue_completion_without_saved_preferences() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let world = World::new(&pool);
+    let actor = world.carbon("default-email").await?;
+    sqlx::query("UPDATE commit.accounts SET email='default-recipient@example.test' WHERE uuid=$1")
+        .bind(actor.uuid().as_str())
+        .execute(&pool)
+        .await?;
+    let service = projects(&pool, Arc::new(Directory::default()));
+    let created = service
+        .create_project(
+            &actor,
+            serde_json::from_value(serde_json::json!({"name":"Default email release"}))?,
+            unique_key("default-email-project")?,
+            "default-email-project",
+        )
+        .await?;
+    let id = ProjectId::from_uuid(response_uuid(&created, "id")?);
+    service
+        .complete_project(
+            &actor,
+            &ProjectLocator::Id(id),
+            ProjectCompletionCreate {
+                title: "Done".into(),
+                description: "Release complete".into(),
+            },
+            unique_key("default-email-completion")?,
+            "default-email-completion",
+        )
+        .await?;
+    let jobs:i64=sqlx::query_scalar("SELECT count(*) FROM commit.email_jobs WHERE account=$1 AND recipient='default-recipient@example.test' AND kind='project_completed' AND status='pending'").bind(actor.uuid().as_str()).fetch_one(&pool).await?;
+    assert_eq!(jobs, 1);
+    let saved: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM commit.email_preferences WHERE account=$1")
+            .bind(actor.uuid().as_str())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(saved, 0);
+    Ok(())
+}

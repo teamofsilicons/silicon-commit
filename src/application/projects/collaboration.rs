@@ -20,6 +20,33 @@ impl ProjectService {
         actor: &VerifiedActor,
         tasks: &[crate::domain::project::ProjectSeedTask],
     ) -> Result<Vec<Seed>, AppError> {
+        // Bound every directory lookup before starting network work, including nested seeds.
+        let mut scan = tasks.iter().map(|task| (task, 1)).collect::<Vec<_>>();
+        let mut count = 0;
+        let mut assignees = std::collections::HashSet::new();
+        while let Some((task, depth)) = scan.pop() {
+            count += 1;
+            if count > 1000 || depth > 16 {
+                return Err(field_validation(
+                    "tasks",
+                    "at most 1000 initial tasks and 16 levels are supported",
+                ));
+            }
+            if let Some(id) = &task.assigned_to {
+                assignees.insert(if id.prefixed_kind().is_some() {
+                    id.as_str().to_ascii_lowercase()
+                } else {
+                    id.as_str().to_owned()
+                });
+            }
+            if assignees.len() > 100 {
+                return Err(field_validation(
+                    "tasks",
+                    "at most 100 distinct initial assignees are supported",
+                ));
+            }
+            scan.extend(task.subtasks.iter().map(|child| (child, depth + 1)));
+        }
         let mut pending = tasks
             .iter()
             .rev()

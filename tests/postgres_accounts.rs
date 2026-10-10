@@ -660,11 +660,7 @@ async fn a_lookup_answered_from_the_cache_never_undoes_a_newer_event() -> anyhow
             "hash-rename",
         )
         .await?;
-    assert!(
-        renamed.outcome.starts_with("id is now"),
-        "{}",
-        renamed.outcome
-    );
+    assert!(renamed.outcome == "id changed", "{}", renamed.outcome);
 
     // Bea, its custodian now, assigns it work; the same cached lookup (Ada, the old id)
     // answers again and must not undo either event.

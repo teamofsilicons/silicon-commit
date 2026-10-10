@@ -129,10 +129,17 @@ pub fn private_write(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     let file_name = path
         .file_name()
         .map_or_else(|| "state".into(), |n| n.to_string_lossy());
-    let temporary = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
+    let temporary = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
     let result = (|| -> std::io::Result<()> {
         let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;

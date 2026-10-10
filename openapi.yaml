@@ -7,7 +7,7 @@ info:
     name: Proprietary
     identifier: LicenseRef-Proprietary
 servers:
-- url: https://commit.teamofsilicons.com/api/v1
+- url: https://backend.commit.teamofsilicons.com/api/v1
 security:
 - bearerAuth: []
 - proofAuth: []
@@ -155,6 +155,8 @@ paths:
         '403': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
   /webhook/:
+    servers:
+      - url: https://backend.commit.teamofsilicons.com
     post:
       tags: [Accounts]
       summary: Receive a Silicon Accounts account event

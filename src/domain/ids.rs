@@ -138,8 +138,8 @@ pub const MAX_ACCOUNT_UUID_BYTES: usize = 160;
 
 /// Permanent Silicon Accounts account identifier: the access token `sub`.
 ///
-/// Accounts uuids are short, case-sensitive strings such as `zQo`, not RFC 4122
-/// UUIDs: they are compared exactly and never lowercased. Rows created before
+/// Accounts issues canonical 128-bit UUIDs. Legacy short, case-sensitive keys
+/// remain readable during backfill; keys are never lowercased. Rows created before
 /// the move to Silicon Accounts belong to placeholders named
 /// `iam:<organization>:<principal>` until an operator links them.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, sqlx::Type)]

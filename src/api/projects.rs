@@ -47,7 +47,7 @@ pub(crate) async fn create(
     StrictJson(input): StrictJson<ProjectCreate>,
 ) -> Result<Response, AppError> {
     let actor = state
-        .authenticate(&headers, action::PROJECTS_CREATE, None)
+        .authenticate_sensitive(&headers, action::PROJECTS_CREATE, None)
         .await?;
     let request_id = required_request_id()?;
     let mutation = state
@@ -345,7 +345,7 @@ pub(crate) async fn claim_task(
 ) -> Result<Response, AppError> {
     let locator = parse_locator(&path.project_id)?;
     let actor = state
-        .authenticate(
+        .authenticate_sensitive(
             &headers,
             action::PROJECT_TASKS_CLAIM,
             Some(format!("{}/tasks/{}", path.project_id, path.task_id)),

@@ -55,6 +55,7 @@ const CACHE_LIMIT: usize = 10_000;
 
 /// A verified proof and when it was verified.
 type CachedProof = (Arc<ValidProof>, Instant);
+type CachedLookup = (Result<ResolvedAccount, ProviderError>, Instant);
 
 /// Silicon Accounts-backed [`IdentityProvider`].
 pub struct AccountsIdentity {
@@ -67,7 +68,7 @@ pub struct AccountsIdentity {
     keys: Mutex<KeyCache>,
     introspections: Mutex<HashMap<[u8; 32], (bool, Instant)>>,
     proofs: Mutex<HashMap<[u8; 32], CachedProof>>,
-    lookups: Mutex<HashMap<String, (ResolvedAccount, Instant)>>,
+    lookups: Mutex<HashMap<String, CachedLookup>>,
 }
 
 #[derive(Default)]
@@ -498,42 +499,79 @@ impl AccountsIdentity {
             grant,
             bearer,
         } = subject;
+        let retired: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM commit.accounts_uuid128_map WHERE old_uuid=$1)",
+        )
+        .bind(actor.uuid.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|_| ProviderError::Unavailable)?;
+        if retired {
+            return Err(ProviderError::Rejected {
+                code: "session_ended",
+                message: "This account identity was migrated. Sign in to Commit again.".to_owned(),
+            });
+        }
         let stored = account_store::load(&self.pool, &actor.uuid)
             .await
             .map_err(|_| ProviderError::Unavailable)?;
-        if let Some(stored) = &stored {
-            if stored.is_deleted() {
+        let lifecycle = account_store::lifecycle(&self.pool, &actor.uuid)
+            .await
+            .map_err(|_| ProviderError::Unavailable)?;
+        if stored
+            .as_ref()
+            .is_some_and(account_store::StoredAccount::is_deleted)
+            || lifecycle
+                .as_ref()
+                .is_some_and(|state| state.deleted_at.is_some())
+        {
+            return Err(ProviderError::Rejected {
+                code: "account_deleted",
+                message: "This Silicon Accounts account was deleted; it can no longer use Commit."
+                    .to_owned(),
+            });
+        }
+        let cutoff = lifecycle
+            .as_ref()
+            .and_then(|state| state.revoked_before)
+            .or_else(|| stored.as_ref().and_then(|row| row.revoked_before));
+        if let (Grant::Bearer { issued_at, .. }, Some(cutoff)) = (&grant, cutoff)
+            && self
+                .ended_by_cutoff(*issued_at, cutoff, bearer.as_ref())
+                .await?
+        {
+            return Err(ProviderError::Rejected {
+                code: "session_ended",
+                message: "This sign-in to Commit ended. Sign in to Commit again.".to_owned(),
+            });
+        }
+        let restoring_access = lifecycle.as_ref().and_then(|state| state.access_removed_at);
+        if let Some(removed) = restoring_access {
+            // Proofs issued by other apps cannot restore this account's grant to Commit.
+            let Some(token) = &bearer else {
                 return Err(ProviderError::Rejected {
-                    code: "account_deleted",
-                    message:
-                        "This Silicon Accounts account was deleted; it can no longer use Commit."
-                            .to_owned(),
+                    code: "app_access_removed", message: "Commit's access was removed. Sign in to Commit again before using app proofs.".to_owned(),
                 });
-            }
-            if let (Grant::Bearer { issued_at, .. }, Some(cutoff)) = (&grant, stored.revoked_before)
-                && self
-                    .ended_by_cutoff(*issued_at, cutoff, bearer.as_ref())
-                    .await?
+            };
+            if !self
+                .introspect_active(token.expose_secret(), Some(removed))
+                .await?
             {
                 return Err(ProviderError::Rejected {
                     code: "session_ended",
-                    message: format!(
-                        "This sign-in to Commit ended at {}: the account signed out, removed Commit's access, or its credentials changed. Sign in to Commit again.",
-                        cutoff
-                            .format(&time::format_description::well_known::Rfc3339)
-                            .unwrap_or_else(|_| cutoff.to_string())
-                    ),
+                    message: "This sign-in to Commit ended. Sign in to Commit again.".to_owned(),
                 });
             }
         }
 
-        let stale = stored.as_ref().is_none_or(|stored| {
-            stored.refreshed_at < OffsetDateTime::now_utc() - ACCOUNT_REFRESH_AFTER
+        let stale = restoring_access.is_some()
+            || stored.as_ref().is_none_or(|stored| {
+                stored.refreshed_at < OffsetDateTime::now_utc() - ACCOUNT_REFRESH_AFTER
                 // Known only from lookups (someone named the account before it used
                 // Commit): read its own view once, which alone carries its display name
                 // and the email it shared with Commit.
                 || (bearer.is_some() && stored.accounts_version == 0)
-        });
+            });
         let mut custodian = stored.as_ref().and_then(|stored| stored.custodian.clone());
         let mut current = actor.clone();
         if stale {
@@ -548,10 +586,21 @@ impl AccountsIdentity {
                     account_store::remember(&self.pool, &fresh)
                         .await
                         .map_err(|_| ProviderError::Unavailable)?;
-                    custodian.clone_from(&fresh.custodian);
-                    current = fresh.actor;
+                    // A webhook newer than a cached lookup wins in the store and here.
+                    let remembered = account_store::load(&self.pool, &actor.uuid)
+                        .await
+                        .map_err(|_| ProviderError::Unavailable)?
+                        .ok_or(ProviderError::Unavailable)?;
+                    custodian = remembered.custodian;
+                    current = remembered.actor;
                 }
                 Ok(_) => return Err(ProviderError::InvalidResponse),
+                Err(
+                    error @ (ProviderError::Rejected { .. }
+                    | ProviderError::NotFound
+                    | ProviderError::InvalidResponse),
+                ) => return Err(error),
+                Err(error) if restoring_access.is_some() => return Err(error),
                 Err(error) if stored.is_none() => {
                     // Remember what the verified credential says; a later request refreshes it.
                     tracing::warn!(
@@ -575,13 +624,33 @@ impl AccountsIdentity {
                     if let Some(stored) = &stored {
                         current = stored.actor.clone();
                     }
+                    // A stale relationship is not authority when Accounts cannot refresh it.
+                    custodian = None;
                 }
             }
         } else if let Some(stored) = &stored {
             current = stored.actor.clone();
         }
 
+        if let Some(removed) = restoring_access
+            && !account_store::restore_access(&self.pool, &actor.uuid, removed)
+                .await
+                .map_err(|_| ProviderError::Unavailable)?
+        {
+            return Err(ProviderError::Unavailable);
+        }
+
         let managed = if current.actor_type == ActorType::Carbon {
+            for uuid in account_store::stale_managed(&self.pool, &current.uuid)
+                .await
+                .map_err(|_| ProviderError::Unavailable)?
+            {
+                if let Ok(fresh) = self.lookup(LookupKey::Uuid(uuid)).await {
+                    account_store::remember(&self.pool, &fresh)
+                        .await
+                        .map_err(|_| ProviderError::Unavailable)?;
+                }
+            }
             account_store::managed_silicons(&self.pool, &current.uuid)
                 .await
                 .map_err(|_| ProviderError::Unavailable)?
@@ -649,10 +718,17 @@ impl AccountsIdentity {
                     return Ok(resolved);
                 }
                 Ok(_) => return Err(ProviderError::InvalidResponse),
+                Err(error) if matches!(error.status(), Some(401 | 403 | 404)) => {
+                    return Err(ProviderError::Rejected {
+                        code: "session_ended",
+                        message: "Silicon Accounts refused this sign-in. Sign in to Commit again."
+                            .to_owned(),
+                    });
+                }
                 Err(error) => {
                     tracing::debug!(
                         code = error.code(),
-                        "userinfo failed; falling back to an account lookup"
+                        "userinfo unavailable; trying an account lookup"
                     );
                 }
             }
@@ -665,31 +741,46 @@ impl AccountsIdentity {
         {
             let cache = self.lookups.lock().await;
             if let Some((account, at)) = cache.get(&cache_key)
-                && at.elapsed() < LOOKUP_TTL
+                && at.elapsed()
+                    < if account.is_ok() {
+                        LOOKUP_TTL
+                    } else {
+                        Duration::from_secs(10)
+                    }
             {
-                return Ok(account.clone());
+                return account.clone();
             }
         }
         let app = self
             .client
             .as_app(&self.app_id, self.app_secret.expose_secret());
-        let summary = match &key {
+        let summary = match match &key {
             LookupKey::Uuid(uuid) => app.lookup(uuid.as_str()).await,
             LookupKey::Id(id) => app.lookup_by_id(id).await,
-        }
-        .map_err(|error| lookup_error(&error))?;
+        } {
+            Ok(summary) => summary,
+            Err(error) => {
+                let error = lookup_error(&error);
+                let mut cache = self.lookups.lock().await;
+                prune(&mut cache, |(_, at)| at.elapsed() < LOOKUP_TTL);
+                if error == ProviderError::NotFound {
+                    cache.insert(cache_key, (Err(error.clone()), Instant::now()));
+                }
+                return Err(error);
+            }
+        };
         let account = resolved_from_summary(&summary)?;
         let mut cache = self.lookups.lock().await;
         prune(&mut cache, |(_, at)| at.elapsed() < LOOKUP_TTL);
         let now = Instant::now();
         cache.insert(
             LookupKey::Uuid(account.actor.uuid.clone()).cache_key(),
-            (account.clone(), now),
+            (Ok(account.clone()), now),
         );
         if !account.actor.id.as_str().is_empty() {
             cache.insert(
                 LookupKey::Id(account.actor.id.as_str().to_ascii_lowercase()).cache_key(),
-                (account.clone(), now),
+                (Ok(account.clone()), now),
             );
         }
         Ok(account)
@@ -711,9 +802,11 @@ impl LookupKey {
         // Silicon Accounts uuids are 3 to 12 characters of a-z, A-Z and 0-9; anything else
         // names no account, so there is nothing to ask Accounts.
         let value = id.as_str();
-        if !(3..=12).contains(&value.len())
-            || !value.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        {
+        let legacy = (3..=12).contains(&value.len())
+            && value.bytes().all(|byte| byte.is_ascii_alphanumeric());
+        let canonical = value.len() == 36
+            && uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value);
+        if !(legacy || canonical) {
             return Err(ProviderError::UnknownAccount {
                 id: value.to_owned(),
             });

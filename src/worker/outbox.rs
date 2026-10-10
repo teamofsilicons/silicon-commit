@@ -184,6 +184,7 @@ impl OutboxProcessor {
                 SELECT event.id
                 FROM commit.outbox_events AS event
                 WHERE event.status = 'pending'
+                  AND NOT EXISTS(SELECT 1 FROM commit.accounts a WHERE a.uuid=event.recipient_silicon_account AND a.status='unlinked')
                   AND event.available_at <= transaction_timestamp()
                   AND event.attempt_count < $4
                 ORDER BY event.available_at, event.created_at, event.id

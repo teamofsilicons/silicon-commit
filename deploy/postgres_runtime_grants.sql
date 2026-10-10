@@ -279,3 +279,9 @@ GRANT SELECT, UPDATE, DELETE ON commit.telemetry_events TO :"worker_role";
 
 GRANT EXECUTE ON FUNCTION commit.lock_notification_access(uuid) TO :"worker_role";
 COMMIT;
+
+GRANT SELECT, INSERT, UPDATE ON commit.account_lifecycle TO :"api_role";
+GRANT SELECT ON commit.effective_email_preferences TO :"api_role", :"worker_role";
+GRANT EXECUTE ON FUNCTION commit.current_custodian(text) TO :"api_role", :"worker_role";
+
+GRANT SELECT ON commit.accounts_uuid128_map TO :"api_role", :"worker_role";

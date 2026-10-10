@@ -55,7 +55,7 @@ struct Account {
 impl Account {
     fn carbon(label: &str) -> Self {
         Self {
-            uuid: new_uuid(),
+            uuid: uuid::Uuid::new_v4().to_string(),
             id: format!("c:{label}-{}", new_uuid()[..6].to_ascii_lowercase()),
             kind: "carbon",
             custodian: None,
@@ -65,7 +65,7 @@ impl Account {
 
     fn silicon(label: &str, custodian: &Self) -> Self {
         Self {
-            uuid: new_uuid(),
+            uuid: uuid::Uuid::new_v4().to_string(),
             id: format!("si:{label}-{}", new_uuid()[..6].to_ascii_lowercase()),
             kind: "silicon",
             custodian: Some((custodian.uuid.clone(), custodian.id.clone())),
@@ -1315,6 +1315,7 @@ async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() ->
         c["fid"] = json!("fam-signed-in-again");
     });
     accounts.introspection(&again, true).await;
+    accounts.userinfo(&again, &ada).await;
     let accepted = call(
         &app,
         Method::GET,
@@ -1378,6 +1379,7 @@ async fn changes_that_widen_access_never_rest_on_a_cached_answer() -> anyhow::Re
     let app = router(&pool, &accounts, "commit.projects.update=interface", true)?;
     let token = accounts.token(&ada);
     accounts.userinfo(&token, &ada).await;
+    accounts.introspection(&token, true).await;
     let created = call(
         &app,
         Method::POST,
@@ -1773,5 +1775,240 @@ async fn todo_edits_cannot_restore_or_widen_private_project_membership() -> anyh
         "{}",
         unchanged.body
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifecycle_before_first_use_survives_and_proofs_cannot_restore_access() -> anyhow::Result<()>
+{
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    for (kind, code) in [
+        ("membership.signed_out", "session_ended"),
+        ("membership.access_removed", "session_ended"),
+        ("account.deleted", "account_deleted"),
+    ] {
+        let account = Account::carbon("unseen");
+        let accounts = Accounts::start(&[&account]).await;
+        let app = router(&pool, &accounts, "commit.me.read=interface", true)?;
+        let token = accounts.token(&account);
+        accounts.userinfo(&token, &account).await;
+        let delivered = webhook(
+            &app,
+            &event(kind, json!({"uuid":account.uuid})),
+            now(),
+            WEBHOOK_SECRET,
+        )
+        .await?;
+        ensure!(delivered.status == StatusCode::OK, "{}", delivered.body);
+        // Reconstruct the adapter as after a restart: this state must be durable.
+        let app = router(&pool, &accounts, "commit.me.read=interface", true)?;
+        let refused = call(
+            &app,
+            Method::GET,
+            "/api/v1/me",
+            Some(&bearer(&token)),
+            None,
+            &[],
+        )
+        .await?;
+        ensure!(
+            refused.status == StatusCode::UNAUTHORIZED && refused.code() == code,
+            "{kind}: {}",
+            refused.body
+        );
+        if kind == "membership.access_removed" {
+            accounts
+                .proof(
+                    "sap_after_removal",
+                    valid_proof("interface", "commit", &account, &["commit.me.read"]),
+                    1,
+                )
+                .await;
+            let refused = call(
+                &app,
+                Method::GET,
+                "/api/v1/me",
+                Some("Proof sap_after_removal"),
+                None,
+                &[],
+            )
+            .await?;
+            ensure!(refused.code() == "app_access_removed", "{}", refused.body);
+            let fresh = accounts.token_with(&account, |claims| claims["iat"] = json!(now()));
+            accounts.userinfo(&fresh, &account).await;
+            accounts.introspection(&fresh, true).await;
+            let accepted = call(
+                &app,
+                Method::GET,
+                "/api/v1/me",
+                Some(&bearer(&fresh)),
+                None,
+                &[],
+            )
+            .await?;
+            ensure!(accepted.status == StatusCode::OK, "{}", accepted.body);
+            let accepted = call(
+                &app,
+                Method::GET,
+                "/api/v1/me",
+                Some("Proof sap_after_removal"),
+                None,
+                &[],
+            )
+            .await?;
+            ensure!(accepted.status == StatusCode::OK, "{}", accepted.body);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_definite_userinfo_refusal_never_falls_back_to_directory_identity() -> anyhow::Result<()>
+{
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let account = Account::carbon("refused-view");
+    let accounts = Accounts::start(&[&account]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    Mock::given(method("GET"))
+        .and(path("/v1/userinfo"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"error":{"code":"invalid_token","message":"Sign-in ended"}})),
+        )
+        .mount(&accounts.server)
+        .await;
+    let refused = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&accounts.token(&account))),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        refused.status == StatusCode::UNAUTHORIZED && refused.code() == "session_ended",
+        "{}",
+        refused.body
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_custody_is_refreshed_and_sql_never_grants_expired_relationships()
+-> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let old = Account::carbon("stale-old");
+    let new = Account::carbon("stale-new");
+    let mut silicon = Account::silicon("stale-silicon", &old);
+    let accounts = Accounts::start(&[&old, &new, &silicon]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    for account in [&old, &new, &silicon] {
+        let token = accounts.token(account);
+        accounts.userinfo(&token, account).await;
+        ensure!(
+            call(
+                &app,
+                Method::GET,
+                "/api/v1/me",
+                Some(&bearer(&token)),
+                None,
+                &[]
+            )
+            .await?
+            .status
+                == StatusCode::OK
+        );
+    }
+    sqlx::query("UPDATE commit.accounts SET refreshed_at=clock_timestamp()-interval '11 minutes' WHERE uuid=$1").bind(&silicon.uuid).execute(&pool).await?;
+    let stale: bool = sqlx::query_scalar("SELECT commit.in_circle($1,$2)")
+        .bind(&old.uuid)
+        .bind(&silicon.uuid)
+        .fetch_one(&pool)
+        .await?;
+    ensure!(!stale, "cached SQL custody must expire before refresh");
+    silicon.custodian = Some((new.uuid.clone(), new.id.clone()));
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/accounts/{}", silicon.uuid)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(silicon.summary()))
+        .with_priority(1)
+        .mount(&accounts.server)
+        .await;
+    let old_view = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&accounts.token(&old))),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        old_view.status == StatusCode::OK && old_view.body["silicons"] == json!([]),
+        "{}",
+        old_view.body
+    );
+    let new_view = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&accounts.token(&new))),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        new_view.body["silicons"][0]["uuid"] == silicon.uuid,
+        "{}",
+        new_view.body
+    );
+    let deleted = webhook(
+        &app,
+        &event("account.deleted", json!({"uuid":silicon.uuid})),
+        now(),
+        WEBHOOK_SECRET,
+    )
+    .await?;
+    ensure!(deleted.status == StatusCode::OK, "{}", deleted.body);
+    let custodian: Option<String> =
+        sqlx::query_scalar("SELECT custodian_uuid FROM commit.accounts WHERE uuid=$1")
+            .bind(&silicon.uuid)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(custodian.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn retired_uuid_tokens_cannot_recreate_the_old_account() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("retired-ada");
+    let accounts = Accounts::start(&[&ada]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    sqlx::query("INSERT INTO commit.accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES($1,$2,'carbon','test')")
+        .bind(&ada.uuid).bind(uuid::Uuid::new_v4().to_string()).execute(&pool).await?;
+    let result = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&accounts.token(&ada))),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(result.status == StatusCode::UNAUTHORIZED, "{}", result.body);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM commit.accounts WHERE uuid=$1")
+        .bind(&ada.uuid)
+        .fetch_one(&pool)
+        .await?;
+    ensure!(count == 0);
     Ok(())
 }

@@ -151,7 +151,9 @@ fn accounts_client() -> anyhow::Result<Option<(AccountsClient, String, secrecy::
         .ok()
         .filter(|value| !value.is_empty())
     else {
-        return Ok(None);
+        anyhow::bail!(
+            "COMMIT_APP_SECRET is required to verify identity mappings; use --offline explicitly only for a reviewed offline mapping"
+        );
     };
     let url = std::env::var("ACCOUNTS_API_URL")
         .or_else(|_| std::env::var("ACCOUNTS_URL"))

@@ -126,7 +126,7 @@ where
     sqlx::query_scalar::<_, String>(
         r"
         SELECT uuid FROM commit.accounts
-         WHERE custodian_uuid = $1 AND kind = 'silicon' AND status NOT IN ('deleted', 'unlinked')
+         WHERE custodian_uuid = $1 AND kind = 'silicon' AND status = 'active' AND refreshed_at >= transaction_timestamp() - interval '10 minutes'
         ",
     )
     .bind(custodian.as_str())
@@ -502,18 +502,16 @@ pub(crate) async fn revoke_before(
     uuid: &str,
     at: OffsetDateTime,
 ) -> Result<bool, AppError> {
-    let updated = sqlx::query(
-        r"
-        UPDATE commit.accounts
-           SET revoked_before = greatest(coalesce(revoked_before, $2), $2)
-         WHERE uuid = $1
-        ",
+    sqlx::query("INSERT INTO commit.account_lifecycle(uuid,revoked_before) VALUES($1,$2) ON CONFLICT(uuid) DO UPDATE SET revoked_before=greatest(commit.account_lifecycle.revoked_before,EXCLUDED.revoked_before)")
+        .bind(uuid).bind(at).execute(&mut *connection).await?;
+    sqlx::query(
+        "UPDATE commit.accounts SET revoked_before=greatest(revoked_before,$2) WHERE uuid=$1",
     )
     .bind(uuid)
     .bind(at)
     .execute(connection)
     .await?;
-    Ok(updated.rows_affected() == 1)
+    Ok(true)
 }
 
 /// `account.deleted`: see `commit.forget_account` for exactly what is removed and what is kept.
@@ -535,4 +533,42 @@ pub(crate) async fn forget(
             .fetch_one(connection)
             .await?,
     )
+}
+
+/// Durable pre-first-use lifecycle state; it must not depend on a profile row existing.
+#[derive(sqlx::FromRow)]
+pub(crate) struct Lifecycle {
+    pub(crate) revoked_before: Option<OffsetDateTime>,
+    pub(crate) access_removed_at: Option<OffsetDateTime>,
+    pub(crate) deleted_at: Option<OffsetDateTime>,
+}
+pub(crate) async fn lifecycle(
+    pool: &sqlx::PgPool,
+    uuid: &AccountUuid,
+) -> Result<Option<Lifecycle>, AppError> {
+    Ok(sqlx::query_as("SELECT revoked_before,access_removed_at,deleted_at FROM commit.account_lifecycle WHERE uuid=$1").bind(uuid.as_str()).fetch_optional(pool).await?)
+}
+pub(crate) async fn block_access(
+    connection: &mut PgConnection,
+    uuid: &str,
+    at: OffsetDateTime,
+    deleted: bool,
+) -> Result<(), AppError> {
+    revoke_before(connection, uuid, at).await?;
+    sqlx::query("UPDATE commit.account_lifecycle SET access_removed_at=greatest(access_removed_at,$2), deleted_at=CASE WHEN $3 THEN greatest(deleted_at,$2) ELSE deleted_at END WHERE uuid=$1").bind(uuid).bind(at).bind(deleted).execute(connection).await?;
+    Ok(())
+}
+pub(crate) async fn restore_access(
+    pool: &sqlx::PgPool,
+    uuid: &AccountUuid,
+    observed_cutoff: OffsetDateTime,
+) -> Result<bool, AppError> {
+    Ok(sqlx::query("UPDATE commit.account_lifecycle SET access_removed_at=NULL WHERE uuid=$1 AND access_removed_at=$2 AND deleted_at IS NULL").bind(uuid.as_str()).bind(observed_cutoff).execute(pool).await?.rows_affected()==1)
+}
+pub(crate) async fn stale_managed(
+    pool: &sqlx::PgPool,
+    custodian: &AccountUuid,
+) -> Result<Vec<AccountUuid>, AppError> {
+    sqlx::query_scalar::<_,String>("SELECT uuid FROM commit.accounts WHERE custodian_uuid=$1 AND kind='silicon' AND status='active' AND refreshed_at < transaction_timestamp()-interval '10 minutes' ORDER BY refreshed_at LIMIT 100")
+        .bind(custodian.as_str()).fetch_all(pool).await?.into_iter().map(account_uuid).collect()
 }
