@@ -70,14 +70,19 @@ Recovery requires either the upgraded backend or restoration of the database
 backup before starting an older image. Migration 0030 also repairs existing orphaned
 task descendants and retains an audit record of those repairs.
 
-The deployment secret contains the confirmed IAM application and webhook secrets,
-the IAM backend URL, and generated database passwords. Do not place its values in
+The deployment secret contains Commit's Silicon Accounts app secret
+(`COMMIT_APP_SECRET`), the account webhook secret (`COMMIT_ACCOUNTS_WEBHOOK_SECRET`),
+optionally `COMMIT_PROOF_ISSUERS`, `ACCOUNTS_URL` and `ACCOUNTS_API_URL`, and generated
+database passwords. Bootstrap refuses to deploy without the two Accounts secrets and
+never copies retired IAM, Honeycomb or testing-environment variables. Do not place its values in
 CloudFormation, user data, SSM command arguments, or Git. Caddy certificate state
 persists in Docker volumes on the EC2 disk. Keep that disk when maintaining the
 host; an instance replacement obtains a new certificate after DNS is updated.
 
-Verify `/healthz`, `/readyz`, `/api/v1/version`, IAM login/refresh/revocation,
-worker logs, database grants, and DNS after every rollout. An image rollback does
+Verify `/healthz`, `/readyz`, `/api/v1/version`, `/api/v1/accounts`, a signed-in
+`/api/v1/me`, an account webhook test delivery, worker logs, database grants, and DNS
+after every rollout. The first Silicon Accounts rollout follows
+[the cutover runbook](../../docs/migration/cutover.md). An image rollback does
 not undo database migrations; review schema compatibility first.
 
 ## Historical integration gaps (September 8)
@@ -106,38 +111,8 @@ are not treated as Commit management capabilities.
 The following release adds current IAM directory usage and automatic sandbox discovery. See [the September 13 release verification](verification-2026-09-13.md) for the deployed behavior, checks, and remaining verification boundaries. The September 8 report remains historical evidence.
 
 
-## Honeycomb lifecycle deployment
+## Testing environments (retired)
 
-Provision the participant token and registry entry with the deployment operator's
-credentials. The helper reuses existing credentials and rejects conflicting
-identities, destinations or tokens instead of overwriting them:
-
-```sh
-python3 deploy/aws/testing_credentials.py --profile PROFILE \
-  --honeycomb-region us-east-2 \
-  --honeycomb-secret silicon-honeycomb/production/runtime \
-  --commit-region us-east-1 --commit-secret silicon-commit/production \
-  --commit-public-base-url https://backend.commit.teamofsilicons.com
-```
-
-The current production deployment uses this separate stage with the deployment
-operator's credentials. Its Commit runtime secret contains
-`COMMIT_HONEYCOMB_URL=https://backend.honeycomb.teamofsilicons.com` and the paired
-service token; `COMMIT_HONEYCOMB_SECRET_ID` stays unset. The runtime instance does
-not need write access to Honeycomb's deployment secret. After provisioning,
-reload the Commit API and worker configuration, and add only the Commit token
-and participant entry to Honeycomb's live backend environment. Preserve its
-existing participants, environment, image and container settings during that
-reload; do not activate unrelated staged configuration.
-
-Bootstrap can alternatively perform provisioning when `testing_credentials.py` is
-uploaded next to it and `COMMIT_HONEYCOMB_SECRET_ID`, optional
-`COMMIT_HONEYCOMB_REGION`, and `COMMIT_HONEYCOMB_URL` are configured. That mode
-requires the bootstrap execution role to read and write both deployment secrets.
-The current runtime instance is intentionally not configured for that mode.
-
-API and worker must share the stable sandbox encryption key. Bootstrap passes the
-worker `COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY`, preserving existing ciphertext
-compatibility without passing IAM application authentication to the worker.
-See [the participant contract](../../docs/HONEYCOMB.md). These steps configure
-future deployment; local tests do not establish live cross-service readiness.
+Commit no longer takes part in shared testing environments: the participant token,
+registry entry, `testing_credentials.py` helper and sandbox encryption key are gone.
+Former sandbox data stays in the database, unreachable by the runtime roles.

@@ -31,7 +31,6 @@ jobs:
           --health-retries 10
     env:
       COMMIT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/silicon_commit_test
-      COMMIT_IAM_APP_SECRET: local-test-only-encryption-key-not-an-iam-credential
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -125,7 +124,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python3 deploy/aws/test_testing_credentials.py
       - run: python3 deploy/aws/test_bootstrap.py
       - run: python3 scripts/test_linux_abi.py
       - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py scripts/check_linux_abi.py scripts/test_linux_abi.py
