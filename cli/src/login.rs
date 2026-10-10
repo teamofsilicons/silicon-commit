@@ -645,7 +645,14 @@ async fn remember_account(mut current: StoredSession, me: &Value) -> StoredSessi
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| current.account.id.clone());
     let name = text("display_name").unwrap_or_else(|| current.account.display_name.clone());
-    let custodian = custodian.or_else(|| current.account.custodian.clone());
+    // Keep a known custodian id when the API names the same custodian without one.
+    let custodian = match (custodian, &current.account.custodian) {
+        (Some(new), Some(known)) if new.uuid == known.uuid && new.id.is_empty() => {
+            Some(known.clone())
+        }
+        (Some(new), _) => Some(new),
+        (None, known) => known.clone(),
+    };
     if id == current.account.id
         && name == current.account.display_name
         && custodian == current.account.custodian

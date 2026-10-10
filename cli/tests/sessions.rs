@@ -575,3 +575,40 @@ async fn an_explicit_token_is_used_as_is_and_never_saved() {
     assert_eq!(rejected["reason"], "token_malformed");
     assert!(!home.state().exists());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_known_custodian_id_survives_an_answer_without_it() {
+    let home = Home::new();
+    let accounts = MockServer::start().await;
+    let api = MockServer::start().await;
+    let mut saved = session(
+        &accounts.uri(),
+        &api.uri(),
+        "eyJ.silicon",
+        "sar_silicon",
+        now() + 1500,
+    );
+    saved["account"] = json!({"uuid":"C66","id":"si:scout","kind":"silicon","custodian":{"uuid":"0Nn","id":"c:ada"}});
+    home.write_session(None, &saved);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/me"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"uuid":"C66","id":"si:scout","kind":"silicon",
+            "display_name":"Scout","custodian":{"type":"carbon","id":"","uuid":"0Nn"}})),
+        )
+        .expect(1)
+        .mount(&api)
+        .await;
+    let status = json_output(
+        home.command()
+            .args(["login", "status", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(status["custodian"], json!({"uuid":"0Nn","id":"c:ada"}));
+    assert_eq!(
+        home.read_session(None)["account"]["custodian"]["id"],
+        "c:ada"
+    );
+}

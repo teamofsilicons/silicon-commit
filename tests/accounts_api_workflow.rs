@@ -1146,3 +1146,47 @@ async fn every_route_family_applies_the_circle_and_the_custodian_rule() -> anyho
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn me_names_a_custodian_that_never_used_commit() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("unstored-ada");
+    let scout = Account::silicon("unstored-scout", &ada);
+    let accounts = Accounts::start(&[&ada, &scout]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let token = accounts.token(&scout);
+    accounts.userinfo(&token, &scout).await;
+    // Only the Silicon has used Commit: its custodian is looked up, then remembered.
+    for _ in 0..2 {
+        let me = call(
+            &app,
+            Method::GET,
+            "/api/v1/me",
+            Some(&bearer(&token)),
+            None,
+            &[],
+        )
+        .await?;
+        ensure!(me.status == StatusCode::OK, "{}", me.body);
+        ensure!(
+            me.body["custodian"] == json!({"type": "carbon", "id": ada.id, "uuid": ada.uuid}),
+            "{}",
+            me.body
+        );
+    }
+    let lookups = accounts
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == format!("/v1/accounts/{}", ada.uuid))
+        .count();
+    ensure!(
+        lookups == 1,
+        "the custodian is looked up once, then read from storage ({lookups})"
+    );
+    Ok(())
+}

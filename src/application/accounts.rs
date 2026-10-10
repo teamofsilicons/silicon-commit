@@ -223,16 +223,10 @@ impl AccountService {
     pub async fn me(&self, actor: &VerifiedActor, app_id: &str) -> Result<MeView, AppError> {
         let stored = store::load(&self.pool, actor.uuid()).await?;
         let custodian = match &actor.custodian {
-            Some(uuid) => store::load(&self.pool, uuid)
-                .await?
-                .map(|custodian| custodian.actor.public_ref())
-                .or_else(|| {
-                    Some(ActorRef::new(
-                        ActorType::Carbon,
-                        ActorId::from_persisted(String::new()),
-                        uuid.clone(),
-                    ))
-                }),
+            Some(uuid) => match store::load(&self.pool, uuid).await? {
+                Some(custodian) => Some(custodian.actor.public_ref()),
+                None => Some(self.unstored_custodian(uuid).await?),
+            },
             None => None,
         };
         let mut silicons = Vec::with_capacity(actor.managed_silicons.len());
@@ -260,6 +254,31 @@ impl AccountService {
             silicons,
             via_app: actor.via_app().map(str::to_owned),
         })
+    }
+
+    /// A custodian that never used Commit has no stored row: look it up (cached) and
+    /// remember it, so `/me` names it. If Silicon Accounts cannot answer, the id stays
+    /// empty rather than failing the request.
+    async fn unstored_custodian(&self, uuid: &AccountUuid) -> Result<ActorRef, AppError> {
+        let unnamed = ActorRef::new(
+            ActorType::Carbon,
+            ActorId::from_persisted(String::new()),
+            uuid.clone(),
+        );
+        let Ok(selector) = ActorId::new(uuid.as_str()) else {
+            return Ok(unnamed);
+        };
+        match self
+            .identity
+            .resolve_account(&selector, Some(ActorType::Carbon))
+            .await
+        {
+            Ok(resolved) if resolved.actor.uuid == *uuid => {
+                store::remember(&self.pool, &resolved).await?;
+                Ok(resolved.actor.public_ref())
+            }
+            Ok(_) | Err(_) => Ok(unnamed),
+        }
     }
 
     /// Resolves the Silicon a caller names and checks the caller may manage it
