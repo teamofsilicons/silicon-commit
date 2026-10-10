@@ -1249,3 +1249,121 @@ async fn an_account_named_before_it_used_commit_reads_its_own_view_at_sign_in() 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() -> anyhow::Result<()>
+{
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("second-ada");
+    let accounts = Accounts::start(&[&ada]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let first = accounts.token(&ada);
+    accounts.userinfo(&first, &ada).await;
+    let me = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&first)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(me.status == StatusCode::OK, "{}", me.body);
+
+    // Ada removed Commit's access half a second into second T.
+    let second = now() - 3;
+    let base = OffsetDateTime::from_unix_timestamp(second)?;
+    let occurred = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.500Z",
+        base.year(),
+        u8::from(base.month()),
+        base.day(),
+        base.hour(),
+        base.minute(),
+        base.second()
+    );
+    let removal = json!({
+        "event_id": format!("evt_{}", new_uuid()), "type": "membership.access_removed",
+        "app_id": "commit", "occurred_at": occurred,
+        "data": {"uuid": ada.uuid, "membership_id": format!("commit:{}", ada.uuid)},
+    });
+    let delivered = webhook(&app, &removal, now(), WEBHOOK_SECRET).await?;
+    ensure!(delivered.status == StatusCode::OK, "{}", delivered.body);
+
+    // `iat` cannot tell which side of T.5 a token from second T is on; Silicon Accounts can.
+    let earlier = accounts.token_with(&ada, |c| c["iat"] = json!(second));
+    accounts.introspection(&earlier, false).await;
+    let refused = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&earlier)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        refused.status == StatusCode::UNAUTHORIZED && refused.code() == "session_ended",
+        "a token from before the removal, in the same second: {} {}",
+        refused.status,
+        refused.body
+    );
+    let again = accounts.token_with(&ada, |c| {
+        c["iat"] = json!(second);
+        c["fid"] = json!("fam-signed-in-again");
+    });
+    accounts.introspection(&again, true).await;
+    let accepted = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&again)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        accepted.status == StatusCode::OK,
+        "a sign-in right after the removal, in the same second: {} {}",
+        accepted.status,
+        accepted.body
+    );
+    // The seconds around it need no question.
+    let before = accounts.token_with(&ada, |c| c["iat"] = json!(second - 1));
+    let refused = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&before)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(refused.code() == "session_ended", "{}", refused.body);
+    let after = accounts.token_with(&ada, |c| c["iat"] = json!(second + 1));
+    let accepted = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&after)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(accepted.status == StatusCode::OK, "{}", accepted.body);
+    let introspections = accounts
+        .server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == "/v1/oauth/introspect")
+        .count();
+    ensure!(
+        introspections == 2,
+        "only the two same-second tokens are introspected ({introspections})"
+    );
+    Ok(())
+}

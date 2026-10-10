@@ -194,12 +194,19 @@ impl AccountsIdentity {
         }
     }
 
-    async fn introspect_active(&self, token: &str) -> Result<bool, ProviderError> {
+    /// Asks Silicon Accounts whether an access token is still active (cached briefly). With
+    /// `fresh_after`, a cached answer older than that instant is not trusted.
+    async fn introspect_active(
+        &self,
+        token: &str,
+        fresh_after: Option<OffsetDateTime>,
+    ) -> Result<bool, ProviderError> {
         let key = digest(token);
         {
             let cache = self.introspections.lock().await;
             if let Some((active, at)) = cache.get(&key)
                 && at.elapsed() < ONLINE_CHECK_TTL
+                && fresh_after.is_none_or(|after| OffsetDateTime::now_utc() - at.elapsed() > after)
             {
                 return Ok(*active);
             }
@@ -390,7 +397,7 @@ impl AccountsIdentity {
             code: "token_missing_claim",
             message: "The access token names neither the account kind nor a c:/si: id.".to_owned(),
         })?;
-        if sensitive && !self.introspect_active(token).await? {
+        if sensitive && !self.introspect_active(token, None).await? {
             return Err(ProviderError::Rejected {
                 code: "token_revoked",
                 message: "Silicon Accounts says this access token is no longer active: the sign-in was ended or Commit's access was removed. Sign in to Commit again.".to_owned(),
@@ -481,7 +488,9 @@ impl AccountsIdentity {
                 });
             }
             if let (Grant::Bearer { issued_at, .. }, Some(cutoff)) = (&grant, stored.revoked_before)
-                && issued_at.is_none_or(|issued_at| issued_at < cutoff.unix_timestamp())
+                && self
+                    .ended_by_cutoff(*issued_at, cutoff, bearer.as_ref())
+                    .await?
             {
                 return Err(ProviderError::Rejected {
                     code: "session_ended",
@@ -564,6 +573,29 @@ impl AccountsIdentity {
         Ok(VerifiedActor::new(current, grant)
             .with_custodian(custodian)
             .with_managed_silicons(managed))
+    }
+
+    /// Whether a bearer token predates the account's revocation cutoff (a sign-out other
+    /// than Commit's own, removed access). `iat` has whole seconds, so a token from the
+    /// cutoff's own second may have been issued just before it or just after it (a new
+    /// sign-in): Silicon Accounts, which ended the earlier sign-ins, decides.
+    async fn ended_by_cutoff(
+        &self,
+        issued_at: Option<i64>,
+        cutoff: OffsetDateTime,
+        bearer: Option<&SecretString>,
+    ) -> Result<bool, ProviderError> {
+        let cutoff_second = cutoff.unix_timestamp();
+        match (issued_at, bearer) {
+            (Some(issued_at), _) if issued_at > cutoff_second => Ok(false),
+            (Some(issued_at), _) if issued_at == cutoff_second && cutoff.nanosecond() == 0 => {
+                Ok(false)
+            }
+            (Some(issued_at), Some(token)) if issued_at == cutoff_second => Ok(!self
+                .introspect_active(token.expose_secret(), Some(cutoff))
+                .await?),
+            _ => Ok(true),
+        }
     }
 
     /// Fresh account details: the caller's own view through `userinfo` (which also
