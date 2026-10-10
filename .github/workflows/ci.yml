@@ -126,4 +126,8 @@ jobs:
           python-version: '3.12'
       - run: python3 deploy/aws/test_bootstrap.py
       - run: python3 scripts/test_linux_abi.py
-      - run: python3 -m py_compile deploy/aws/bootstrap.py scripts/package-release.py scripts/check_linux_abi.py scripts/test_linux_abi.py
+      - run: python3 scripts/test_package_apps.py
+      - run: >-
+          python3 -m py_compile deploy/aws/bootstrap.py deploy/aws/deploy_docs.py
+          scripts/package_apps.py scripts/check_linux_abi.py scripts/test_linux_abi.py scripts/test_package_apps.py
+      - run: for script in scripts/package-apps.sh scripts/build-release-macos.sh docs/install.sh; do bash -n "$script"; done
