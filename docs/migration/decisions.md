@@ -407,3 +407,7 @@ filters by `c:`/`si:` id use the stored current id. Accepted: refreshing every d
 
 **A-64 Commit issues no proofs.** The issuer half of the proof scenario does not apply (A-15 stands: no Ting, no
 other outgoing app calls); the receiver half runs against the stack's `interface` app.
+
+## UUID128 cutover contract — 10 October 2026
+
+This supersedes A-19's historical "3 to 12 alphanumerics" account-UUID contract. Accounts now issues actual 128-bit (16-byte) UUIDv4 values, represented as canonical lowercase 36-character hyphenated strings. Public `c:`/`si:` handles remain mutable lookup names. Commit accepts canonical UUIDs and temporarily parses legacy short identifiers for compatibility, but its persisted cutover ledger rejects retired subjects before authentication can recreate them. The checked shared CSV backfill rekeys all linked identity references while preserving Commit-private resource keys and immutable delivery history; dry-run, apply, unchanged replay and old-token401/fresh-UUID200 checks passed. See `uuid128.md` and `progress.md` for the complete contract and evidence.
