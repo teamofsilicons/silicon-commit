@@ -298,8 +298,9 @@ impl Client {
         self.get(&["me"], &[]).await
     }
 
-    /// `GET /api/v1/silicons/{silicon}/allowed-accounts`: the accounts outside a Silicon's
-    /// circle it accepts todos and project invitations from (the Silicon or its custodian).
+    /// `GET /api/v1/silicons/{silicon}/allowed-accounts`: the accounts a Silicon accepts todos
+    /// and project invitations from besides its custodian and the custodian's other Silicons
+    /// (read by the Silicon or its custodian).
     pub async fn silicon_allowlist(&self, silicon: &str) -> Result<Value, Error> {
         self.get(&["silicons", silicon, "allowed-accounts"], &[])
             .await

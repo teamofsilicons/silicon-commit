@@ -180,7 +180,7 @@ impl std::fmt::Debug for StoredSession {
 pub enum Loaded {
     Missing,
     Session(Box<StoredSession>),
-    /// A file from the previous sign-in system (organizations); it cannot be used.
+    /// A file from the previous sign-in system; it cannot be used.
     Legacy,
     /// Not JSON, or not a format this version knows.
     Unreadable,
