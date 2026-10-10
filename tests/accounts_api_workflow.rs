@@ -1486,3 +1486,147 @@ async fn changes_that_widen_access_never_rest_on_a_cached_answer() -> anyhow::Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_custodian_new_to_commit_can_use_it_right_after_a_transfer() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("xfer-ada");
+    let scout = Account::silicon("xfer-scout", &ada);
+    let bea = Account::carbon("xfer-bea");
+    let accounts = Accounts::start(&[&ada, &scout, &bea]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let scout_token = accounts.token(&scout);
+    accounts.userinfo(&scout_token, &scout).await;
+    let me = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&scout_token)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(me.status == StatusCode::OK, "{}", me.body);
+
+    // Ada hands the Silicon to Bea, who never used Commit: the event stores a row for Bea.
+    let moved = webhook(
+        &app,
+        &event(
+            "silicon.custodian_changed",
+            json!({"uuid": scout.uuid, "membership_id": format!("commit:{}", scout.uuid),
+                   "from": {"uuid": ada.uuid, "id": ada.id}, "to": {"uuid": bea.uuid, "id": bea.id}}),
+        ),
+        now(),
+        WEBHOOK_SECRET,
+    )
+    .await?;
+    ensure!(
+        moved.status == StatusCode::OK && moved.body["applied"] == true,
+        "{}",
+        moved.body
+    );
+
+    // Bea's first requests read that row: they must work, and keep working.
+    let bea_token = accounts.token(&bea);
+    accounts.userinfo(&bea_token, &bea).await;
+    for attempt in 1..=2 {
+        let me = call(
+            &app,
+            Method::GET,
+            "/api/v1/me",
+            Some(&bearer(&bea_token)),
+            None,
+            &[],
+        )
+        .await?;
+        ensure!(
+            me.status == StatusCode::OK,
+            "Bea's request {attempt}: {} {}",
+            me.status,
+            me.body
+        );
+        ensure!(
+            me.body["silicons"] == json!([{"type": "silicon", "id": scout.id, "uuid": scout.uuid}]),
+            "{}",
+            me.body
+        );
+    }
+    let me = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&scout_token)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(
+        me.status == StatusCode::OK && me.body["custodian"]["uuid"] == json!(bea.uuid),
+        "{} {}",
+        me.status,
+        me.body
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_account_first_seen_while_silicon_accounts_fails_recovers() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("outage-ada");
+    // Silicon Accounts cannot answer anything about Ada for two attempts, then recovers.
+    let accounts = Accounts::start(&[]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let token = accounts.token(&ada);
+    for (route, priority) in [
+        ("/v1/userinfo".to_owned(), 1),
+        (format!("/v1/accounts/{}", ada.uuid), 1),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            // 500 rather than 503: the client retries 502 to 504 once by itself.
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": {"code": "server_error", "message": "try again"}
+            })))
+            .up_to_n_times(2)
+            .with_priority(priority)
+            .mount(&accounts.server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/userinfo"))
+        .and(header("authorization", format!("Bearer {token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ada.app_view()))
+        .with_priority(2)
+        .mount(&accounts.server)
+        .await;
+    for attempt in 1..=3 {
+        let me = call(
+            &app,
+            Method::GET,
+            "/api/v1/me",
+            Some(&bearer(&token)),
+            None,
+            &[],
+        )
+        .await?;
+        ensure!(
+            me.status == StatusCode::OK,
+            "request {attempt}: {} {}",
+            me.status,
+            me.body
+        );
+    }
+    // Once Silicon Accounts answers, the row is refreshed from Ada's own view.
+    let (email, finite): (Option<String>, bool) = sqlx::query_as(
+        "SELECT email, refreshed_at > now() - interval '1 minute' FROM commit.accounts WHERE uuid = $1",
+    )
+    .bind(&ada.uuid)
+    .fetch_one(&pool)
+    .await?;
+    ensure!(email == ada.email && finite, "{email:?} {finite}");
+    Ok(())
+}

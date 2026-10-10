@@ -140,7 +140,10 @@ where
 /// Makes sure an account row exists without overwriting fresher data.
 ///
 /// Used for accounts known only from a verified token or proof. A row inserted
-/// here is marked stale, so the next authentication refreshes it from Accounts.
+/// here is marked stale with `refreshed_at = 'epoch'`, older than any real answer,
+/// so the next authentication refreshes it and any answer replaces it. The marker is
+/// a finite time on purpose: `-infinity` cannot be decoded into `OffsetDateTime`, and
+/// the table refuses it (`accounts_times_finite`).
 pub(crate) async fn ensure_actor(
     connection: &mut PgConnection,
     actor: &Actor,
@@ -148,7 +151,7 @@ pub(crate) async fn ensure_actor(
     sqlx::query(
         r"
         INSERT INTO commit.accounts (uuid, kind, public_id, display_name, refreshed_at)
-        VALUES ($1, $2, $3, '', '-infinity')
+        VALUES ($1, $2, $3, '', 'epoch'::timestamptz)
         ON CONFLICT (uuid) DO NOTHING
         ",
     )
@@ -466,10 +469,11 @@ pub(crate) async fn apply_custodian_change(
 ) -> Result<bool, AppError> {
     if let Some(custodian_id) = custodian_id.filter(|id| !id.is_empty()) {
         // The new custodian may never have used Commit; remember it so circles resolve.
+        // 'epoch' marks the row as never refreshed (see `ensure_actor`).
         sqlx::query(
             r"
             INSERT INTO commit.accounts (uuid, kind, public_id, refreshed_at)
-            VALUES ($1, 'carbon', $2, '-infinity')
+            VALUES ($1, 'carbon', $2, 'epoch'::timestamptz)
             ON CONFLICT (uuid) DO NOTHING
             ",
         )

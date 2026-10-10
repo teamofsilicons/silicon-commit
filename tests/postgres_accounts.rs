@@ -677,3 +677,24 @@ async fn a_lookup_answered_from_the_cache_never_undoes_a_newer_event() -> anyhow
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn account_rows_never_hold_infinite_times() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    // An infinite timestamp cannot be decoded into a time, so every later request of the
+    // account would fail: the table refuses one outright.
+    for column in ["refreshed_at", "revoked_before"] {
+        let uuid = common::new_uuid();
+        let refused = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO commit.accounts (uuid, kind, public_id, {column}) VALUES ($1, 'carbon', $2, '-infinity')"
+        )))
+        .bind(&uuid)
+        .bind(format!("c:infinite-{}", uuid.to_ascii_lowercase()))
+        .execute(&pool)
+        .await;
+        common::assert_database_code(refused, "23514")?;
+    }
+    Ok(())
+}

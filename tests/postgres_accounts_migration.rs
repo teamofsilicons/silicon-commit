@@ -619,7 +619,7 @@ async fn commit_migrate_link_identities_runs_from_the_command_line() -> anyhow::
             );
             // Offline, a new account starts from its IAM-era id and is refreshed on first sight.
             let (id, refreshed): (String, bool) = sqlx::query_as(
-                "SELECT public_id, refreshed_at = '-infinity' FROM commit.accounts WHERE uuid = 'ChEf9'",
+                "SELECT public_id, refreshed_at = 'epoch' FROM commit.accounts WHERE uuid = 'ChEf9'",
             )
             .fetch_one(&pool)
             .await?;

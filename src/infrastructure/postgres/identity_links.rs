@@ -592,7 +592,7 @@ async fn ensure_account(
             r"
             INSERT INTO commit.accounts (uuid, kind, public_id, custodian_uuid, refreshed_at)
             VALUES ($1, $2::text::commit.actor_type, $3, $4,
-                    CASE WHEN $5 THEN clock_timestamp() ELSE '-infinity'::timestamptz END)
+                    CASE WHEN $5 THEN clock_timestamp() ELSE 'epoch'::timestamptz END)
             ",
         )
         .bind(target)

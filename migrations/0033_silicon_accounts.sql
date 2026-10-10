@@ -66,6 +66,11 @@ CREATE TABLE commit.accounts (
     ),
     CONSTRAINT accounts_display_bounds CHECK (
         octet_length(display_name) <= 1024 AND octet_length(pfp_url) <= 2048
+    ),
+    -- Commit decodes these into finite times; an infinite value would fail every request of the account.
+    CONSTRAINT accounts_times_finite CHECK (
+        isfinite(refreshed_at) AND isfinite(first_seen_at) AND isfinite(updated_at)
+        AND (revoked_before IS NULL OR isfinite(revoked_before))
     )
 );
 
@@ -81,6 +86,8 @@ COMMENT ON COLUMN commit.accounts.custodian_uuid IS
     'A Silicon''s custodian (cached from Accounts; refreshed on silicon.custodian_changed, sign-in and lookups).';
 COMMENT ON COLUMN commit.accounts.revoked_before IS
     'Access tokens issued before this instant are refused (sign-out, removed access, deleted account).';
+COMMENT ON COLUMN commit.accounts.refreshed_at IS
+    'When the newest information stored was true at Silicon Accounts (fetch or event time). ''epoch'' marks a row Commit has not refreshed yet: older than any real answer, so the next authentication refreshes it.';
 COMMENT ON COLUMN commit.accounts.accounts_version IS
     'Accounts'' own account version; webhook updates with an older version are ignored.';
 
