@@ -674,3 +674,5 @@ The full frontend and backend are verified locally. Production cutover, publish 
 ## UUID cutover replay and coverage verification — 10 October 2026
 
 The checked CSV consumer now refuses incomplete legacy-account coverage before changing data and parks unaccepted prepared notifications without rewriting historical body/event identities. Dry-run, apply, idempotent reapply, conflicting-map refusal and missing-map refusal passed populated PostgreSQL clones. Explicit pending notification fixtures verified immutable-body preservation and replay exclusion. See [uuid128.md](uuid128.md) for schema-specific preservation rules and local evidence. No production data or original checkout changed.
+
+Verified webhook handling now ignores retired top-level subjects and embedded custodian identities before writing account state, and records an acknowledged delivery without reintroducing the retired account reference. Repeated delayed deliveries remain harmless. Regression covers signed-out subjects, custodian changes and profile updates; the Accounts authority suite passed 16/16 (`.mig/uuid-event-suite.log`).

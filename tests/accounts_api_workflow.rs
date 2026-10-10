@@ -2012,3 +2012,55 @@ async fn retired_uuid_tokens_cannot_recreate_the_old_account() -> anyhow::Result
     ensure!(count == 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn retired_webhook_subjects_and_nested_custodians_cannot_return() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let owner = Account::carbon("uuid-fence-owner");
+    let silicon = Account::silicon("uuid-fence-silicon", &owner);
+    let old = format!("Old{}", &new_uuid()[..10]);
+    let accounts = Accounts::start(&[&owner, &silicon]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let token = accounts.token(&silicon);
+    accounts.userinfo(&token, &silicon).await;
+    ensure!(
+        call(
+            &app,
+            Method::GET,
+            "/api/v1/me",
+            Some(&bearer(&token)),
+            None,
+            &[]
+        )
+        .await?
+        .status
+            == StatusCode::OK
+    );
+    sqlx::query("INSERT INTO commit.accounts_uuid128_map(old_uuid,new_uuid,kind,mapping_sha256) VALUES($1,$2,'carbon','test')")
+        .bind(&old).bind(uuid::Uuid::new_v4().to_string()).execute(&pool).await?;
+    for (kind, data) in [
+        ("membership.signed_out", json!({"uuid":old})),
+        (
+            "silicon.custodian_changed",
+            json!({"uuid":silicon.uuid,"to":{"uuid":old,"id":"c:retired"}}),
+        ),
+        (
+            "account.updated",
+            json!({"uuid":silicon.uuid,"account":{"uuid":silicon.uuid,"kind":"silicon","id":silicon.id,"version":999,"custodian":{"uuid":old,"id":"c:retired"}}}),
+        ),
+    ] {
+        let response = webhook(&app, &event(kind, data), now(), WEBHOOK_SECRET).await?;
+        ensure!(response.status == StatusCode::OK, "{}", response.body);
+    }
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT custodian_uuid FROM commit.accounts WHERE uuid=$1")
+            .bind(&silicon.uuid)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(current.as_deref() == Some(owner.uuid.as_str()));
+    let recreated:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commit.accounts WHERE uuid=$1) OR EXISTS(SELECT 1 FROM commit.account_lifecycle WHERE uuid=$1)").bind(&old).fetch_one(&pool).await?;
+    ensure!(!recreated);
+    Ok(())
+}

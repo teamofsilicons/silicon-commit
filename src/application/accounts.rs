@@ -460,14 +460,44 @@ impl AccountService {
                 outcome: "duplicate event id: already processed".to_owned(),
             });
         }
+        let mut identities: Vec<&str> = event.account().into_iter().collect();
+        match event {
+            AccountEvent::Updated { account, .. } => {
+                if let Some(uuid) = account.get("uuid").and_then(Value::as_str) {
+                    identities.push(uuid);
+                }
+                if let Some(uuid) = account
+                    .get("custodian")
+                    .and_then(|c| c.get("uuid"))
+                    .and_then(Value::as_str)
+                {
+                    identities.push(uuid);
+                }
+            }
+            AccountEvent::CustodianChanged {
+                to: Some((uuid, _)),
+                ..
+            } => identities.push(uuid.as_str()),
+            _ => {}
+        }
+        let retired: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM commit.accounts_uuid128_map WHERE old_uuid=ANY($1))",
+        )
+        .bind(identities)
+        .fetch_one(&mut *transaction)
+        .await?;
         // Deliveries without a time are applied as of now.
         let at = occurred_at.unwrap_or_else(OffsetDateTime::now_utc);
-        let outcome = self.apply(&mut transaction, event_id, event, at).await?;
+        let outcome = if retired {
+            "ignored: retired account identity".to_owned()
+        } else {
+            self.apply(&mut transaction, event_id, event, at).await?
+        };
         store::record_webhook_event(
             &mut transaction,
             event_id,
             event_type,
-            event.account(),
+            if retired { None } else { event.account() },
             occurred_at,
             payload_sha256,
             &outcome,
