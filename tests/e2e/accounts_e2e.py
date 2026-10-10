@@ -362,6 +362,28 @@ class Run:
         self.check("the project update applied", patched["description"] == "Ship version two by Friday", patched)
         self.expect_status("read the project by its UID", self.api("GET", f"/projects/{project['uid']}", token=token), 200)
 
+        settings = self.expect_status("read the email settings", self.api("GET", "/email-settings", token=token), 200)
+        self.check("the default address is the email the Carbon shared with Commit", settings.get("saved") is False
+                   and settings.get("email") == c1["email"] and settings.get("shared_email") == c1["email"], settings)
+        preferences = {k: settings[k] for k in ("email", "enabled", "project_completed", "project_updates",
+                                                "task_completed", "task_assigned")}
+        self.expect_status("save them as they are", self.api("PUT", "/email-settings", token=token, body=preferences),
+                           200)
+        self.expect_status("complete the project", self.api(
+            "POST", f"/projects/{project['id']}/completion", token=token,
+            body={"title": "Shipped", "description": "Version two is out."}), 201, 200)
+        job = self.poll("the worker picked up the completion email", lambda: self.sql(
+            "SELECT recipient || ' ' || kind || ' ' || attempts FROM commit.email_jobs "
+            f"WHERE account = '{c1['uuid']}' AND project_id = '{project['id']}' AND attempts > 0"), timeout=20)
+        self.check("the email goes to the shared address (Postmark is not configured here, so it stays queued)",
+                   job.split(" ")[:2] == [c1["email"], "project_completed"], job)
+
+        self.expect_error("the previous sign-in system's organization header", self.api(
+            "GET", "/me", token=token, headers={"X-Org-ID": "tos"}), 400, "retired_header")
+        self.expect_error("contract 1", self.api("GET", "/me", token=token, headers={"X-Commit-API-Version": "1"}),
+                          406, "unsupported_contract")
+        self.expect_status("contract 2", self.api("GET", "/me", token=token, headers={"X-Commit-API-Version": "2"}),
+                           200)
         self.expect_error("no credential", self.api("GET", "/me"), 401)
         self.expect_error("the Carbon's account-site token (another audience)",
                           self.api("GET", "/me", token=c1["access_token"]), 401, "token_wrong_audience")
@@ -418,6 +440,13 @@ class Run:
         self.check("login status --json exits 0 signed out", after.returncode == 0, after.stderr)
         self.check("login status says exactly {\"authenticated\": false}", json.loads(after.stdout) ==
                    {"authenticated": False}, after.stdout)
+        positional = self.cli(home, "login", self.slt("s1"))
+        self.check("commit login <SLT> (the form the Silicon runtime runs) signs in", positional.returncode == 0,
+                   positional.stderr[-600:])
+        again = self.cli_json("positional sign-in", home, "login", "status", "--json")
+        self.check("and login status sees it", again.get("authenticated") is True and again.get("uuid") == s1["uuid"],
+                   again)
+        self.cli_json("logout again", home, "logout", "--json")
         self.state.update(s1_todo=todo, s1_project=project)
 
     # --- scenario 3 -----------------------------------------------------------------------------------------
@@ -793,6 +822,8 @@ class Run:
             body={"proof_refresh_token": proof["proof_refresh_token"]}), 200)
         self.expect_status("the refreshed proof token works", self.api(
             "GET", "/todos", proof=refreshed["proof_token"]), 200)
+        self.expect_status("and on the one-release alias /api/v1/obo/todos/list", self.api(
+            "GET", "/obo/todos/list", proof=refreshed["proof_token"]), 200)
         self.expect_status("interface revokes the proof Commit has verified", self.accounts_call(
             "POST", "/v1/proofs/revoke", basic=("interface", self.interface_secret),
             body={"proof_id": proof["proof_id"]}), 204)
@@ -851,6 +882,9 @@ class Run:
         self.check("commit accounts --json exits 0 with app_id commit", found.get("app_id") == "commit"
                    and found.get("accounts_url") == "https://accounts.teamofsilicons.com"
                    and found.get("version") == version, accounts.stdout + accounts.stderr)
+        alias = run("iam", "--json")
+        self.check("the hidden commit iam --json prints exactly the accounts object", alias.returncode == 0
+                   and json.loads(alias.stdout) == found, alias.stdout + alias.stderr)
         status = run("login", "status", "--json")
         self.check("commit login status --json exits 0 and says signed out", status.returncode == 0
                    and json.loads(status.stdout) == {"authenticated": False}, status.stdout + status.stderr)
