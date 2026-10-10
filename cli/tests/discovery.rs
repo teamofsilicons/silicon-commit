@@ -94,6 +94,36 @@ fn discovery_never_fails_on_odd_configuration_or_damaged_state() {
     );
     assert_eq!(status["authenticated"], false);
     assert_eq!(status["reason"], "unreadable_session");
+    // A session path that cannot even be read is still an answer with --json.
+    fs::remove_file(home.state().join("session.json")).unwrap();
+    fs::create_dir_all(home.state().join("session.json")).unwrap();
+    let status = home
+        .command()
+        .args(["login", "status", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status.status.code(), Some(0));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["authenticated"], false);
+    assert_eq!(status["reason"], "io_error");
+    let text = home.command().args(["login", "status"]).output().unwrap();
+    assert_eq!(text.status.code(), Some(1));
+    let token = support::jwt("zQo", "c:ada", "carbon", support::now() + 900);
+    let unverified = json_output(
+        home.command()
+            .env("COMMIT_API_URL", "invalid-url")
+            .args(["--token", &token, "login", "status", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(unverified["authenticated"], true);
+    assert_eq!(unverified["verified"], false);
+    assert!(
+        unverified["warning"]
+            .as_str()
+            .unwrap()
+            .contains("invalid-url")
+    );
 }
 
 #[test]

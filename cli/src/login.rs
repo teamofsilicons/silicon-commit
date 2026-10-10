@@ -426,10 +426,12 @@ fn signed_out(reason: &str, message: &str) -> Value {
 
 /// `commit login status`: exit 0 with `--json`; otherwise 0 signed in, 1 signed out.
 pub async fn status(root: &Root, args: &StatusArgs) -> Result<u8, CliError> {
-    let value = match &root.token {
-        Some(token) => token_status(root, token, args.offline).await?,
-        None => session_status(root, args.offline).await?,
+    let checked = match &root.token {
+        Some(token) => token_status(root, token, args.offline).await,
+        None => session_status(root, args.offline).await,
     };
+    // Status always answers: a failure to even read the session is a reason, not a crash.
+    let value = checked.unwrap_or_else(|error| signed_out(&error.code, &error.message));
     let authenticated = value["authenticated"] == true;
     if args.json {
         print_json(&value);
@@ -509,7 +511,14 @@ async fn token_status(root: &Root, token: &str, offline: bool) -> Result<Value, 
     if offline {
         return Ok(value);
     }
-    match api::client(&api_url, Some(token))?.me().await {
+    let client = match api::client(&api_url, Some(token)) {
+        Ok(client) => client,
+        Err(error) => {
+            value["warning"] = json!(error.message.clone());
+            return Ok(value);
+        }
+    };
+    match client.me().await {
         Ok(me) => {
             value["verified"] = json!(true);
             for key in ["id", "kind", "display_name"] {
