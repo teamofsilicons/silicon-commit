@@ -340,6 +340,7 @@ pub(crate) fn resolved_from_app_view(
         custodian,
         display_name: account.display_name.clone(),
         pfp_url: account.pfp_url.clone(),
+        observed_at: OffsetDateTime::now_utc(),
     })
 }
 
@@ -365,6 +366,7 @@ pub(crate) fn resolved_from_summary(
         custodian,
         display_name: summary.display_name.clone(),
         pfp_url: summary.pfp_url.clone(),
+        observed_at: OffsetDateTime::now_utc(),
     })
 }
 
@@ -495,6 +497,10 @@ impl AccountsIdentity {
 
         let stale = stored.as_ref().is_none_or(|stored| {
             stored.refreshed_at < OffsetDateTime::now_utc() - ACCOUNT_REFRESH_AFTER
+                // Known only from lookups (someone named the account before it used
+                // Commit): read its own view once, which alone carries its display name
+                // and the email it shared with Commit.
+                || (bearer.is_some() && stored.accounts_version == 0)
         });
         let mut custodian = stored.as_ref().and_then(|stored| stored.custodian.clone());
         let mut current = actor.clone();
@@ -577,9 +583,14 @@ impl AccountsIdentity {
                     account_store::remember(&self.pool, &resolved)
                         .await
                         .map_err(|_| ProviderError::Unavailable)?;
-                    account_store::remember_email(&self.pool, uuid, info.account.email.as_deref())
-                        .await
-                        .map_err(|_| ProviderError::Unavailable)?;
+                    account_store::remember_own_view(
+                        &self.pool,
+                        uuid,
+                        info.account.email.as_deref(),
+                        info.account.version,
+                    )
+                    .await
+                    .map_err(|_| ProviderError::Unavailable)?;
                     return Ok(resolved);
                 }
                 Ok(_) => return Err(ProviderError::InvalidResponse),

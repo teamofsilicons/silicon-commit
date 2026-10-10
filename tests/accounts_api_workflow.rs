@@ -1197,3 +1197,55 @@ async fn me_names_a_custodian_that_never_used_commit() -> anyhow::Result<()> {
     ensure!(stored.is_none(), "{stored:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn an_account_named_before_it_used_commit_reads_its_own_view_at_sign_in() -> anyhow::Result<()>
+{
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let ada = Account::carbon("named-ada");
+    let bea = Account::carbon("named-bea");
+    let accounts = Accounts::start(&[&ada, &bea]).await;
+    let app = router(&pool, &accounts, "", true)?;
+    let ada_token = accounts.token(&ada);
+    accounts.userinfo(&ada_token, &ada).await;
+    let bea_token = accounts.token(&bea);
+    accounts.userinfo(&bea_token, &bea).await;
+
+    // Ada names Bea before Bea ever used Commit: Commit stores Bea from a lookup, which
+    // carries no shared email.
+    let created = call(
+        &app,
+        Method::POST,
+        "/api/v1/todos",
+        Some(&bearer(&ada_token)),
+        Some(json!({"title": "Read the brief", "assigned_to": bea.id})),
+        &[],
+    )
+    .await?;
+    ensure!(created.status == StatusCode::CREATED, "{}", created.body);
+
+    // Bea's first sign-in still reads her own view: the email she shared with Commit.
+    let me = call(
+        &app,
+        Method::GET,
+        "/api/v1/me",
+        Some(&bearer(&bea_token)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(me.status == StatusCode::OK, "{}", me.body);
+    ensure!(me.body["email"] == json!(bea.email), "{}", me.body);
+    let version: i64 =
+        sqlx::query_scalar("SELECT accounts_version FROM commit.accounts WHERE uuid = $1")
+            .bind(&bea.uuid)
+            .fetch_one(&pool)
+            .await?;
+    ensure!(
+        version == 1,
+        "the row is marked as read from Bea's own view ({version})"
+    );
+    Ok(())
+}

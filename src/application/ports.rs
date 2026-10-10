@@ -202,6 +202,10 @@ pub struct ResolvedAccount {
     pub display_name: String,
     /// Profile photo URL, when known.
     pub pfp_url: String,
+    /// When Silicon Accounts said this. A cached lookup keeps the time it was fetched, so
+    /// storing it never replaces anything Commit learned later (a webhook event, a fresher
+    /// lookup).
+    pub observed_at: OffsetDateTime,
 }
 
 impl ResolvedAccount {
@@ -214,6 +218,7 @@ impl ResolvedAccount {
             custodian,
             display_name: String::new(),
             pfp_url: String::new(),
+            observed_at: OffsetDateTime::now_utc(),
         }
     }
 }

@@ -600,3 +600,80 @@ async fn deleting_an_account_forgets_its_data_and_hands_projects_on() -> anyhow:
 
     Ok(())
 }
+
+#[tokio::test]
+async fn a_lookup_answered_from_the_cache_never_undoes_a_newer_event() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let world = World::new(&pool);
+    let ada = world.carbon("cache-ada").await?;
+    let bea = world.carbon("cache-bea").await?;
+    let scout = world.silicon("cache-scout", &ada).await?;
+    let silicon = scout.uuid().as_str().to_owned();
+    let now = OffsetDateTime::now_utc();
+    // Commit learned about the Silicon two minutes ago; a lookup of it was cached a minute ago.
+    sqlx::query("UPDATE commit.accounts SET refreshed_at = $2 WHERE uuid = $1")
+        .bind(&silicon)
+        .bind(now - TimeDuration::minutes(2))
+        .execute(&pool)
+        .await?;
+    let directory = Arc::new(Directory::with(&[&ada, &bea]));
+    directory.add_observed(&scout, now - TimeDuration::minutes(1));
+    let todo_service = todos(&pool, Arc::clone(&directory));
+    let service = accounts(&pool, Arc::clone(&directory));
+
+    // Ada assigns the Silicon work: Commit stores the cached lookup, true a minute ago.
+    assign(&todo_service, &ada, &scout, "before the transfer").await?;
+
+    // Forty seconds ago Ada handed the Silicon to Bea, and thirty seconds ago its id
+    // changed; the events arrive only now.
+    let moved = service
+        .apply_webhook(
+            &format!("evt_transfer_{}", Uuid::new_v4().simple()),
+            "silicon.custodian_changed",
+            Some(now - TimeDuration::seconds(40)),
+            &AccountEvent::CustodianChanged {
+                silicon: silicon.clone(),
+                to: Some((
+                    bea.uuid().as_str().to_owned(),
+                    bea.actor.id.as_str().to_owned(),
+                )),
+            },
+            "hash-transfer",
+        )
+        .await?;
+    assert!(
+        moved.outcome.starts_with("custodian is now"),
+        "{}",
+        moved.outcome
+    );
+    let renamed = service
+        .apply_webhook(
+            &format!("evt_rename_{}", Uuid::new_v4().simple()),
+            "account.id_changed",
+            Some(now - TimeDuration::seconds(30)),
+            &AccountEvent::IdChanged {
+                uuid: silicon.clone(),
+                new_id: "si:cache-scout-renamed".to_owned(),
+            },
+            "hash-rename",
+        )
+        .await?;
+    assert!(
+        renamed.outcome.starts_with("id is now"),
+        "{}",
+        renamed.outcome
+    );
+
+    // Bea, its custodian now, assigns it work; the same cached lookup (Ada, the old id)
+    // answers again and must not undo either event.
+    let bea = world.refreshed(&bea).await?;
+    assign(&todo_service, &bea, &scout, "after the transfer").await?;
+    let row = account_row(&pool, &silicon).await?;
+    assert_eq!(
+        (row.0.as_str(), row.4.as_deref()),
+        ("si:cache-scout-renamed", Some(bea.uuid().as_str()))
+    );
+    Ok(())
+}

@@ -23,7 +23,11 @@ pub(crate) struct StoredAccount {
     pub(crate) status: String,
     pub(crate) custodian: Option<AccountUuid>,
     pub(crate) revoked_before: Option<OffsetDateTime>,
+    /// When the newest information stored was true at Silicon Accounts.
     pub(crate) refreshed_at: OffsetDateTime,
+    /// Silicon Accounts' version of the account, from its own view (`userinfo`) or
+    /// `account.updated`; 0 while Commit knows the account only from lookups.
+    pub(crate) accounts_version: i64,
 }
 
 impl StoredAccount {
@@ -45,6 +49,7 @@ struct AccountRow {
     custodian_uuid: Option<String>,
     revoked_before: Option<OffsetDateTime>,
     refreshed_at: OffsetDateTime,
+    accounts_version: i64,
 }
 
 impl AccountRow {
@@ -62,6 +67,7 @@ impl AccountRow {
             custodian: self.custodian_uuid.map(account_uuid).transpose()?,
             revoked_before: self.revoked_before,
             refreshed_at: self.refreshed_at,
+            accounts_version: self.accounts_version,
         })
     }
 }
@@ -97,7 +103,7 @@ where
     sqlx::query_as::<_, AccountRow>(
         r"
         SELECT uuid, kind, public_id, display_name, pfp_url, email, status, custodian_uuid,
-               revoked_before, refreshed_at
+               revoked_before, refreshed_at, accounts_version
           FROM commit.accounts
          WHERE uuid = $1
         ",
@@ -163,8 +169,11 @@ pub(crate) async fn ensure_actor(
     Ok(())
 }
 
-/// Stores what Silicon Accounts just said about an account (lookups, token responses).
+/// Stores what Silicon Accounts said about an account (lookups, `userinfo`).
 ///
+/// The row takes the answer only when it is at least as new as what is stored
+/// (`observed_at` against `refreshed_at`): a lookup answered from the cache before an
+/// id change or a custodian transfer must not undo the webhook event that applied it.
 /// Deleted accounts stay deleted; an account's kind never changes.
 pub(crate) async fn remember<'e, E>(executor: E, account: &ResolvedAccount) -> Result<(), AppError>
 where
@@ -178,7 +187,7 @@ where
     sqlx::query(
         r"
         INSERT INTO commit.accounts (uuid, kind, public_id, display_name, pfp_url, status, custodian_uuid, refreshed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (uuid) DO UPDATE
            SET public_id = EXCLUDED.public_id,
                display_name = CASE WHEN EXCLUDED.display_name = '' THEN commit.accounts.display_name
@@ -186,9 +195,10 @@ where
                pfp_url = CASE WHEN EXCLUDED.pfp_url = '' THEN commit.accounts.pfp_url ELSE EXCLUDED.pfp_url END,
                status = EXCLUDED.status,
                custodian_uuid = EXCLUDED.custodian_uuid,
-               refreshed_at = clock_timestamp()
+               refreshed_at = EXCLUDED.refreshed_at
          WHERE commit.accounts.kind = EXCLUDED.kind
            AND commit.accounts.status <> 'deleted'
+           AND commit.accounts.refreshed_at <= EXCLUDED.refreshed_at
         ",
     )
     .bind(account.actor.uuid.as_str())
@@ -198,25 +208,35 @@ where
     .bind(&account.pfp_url)
     .bind(account.status.as_str())
     .bind(custodian)
+    .bind(account.observed_at)
     .execute(executor)
     .await?;
     Ok(())
 }
 
-/// Records the email the Carbon shared with Commit (from a token response or `account.updated`).
-pub(crate) async fn remember_email<'e, E>(
+/// Records what only the account's own view (`userinfo`) carries: the email the Carbon
+/// shared with Commit, and the account's version, which marks the row as read from that
+/// view. An equal or newer version already stored (from `account.updated`) wins.
+pub(crate) async fn remember_own_view<'e, E>(
     executor: E,
     uuid: &AccountUuid,
     email: Option<&str>,
+    version: i64,
 ) -> Result<(), AppError>
 where
     E: PgExecutor<'e>,
 {
-    sqlx::query("UPDATE commit.accounts SET email = $2 WHERE uuid = $1 AND status <> 'deleted'")
-        .bind(uuid.as_str())
-        .bind(email)
-        .execute(executor)
-        .await?;
+    sqlx::query(
+        r"
+        UPDATE commit.accounts SET email = $2, accounts_version = $3
+         WHERE uuid = $1 AND status <> 'deleted' AND accounts_version <= $3
+        ",
+    )
+    .bind(uuid.as_str())
+    .bind(email)
+    .bind(version)
+    .execute(executor)
+    .await?;
     Ok(())
 }
 

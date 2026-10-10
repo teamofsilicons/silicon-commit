@@ -200,7 +200,21 @@ impl Directory {
     }
 
     pub fn add(&self, account: &VerifiedActor) {
-        let resolved = ResolvedAccount::known(account.actor.clone(), account.custodian.clone());
+        self.add_resolved(
+            account,
+            ResolvedAccount::known(account.actor.clone(), account.custodian.clone()),
+        );
+    }
+
+    /// Answers lookups of `account` with what Silicon Accounts said at `observed_at`, like
+    /// a lookup cached before a later change.
+    pub fn add_observed(&self, account: &VerifiedActor, observed_at: time::OffsetDateTime) {
+        let mut resolved = ResolvedAccount::known(account.actor.clone(), account.custodian.clone());
+        resolved.observed_at = observed_at;
+        self.add_resolved(account, resolved);
+    }
+
+    fn add_resolved(&self, account: &VerifiedActor, resolved: ResolvedAccount) {
         if let Ok(mut accounts) = self.accounts.lock() {
             accounts.insert(
                 account.actor.id.as_str().to_ascii_lowercase(),
