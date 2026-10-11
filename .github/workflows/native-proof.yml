@@ -8,9 +8,9 @@ permissions:
   actions: read
 env:
   RELEASE_APP_ID: commit
-  RELEASE_VERSION: 0.5.0
-  BUILD_RUN_ID: '38056545219'
-  BUILD_SOURCE_COMMIT: 524c89cc855c8be0ec63ee8ea0c906d27c328dee
+  RELEASE_VERSION: 0.6.0
+  BUILD_RUN_ID: '38174096888'
+  BUILD_SOURCE_COMMIT: 47f30a35e9ed31c11ce4017772bf6f935ca02245
 jobs:
   native:
     name: Verify ${{ matrix.target }}
