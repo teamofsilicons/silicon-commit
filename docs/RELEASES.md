@@ -20,12 +20,12 @@ current; the CLI never replaces itself. The Rust client is a normal Cargo depend
 
    ```sh
    silicon-apps capabilities                    # which validation workers are live
-   silicon-apps upload commit --target linux-x86_64 commit-0.5.0-linux-x86_64.tar.gz
-   silicon-apps upload commit --target linux-aarch64 commit-0.5.0-linux-aarch64.tar.gz
+   silicon-apps upload commit --target linux-x86_64 commit-0.6.0-linux-x86_64.tar.gz
+   silicon-apps upload commit --target linux-aarch64 commit-0.6.0-linux-aarch64.tar.gz
    silicon-apps packages commit                 # the accepted package ids
-   silicon-apps release commit --version 0.5.0 --package PACKAGE_ID --package PACKAGE_ID
+   silicon-apps release commit --version 0.6.0 --package PACKAGE_ID --package PACKAGE_ID
    silicon-apps install 'commit>dev'            # try the development release
-   silicon-apps promote commit RELEASE_ID --version 0.5.0
+   silicon-apps promote commit RELEASE_ID --version 0.6.0
    ```
 
    Today Silicon Apps validates uploads on its four Linux workers (`linux-x86_64`, `linux-i686`,
@@ -73,7 +73,7 @@ that answers wrongly where it can run.
 
 ```sh
 cargo build --locked --release -p silicon-commit-cli --bin commit
-scripts/package-apps.sh 0.5.0 macos-aarch64 target/release/commit
+scripts/package-apps.sh 0.6.0 macos-aarch64 target/release/commit
 ```
 
 `scripts/package-apps.sh VERSION TARGET BINARY` renders [`packaging/apps.yaml.in`](../packaging/apps.yaml.in) for

@@ -44,14 +44,11 @@ To try an installable CLI package, build the CLI and pack it the way a release d
 `scripts/package-apps.sh VERSION TARGET target/release/commit` writes a Silicon Apps archive to `dist/apps/` after
 checking the three commands every Silicon app answers; [releases](RELEASES.md) explains the whole path.
 
-Diagnostics use the dedicated Space Station table through the worker; clients can opt out per request. `commit report`
-submits a report through the Rust client and Commit API for Postmark delivery. Attach a source PR with `--pr`, or keep
-a local draft with `--save-only`.
+Commit records no telemetry. `commit report` submits a report through the Rust client and Commit API for Postmark
+delivery. Attach a source PR with `--pr`, or keep a local draft with `--save-only`.
 
 ## Deployment settings
 
 Postmark delivery requires `COMMIT_POSTMARK_SERVER_TOKEN` in the worker secret environment and the verified sender
-`commit@teamofsilicons.com`. Space Station export uses `COMMIT_TELEMETRY_TABLE_KEY` for `tos.committelemetry`,
-`COMMIT_TELEMETRY_HOME` for its private spool, and `COMMIT_TELEMETRY=off` to disable. New schemas require rerunning
-`deploy/postgres_runtime_grants.sql`; see [notifications](NOTIFICATIONS.md), [telemetry](TELEMETRY.md) and
-[deployment](DEPLOYMENT.md).
+`commit@teamofsilicons.com`. New schemas require rerunning `deploy/postgres_runtime_grants.sql`; see
+[notifications](NOTIFICATIONS.md) and [deployment](DEPLOYMENT.md).

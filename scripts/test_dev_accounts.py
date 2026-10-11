@@ -59,14 +59,11 @@ class Configuration(unittest.TestCase):
 
 
 class ServiceEnvironment(unittest.TestCase):
-    def test_live_mail_and_telemetry_keys_never_reach_the_service(self):
-        cfg = config(COMMIT_POSTMARK_SERVER_TOKEN="live-postmark", COMMIT_TELEMETRY_TABLE_KEY="table-committelemetry-x")
-        with mock.patch.dict(os.environ, {**BASE_ENV, "COMMIT_POSTMARK_SERVER_TOKEN": "live-postmark",
-                                          "COMMIT_TELEMETRY_TABLE_KEY": "table-committelemetry-x"}, clear=True):
+    def test_live_mail_keys_never_reach_the_service(self):
+        cfg = config(COMMIT_POSTMARK_SERVER_TOKEN="live-postmark")
+        with mock.patch.dict(os.environ, {**BASE_ENV, "COMMIT_POSTMARK_SERVER_TOKEN": "live-postmark"}, clear=True):
             env = dev_accounts.service_env(cfg, "whsec_test")
         self.assertEqual(env["COMMIT_POSTMARK_SERVER_TOKEN"], "")
-        self.assertEqual(env["COMMIT_TELEMETRY_TABLE_KEY"], "")
-        self.assertEqual(env["COMMIT_TELEMETRY"], "off")
         self.assertEqual(env["COMMIT_ACCOUNTS_WEBHOOK_SECRET"], "whsec_test")
         self.assertNotIn("live-postmark", env.values())
 

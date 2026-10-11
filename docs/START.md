@@ -67,4 +67,4 @@ The guides are bundled: `commit docs projects`, `commit docs cli`. When you retr
 - [Learn the CLI](CLI.md)
 - [Build an integration](DEVELOPMENT.md)
 - [Rust client](CLIENT.md) and [HTTP API](API.md)
-- [Compatibility policy](CONTRACTS.md) and [telemetry settings](TELEMETRY.md)
+- [Compatibility policy](CONTRACTS.md)

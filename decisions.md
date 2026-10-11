@@ -1001,3 +1001,16 @@ introspection, and changes that widen who can see something (project visibility 
 check the token or proof online every time. The end-to-end run against a local Silicon Accounts stack found these;
 `scripts/e2e-accounts.sh` reruns it. Details in [`docs/migration/decisions.md`](docs/migration/decisions.md)
 (A-55 to A-64).
+
+## D-059 — Commit records no telemetry
+
+**Status:** Accepted (2026-10-12); supersedes the Space Station telemetry of the 2026-09-13 entry
+
+At the Carbon's request, the service, worker, CLI and Rust client record, store and send no telemetry: the request
+middleware, the Space Station export and the `space-station` dependency are gone, and the API ignores
+`X-Commit-Telemetry`. The `commit.telemetry_events` table and its migration stay, unused, because Commit never
+writes destructive migrations; the runtime roles lose their grants on it. Calls to Silicon Accounts always send
+`X-Accounts-Telemetry: off`, and the Rust client sends `X-Commit-Telemetry: off` so a deployment older than 0.6.0
+records nothing either. `commit config telemetry on|off` is still accepted and does nothing; the client's
+`with_telemetry`, `with_source` and `AccountsAuthBuilder::telemetry` are deprecated no-ops. `UNDERSTANDING.md` still
+asks every app to use Space Station; a Carbon decides whether to change it.

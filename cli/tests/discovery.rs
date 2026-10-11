@@ -253,7 +253,6 @@ fn bundled_guides_print_offline() {
         "accounts",
         "contracts",
         "development",
-        "telemetry",
         "deployment",
     ] {
         let output = home.command().args(["docs", topic]).output().unwrap();

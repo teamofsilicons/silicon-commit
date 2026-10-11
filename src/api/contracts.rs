@@ -89,7 +89,7 @@ pub(super) async fn describe(
         ]
     };
     Ok(Json(
-        json!({"service":"silicon-commit","service_version":env!("CARGO_PKG_VERSION"),"current_contract":CURRENT,"contracts":versions,"compatibility":[{"contract":1,"clients":["0.1.x to 0.4.x (the previous sign-in system)"],"cli":"0.4.x and older","status":"ended: these clients cannot sign in any more"},{"contract":2,"clients":["0.5.x (Silicon Accounts sign-in, personal accounts)"],"cli":"0.5.x"}],"policy":{"breaking_changes":"new version; retain existing consumers","additive_changes":"optional fields and new endpoints","sunset":"deprecated versions retire after seven days without production requests; active versions never auto-retire"},"docs":"https://docs.commit.teamofsilicons.com/contracts/"}),
+        json!({"service":"silicon-commit","service_version":env!("CARGO_PKG_VERSION"),"current_contract":CURRENT,"contracts":versions,"compatibility":[{"contract":1,"clients":["0.1.x to 0.4.x (the previous sign-in system)"],"cli":"0.4.x and older","status":"ended: these clients cannot sign in any more"},{"contract":2,"clients":["0.5.x and 0.6.x (Silicon Accounts sign-in, personal accounts)"],"cli":"0.5.x and 0.6.x"}],"policy":{"breaking_changes":"new version; retain existing consumers","additive_changes":"optional fields and new endpoints","sunset":"deprecated versions retire after seven days without production requests; active versions never auto-retire"},"docs":"https://docs.commit.teamofsilicons.com/contracts/"}),
     ))
 }
 #[cfg(test)]

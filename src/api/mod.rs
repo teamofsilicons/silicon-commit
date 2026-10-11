@@ -50,7 +50,6 @@ mod email;
 pub mod extract;
 pub mod notifications;
 pub mod projects;
-mod telemetry;
 pub mod todos;
 mod webhooks;
 
@@ -405,10 +404,6 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .layer(middleware::from_fn_with_state(
             state.clone(),
             contracts::negotiate,
-        ))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            telemetry::capture,
         ));
 
     let sensitive_headers = [

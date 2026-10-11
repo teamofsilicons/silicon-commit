@@ -24,6 +24,8 @@ class BootstrapOrderingTests(unittest.TestCase):
             'COMMIT_APP_SECRET': 'test-app-secret',
             'COMMIT_ACCOUNTS_WEBHOOK_SECRET': 'whsec_test',
             'COMMIT_IAM_APP_SECRET': 'retired-and-never-copied',
+            'COMMIT_TELEMETRY': 'on',
+            'COMMIT_TELEMETRY_TABLE_KEY': 'table-committelemetry-retired',
         }
 
         def check_output(args, **kwargs):
@@ -143,6 +145,7 @@ class BootstrapOrderingTests(unittest.TestCase):
             self.assertNotIn('COMMIT_IAM_', environment)
             self.assertNotIn('COMMIT_AUTH_MODE', environment)
             self.assertNotIn('HONEYCOMB', environment)
+            self.assertNotIn('TELEMETRY', environment)
         self.assertNotIn('COMMIT_APP_SECRET', worker)
 
     def test_first_deployment_has_no_old_services_to_stop(self):

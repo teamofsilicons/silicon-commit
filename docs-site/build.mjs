@@ -46,7 +46,7 @@ const titles = new Map(
     ]),
   ),
 );
-const navigation = ["START.md","PROJECTS.md","CLI.md","NOTIFICATIONS.md","ACCOUNTS.md","DEVELOPMENT.md","CLIENT.md","API.md","CONTRACTS.md","TELEMETRY.md","RELEASES.md","DEPLOYMENT.md"];
+const navigation = ["START.md","PROJECTS.md","CLI.md","NOTIFICATIONS.md","ACCOUNTS.md","DEVELOPMENT.md","CLIENT.md","API.md","CONTRACTS.md","RELEASES.md","DEPLOYMENT.md"];
 for (const file of navigation) if (!documents.includes(file)) throw new Error(`Navigation names a missing page: ${file}`);
 // Pages that no longer exist; their old addresses lead to the page that replaced them.
 const moved = {
@@ -59,6 +59,7 @@ const moved = {
   "/releases/commit-0.2.0/": "RELEASES.md",
   "/releases/commit-0.2.1/": "RELEASES.md",
   "/releases/commit-0.2.3/": "RELEASES.md",
+  "/telemetry/": "DEVELOPMENT.md",
 };
 
 await rm(output, { recursive: true, force: true });

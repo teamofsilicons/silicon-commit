@@ -36,7 +36,6 @@ const GUIDES: &[(&str, &[&str], &str)] = &[
         &["build"],
         include_str!("../docs/DEVELOPMENT.md"),
     ),
-    ("telemetry", &[], include_str!("../docs/TELEMETRY.md")),
     (
         "deployment",
         &["deploy"],
@@ -55,7 +54,6 @@ Topics:
   accounts       how Commit uses Silicon Accounts (for operators and integrators)
   contracts      API versions and compatibility
   development    building on Commit and running it locally
-  telemetry      diagnostics and how to turn them off
   deployment     running the service
 
 Examples:

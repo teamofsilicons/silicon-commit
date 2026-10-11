@@ -366,15 +366,14 @@ fn silicon_home_and_config_home_choose_where_state_lives() {
             .output()
             .unwrap()
     };
-    assert!(
-        with_silicon(&["config", "telemetry", "off"])
-            .status
-            .success()
-    );
-    assert_eq!(
-        fs::read_to_string(silicon.join(".commit/telemetry")).unwrap(),
-        "off"
-    );
+    let draft = with_silicon(&["report", "Draft in the Silicon home", "--save-only"]);
+    assert!(draft.status.success(), "{}", stderr(&draft));
+    assert!(fs::read_dir(silicon.join(".commit")).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("report-")
+    }));
     assert!(!home.state().exists(), "SILICON_HOME wins over HOME");
     let output = with_silicon(&["config", "home", chosen.to_str().unwrap()]);
     assert!(output.status.success(), "{}", stderr(&output));
@@ -384,12 +383,32 @@ fn silicon_home_and_config_home_choose_where_state_lives() {
         shown["state_dir"],
         json!(fs::canonicalize(&chosen).unwrap().join(".commit"))
     );
-    assert_eq!(
-        shown["telemetry"], "on",
-        "telemetry lives in the chosen home now"
+    assert!(
+        shown.get("telemetry").is_none(),
+        "Commit records no telemetry"
     );
     assert_eq!(shown["signed_in"], false);
     let missing = with_silicon(&["config", "home", home.0.join("missing").to_str().unwrap()]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(stderr(&missing).contains("not a directory"));
+}
+
+#[test]
+fn config_telemetry_is_an_accepted_no_op() {
+    let home = Home::new();
+    for value in ["on", "off"] {
+        let output = home
+            .command()
+            .args(["config", "telemetry", value])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "Telemetry was removed from Commit; there is nothing to turn on or off.\n"
+        );
+    }
+    assert!(!home.state().join("telemetry").exists());
+    let help = home.command().args(["config", "--help"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("telemetry"));
 }

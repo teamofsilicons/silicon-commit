@@ -1,4 +1,4 @@
-//! Structured, secret-safe process telemetry.
+//! Structured, secret-safe process logs.
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 

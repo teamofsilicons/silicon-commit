@@ -58,7 +58,7 @@ pub fn home() -> PathBuf {
     configured_home().unwrap_or_else(default_home)
 }
 
-/// `<home>/.commit`: telemetry setting, saved reports, the default profile's session.
+/// `<home>/.commit`: saved reports and the default profile's session.
 pub fn directory() -> PathBuf {
     home().join(".commit")
 }
@@ -94,14 +94,6 @@ fn expand_tilde(location: &Path) -> PathBuf {
         Some(text) if text.starts_with("~/") => default_home().join(&text[2..]),
         _ => location.to_path_buf(),
     }
-}
-
-/// Whether diagnostics are on: `COMMIT_TELEMETRY`, else `commit config telemetry`, else on.
-pub fn telemetry_enabled() -> bool {
-    std::env::var("COMMIT_TELEMETRY")
-        .ok()
-        .or_else(|| fs::read_to_string(directory().join("telemetry")).ok())
-        .is_none_or(|v| !matches!(v.trim(), "off" | "false" | "0"))
 }
 
 /// Creates `parent` (mode 0700 on Unix) if needed.
