@@ -59,7 +59,6 @@ def make_settings(secret):
                'COMMIT_DATABASE_URL': dburl('commit_accounts_api')}
         worker = {**base, 'ACCOUNTS_URL': accounts['ACCOUNTS_URL'],
                   'COMMIT_DATABASE_URL': dburl('commit_accounts_worker'),
-                  'COMMIT_TELEMETRY_HOME': '/var/lib/commit/telemetry',
                   **{k: v for k, v in shared.items() if k == 'COMMIT_POSTMARK_SERVER_TOKEN'}}
         migrator = {**base, 'COMMIT_SCHEMA_OWNER': 'commit_accounts_migrator',
                     'COMMIT_MIGRATOR_DATABASE_URL': dburl('commit_accounts_migrator')}
@@ -150,8 +149,6 @@ def install(archive, checksum, source, grant_file):
                 '--env-file', str(config_dir / (role + '.env'))]
         if APP == 'extend':
             args += ['--publish', '127.0.0.1:8481:8080', '--mount', f'type=bind,source={state},target=/var/lib/extend/data']
-        elif APP == 'commit':
-            args += ['--mount', f'type=bind,source={state},target=/var/lib/commit/telemetry']
         args += [image]
         if APP != 'extend':
             args += [APP + '-' + role]

@@ -223,15 +223,12 @@ def binary(cfg, name):
 
 
 def service_env(cfg, webhook_secret, migrator=False):
-    """A clean environment: nothing inherited but PATH/HOME/locale, so no live mail or telemetry key leaks in."""
+    """A clean environment: nothing inherited but PATH/HOME/locale, so no live mail key leaks in."""
     env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "LANG") if key in os.environ}
     env.update({
         "COMMIT_ENVIRONMENT": "development",
         "COMMIT_LOG": os.environ.get("COMMIT_DEV_LOG", "silicon_commit=info,tower_http=info"),
-        "COMMIT_TELEMETRY": "off",
-        "COMMIT_TELEMETRY_HOME": str(cfg["dir"] / "telemetry"),
         "COMMIT_POSTMARK_SERVER_TOKEN": "",
-        "COMMIT_TELEMETRY_TABLE_KEY": "",
     })
     if migrator:
         env.update({"COMMIT_MIGRATOR_DATABASE_URL": cfg["database_url"], "COMMIT_SCHEMA_OWNER": cfg["database_user"]})
@@ -400,7 +397,7 @@ def ensure_stack(cfg):
 
 
 def up(cfg, args):
-    for directory in (cfg["dir"], cfg["pids"], cfg["logs"], cfg["dir"] / "telemetry"):
+    for directory in (cfg["dir"], cfg["pids"], cfg["logs"]):
         directory.mkdir(parents=True, exist_ok=True)
     ensure_stack(cfg)
     if args.build:

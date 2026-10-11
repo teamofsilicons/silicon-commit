@@ -112,8 +112,6 @@ pub struct Client {
     http: HttpClient,
     base: Url,
     credential: Option<Credential>,
-    telemetry: bool,
-    source: &'static str,
     mutation: Option<Mutation>,
 }
 
@@ -127,8 +125,6 @@ impl fmt::Debug for Client {
         f.debug_struct("Client")
             .field("base_url", &self.base.as_str())
             .field("credential", &credential)
-            .field("telemetry", &self.telemetry)
-            .field("source", &self.source)
             .finish_non_exhaustive()
     }
 }
@@ -193,8 +189,6 @@ impl Client {
             http,
             base,
             credential: None,
-            telemetry: true,
-            source: "rust-client",
             mutation: None,
         })
     }
@@ -223,22 +217,29 @@ impl Client {
         Ok(self)
     }
 
-    /// Opts this client out of diagnostic telemetry (`X-Commit-Telemetry: off`).
+    /// Does nothing. Commit records no telemetry, so there is nothing to turn on or off.
+    #[deprecated(
+        since = "0.6.0",
+        note = "Commit records no telemetry; this does nothing and can be removed"
+    )]
     #[must_use]
-    pub fn with_telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry = enabled;
+    pub fn with_telemetry(self, _enabled: bool) -> Self {
         self
     }
 
-    /// Names the interface in request diagnostics (`cli`, `browser`, `daemon` or
-    /// `rust-client`); no command arguments are sent.
-    pub fn with_source(mut self, source: &'static str) -> Result<Self, Error> {
+    /// Does nothing. The source only named the interface in request diagnostics, which
+    /// Commit no longer records. A value other than `cli`, `browser`, `daemon` or
+    /// `rust-client` is still refused.
+    #[deprecated(
+        since = "0.6.0",
+        note = "Commit records no request diagnostics; this does nothing and can be removed"
+    )]
+    pub fn with_source(self, source: &'static str) -> Result<Self, Error> {
         if !matches!(source, "cli" | "browser" | "daemon" | "rust-client") {
             return Err(Error::Invalid(format!(
                 "`{source}` is not a client source; use cli, browser, daemon or rust-client."
             )));
         }
-        self.source = source;
         Ok(self)
     }
 
@@ -660,11 +661,8 @@ impl Client {
             .request(method, self.url(path, scope)?)
             .query(query)
             .header("x-commit-supported-versions", CONTRACT_VERSION.to_string())
-            .header("x-commit-client", self.source)
-            .header(
-                "x-commit-telemetry",
-                if self.telemetry { "on" } else { "off" },
-            );
+            // Commit records no telemetry. Deployments older than 0.6.0 did unless asked not to.
+            .header("x-commit-telemetry", "off");
         if scope == Scope::Api {
             match &self.credential {
                 Some(Credential::Bearer(token)) => {

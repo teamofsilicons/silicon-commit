@@ -274,9 +274,6 @@ GRANT UPDATE ON commit.email_jobs TO :"worker_role";
 GRANT SELECT (id,attempts) ON commit.email_jobs TO :"worker_role";
 GRANT EXECUTE ON FUNCTION commit.claim_email() TO :"worker_role";
 
-GRANT INSERT ON commit.telemetry_events TO :"api_role";
-GRANT SELECT, UPDATE, DELETE ON commit.telemetry_events TO :"worker_role";
-
 GRANT EXECUTE ON FUNCTION commit.lock_notification_access(uuid) TO :"worker_role";
 COMMIT;
 

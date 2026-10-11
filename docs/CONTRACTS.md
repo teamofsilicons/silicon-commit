@@ -5,7 +5,7 @@ Read `GET /api/v1/contracts` for the live compatibility matrix. Contract 2 is th
 | Consumer | Contract | Behavior |
 | --- | --- | --- |
 | Client / CLI 0.1.x–0.4.x | 1 | No longer served (406); upgrade |
-| Client / CLI 0.5.x | 2 | Silicon Accounts sign-in, personal accounts, custodians |
+| Client / CLI 0.5.x and 0.6.x | 2 | Silicon Accounts sign-in, personal accounts, custodians |
 | HTTP integrations | 2 | Select explicitly or accept the default |
 
 Send `X-Commit-API-Version: 2` or `X-Commit-Supported-Versions: 2`. The backend serves version 2 and returns `X-Commit-API-Version: 2`. Omitting the headers selects version 2; a request that asks only for version 1, or repeats a negotiation header, returns 406. The client refuses an explicitly incompatible response version.

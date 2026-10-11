@@ -1,6 +1,6 @@
 [package]
 name = "silicon-commit-client"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.98"
 description = "Stateless Rust client for Silicon Commit: the HTTP API and Silicon Accounts sign-in for Commit's own tools"

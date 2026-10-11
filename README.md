@@ -102,9 +102,9 @@ make test
   are optional HTTPS endpoints; Commit stores no endpoint signing secret. Per-todo rules exclusively override the list rule until a
   null override restores list-wide fallback.
 - Secrets, authorization headers, bodies, and provider payloads are excluded
-  from telemetry.
+  from logs.
 
-Commit authenticates with Silicon Accounts; Postmark delivers email, and optional diagnostics use a dedicated Space Station table. Webhook delivery is direct from the worker to the stored HTTPS destination, with durable outbox retries and idempotency.
+Commit authenticates with Silicon Accounts and Postmark delivers email. Commit records no telemetry. Webhook delivery is direct from the worker to the stored HTTPS destination, with durable outbox retries and idempotency.
 
 ## Configuration
 
@@ -118,7 +118,7 @@ enforces:
 - exactly one `sslmode=verify-full` or `ssl-mode=verify-full` parameter in each
   runtime or migrator PostgreSQL URL;
 - HTTPS Silicon Accounts URLs and the account webhook secret for the API;
-- the Commit app secret for the API; Postmark and Space Station credentials belong only to the worker.
+- the Commit app secret for the API; Postmark credentials belong only to the worker.
 
 Production API and worker deployments should use separate environment and
 secret sets. `commit-api` reads the Silicon Accounts configuration. `commit-worker` needs database and worker settings plus enabled delivery integrations; it delivers directly to snapshotted webhook URLs. Both processes
@@ -226,7 +226,7 @@ version response, for example:
 ```sh
 docker build \
   --build-arg GIT_COMMIT_SHA="$(git rev-parse HEAD)" \
-  --tag silicon-commit:0.5.0 \
+  --tag silicon-commit:0.6.0 \
   .
 ```
 

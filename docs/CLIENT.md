@@ -94,5 +94,5 @@ and description, and `auth::SignInRefusal::of(&error)` says which: `AlreadyUsed`
   `Mutation`.
 
 The client never reads `SILICON_HOME` or saves anything; the CLI uses `SILICON_HOME` as its default state home. See
-[projects](PROJECTS.md), [notifications](NOTIFICATIONS.md), [contracts](CONTRACTS.md), [telemetry](TELEMETRY.md) and
+[projects](PROJECTS.md), [notifications](NOTIFICATIONS.md), [contracts](CONTRACTS.md) and
 [development](DEVELOPMENT.md).

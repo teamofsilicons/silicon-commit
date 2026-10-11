@@ -6,7 +6,7 @@
 Explore the tree with `commit --help`, then `commit todos --help` or `commit projects --help`, then a command's own
 `--help`: each page says what the command is for, how it combines with others, and its flags. `commit docs` prints
 the bundled guides offline (`start`, `cli`, `projects`, `notifications`, `client`, `api`, `accounts`, `contracts`,
-`development`, `telemetry`, `deployment`). Source: [GitHub](https://github.com/teamofsilicons/silicon-commit);
+`development`, `deployment`). Source: [GitHub](https://github.com/teamofsilicons/silicon-commit);
 packages: [CLI](https://crates.io/crates/silicon-commit-cli), [client](https://crates.io/crates/silicon-commit-client).
 
 ## Sign in
@@ -75,7 +75,6 @@ commit --profile scout logout
 | `--api-url` / `COMMIT_API_URL` | the saved session's, else `https://api.commit.teamofsilicons.com` |
 | `--accounts-url` / `ACCOUNTS_URL` | the saved session's, else `https://accounts.teamofsilicons.com` |
 | `--token` / `COMMIT_ACCESS_TOKEN` | a Silicon Accounts access token issued to `commit`, used as is (never saved or refreshed) |
-| `COMMIT_TELEMETRY=off` | diagnostics on ([telemetry](TELEMETRY.md)) |
 
 A saved session is only ever sent to the servers it was made for: asking for another API or Silicon Accounts URL
 fails with `signed_in_elsewhere` until you sign in there. Plain `http://` URLs are accepted only for this machine
@@ -86,9 +85,9 @@ ACCOUNTS_URL=http://localhost:9590 COMMIT_API_URL=http://127.0.0.1:4141 commit l
 ```
 
 `commit config home DIRECTORY` keeps the state in `DIRECTORY/.commit` (the choice is remembered in the default
-location); `commit config show` prints the configuration without secrets; `commit config telemetry off` turns
-diagnostics off for later commands. `commit login --no-save` prints the tokens instead of saving them; treat that
-output as a secret.
+location); `commit config show` prints the configuration without secrets. Commit records no telemetry
+(`commit config telemetry` is still accepted and does nothing). `commit login --no-save` prints the tokens instead
+of saving them; treat that output as a secret.
 
 Sessions from the previous sign-in system cannot be used: `commit login status` reports `legacy_session`, commands
 ask you to sign in again, and `commit logout` deletes the old file.

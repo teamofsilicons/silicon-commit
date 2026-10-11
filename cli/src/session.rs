@@ -318,7 +318,6 @@ fn lock_in(directory: &std::path::Path) -> Result<Lock, CliError> {
 /// The Silicon Accounts client for a saved session.
 pub fn accounts_auth(accounts_url: &str) -> Result<AccountsAuth, CliError> {
     AccountsAuth::builder(accounts_url)
-        .telemetry(state::telemetry_enabled())
         .user_agent(format!("silicon-commit-cli/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(CliError::from)

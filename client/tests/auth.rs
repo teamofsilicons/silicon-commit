@@ -9,7 +9,7 @@ use silicon_commit_client::auth::{
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_string_contains, method, path},
+    matchers::{body_string_contains, header, method, path},
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -45,6 +45,7 @@ async fn mount_poll(server: &MockServer, response: ResponseTemplate) {
         ))
         .and(body_string_contains("device_code=sad_device_secret"))
         .and(body_string_contains("client_id=commit"))
+        .and(header("x-accounts-telemetry", "off"))
         .respond_with(response)
         .up_to_n_times(1)
         .mount(server)
@@ -62,6 +63,9 @@ async fn device_sign_in_uses_commits_client_id_and_waits_for_approval() -> TestR
                 && body["scope"] == "email"
                 && body["client_label"] == "test laptop"
                 && !r.headers.contains_key("authorization")
+                && r.headers
+                    .get("x-accounts-telemetry")
+                    .is_some_and(|v| v == "off")
         })
         .respond_with(device_authorization(1))
         .expect(1)
@@ -175,6 +179,7 @@ async fn slt_exchange_sends_the_client_id_alone_and_explains_refusals() -> TestR
         ))
         .and(body_string_contains("slt=slt_good"))
         .and(body_string_contains("client_id=commit"))
+        .and(header("x-accounts-telemetry", "off"))
         .and(|r: &wiremock::Request| {
             !r.headers.contains_key("authorization")
                 && !String::from_utf8_lossy(&r.body).contains("client_secret")

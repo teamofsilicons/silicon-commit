@@ -39,7 +39,6 @@ pub struct AccountsAuth {
     accounts: AccountsClient,
     http: reqwest::Client,
     app_id: String,
-    telemetry: bool,
 }
 
 impl fmt::Debug for AccountsAuth {
@@ -56,7 +55,6 @@ impl fmt::Debug for AccountsAuth {
 pub struct AccountsAuthBuilder {
     url: String,
     app_id: String,
-    telemetry: bool,
     product: Option<String>,
 }
 
@@ -68,14 +66,18 @@ impl AccountsAuthBuilder {
         self
     }
 
-    /// When false, requests carry `X-Accounts-Telemetry: off`. Default true.
+    /// Does nothing. Every request already carries `X-Accounts-Telemetry: off`: Commit's
+    /// tools record no telemetry and ask Silicon Accounts not to record any for them.
+    #[deprecated(
+        since = "0.6.0",
+        note = "requests always opt out of Silicon Accounts telemetry; this does nothing and can be removed"
+    )]
     #[must_use]
-    pub fn telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry = enabled;
+    pub fn telemetry(self, _enabled: bool) -> Self {
         self
     }
 
-    /// A product token prepended to the User-Agent, e.g. `silicon-commit-cli/0.5.0`.
+    /// A product token prepended to the User-Agent, e.g. `silicon-commit-cli/0.6.0`.
     #[must_use]
     pub fn user_agent(mut self, product: impl Into<String>) -> Self {
         self.product = Some(product.into());
@@ -101,7 +103,7 @@ impl AccountsAuthBuilder {
             .unwrap_or_else(|| format!("silicon-commit-client/{}", env!("CARGO_PKG_VERSION")));
         let accounts = AccountsClient::builder()
             .base_url(self.url)
-            .telemetry(self.telemetry)
+            .telemetry(false)
             .user_agent(product.clone())
             .build()?;
         let http = reqwest::Client::builder()
@@ -120,7 +122,6 @@ impl AccountsAuthBuilder {
             accounts,
             http,
             app_id,
-            telemetry: self.telemetry,
         })
     }
 }
@@ -288,7 +289,6 @@ impl AccountsAuth {
         AccountsAuthBuilder {
             url: accounts_url.into(),
             app_id: APP_ID.to_owned(),
-            telemetry: true,
             product: None,
         }
     }
@@ -456,14 +456,12 @@ impl AccountsAuth {
             segments.pop_if_empty().extend(["v1", "oauth", endpoint]);
         }
         let what = format!("POST /v1/oauth/{endpoint}");
-        let mut request = self
+        let request = self
             .http
             .post(url)
             .header(ACCEPT, "application/json")
+            .header(silicon_accounts_client::TELEMETRY_HEADER, "off")
             .form(form);
-        if !self.telemetry {
-            request = request.header(silicon_accounts_client::TELEMETRY_HEADER, "off");
-        }
         let response = request.send().await.map_err(|e| self.transport(e, &what))?;
         let status = response.status();
         let headers = response.headers().clone();

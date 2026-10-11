@@ -150,7 +150,7 @@ pub enum Command {
         #[arg(long)]
         save_only: bool,
     },
-    /// Local settings: state directory and telemetry
+    /// Local settings: where Commit keeps its state
     #[command(subcommand_required = true, arg_required_else_help = true)]
     Config {
         #[command(subcommand)]
@@ -452,7 +452,8 @@ pub enum ConfigCommand {
     Home { location: PathBuf },
     /// Show the local configuration (no secrets)
     Show,
-    /// Turn diagnostics on or off for every later command (COMMIT_TELEMETRY overrides it)
+    /// Does nothing: telemetry was removed. Kept so existing scripts keep working.
+    #[command(hide = true)]
     Telemetry {
         #[arg(value_parser = ["on", "off"])]
         value: String,
@@ -516,9 +517,8 @@ fn config(command: &ConfigCommand) -> Result<(), CliError> {
             let home = state::set_home(location)?;
             println!("Commit home directory set to {}", home.display());
         }
-        ConfigCommand::Telemetry { value } => {
-            state::private_write(&state::directory().join("telemetry"), value.as_bytes())?;
-            println!("Telemetry {value}");
+        ConfigCommand::Telemetry { .. } => {
+            println!("Telemetry was removed from Commit; there is nothing to turn on or off.");
         }
         ConfigCommand::Show => {
             let saved = match session::load() {
@@ -535,7 +535,6 @@ fn config(command: &ConfigCommand) -> Result<(), CliError> {
                 "signed_in": saved.is_some(),
                 "api_url": saved.as_ref().map(|s| s.0.clone()),
                 "accounts_url": saved.as_ref().map(|s| s.1.clone()),
-                "telemetry": if state::telemetry_enabled() { "on" } else { "off" },
                 "docs": docs::DOCS_URL,
                 "repository": docs::REPOSITORY_URL,
             }));

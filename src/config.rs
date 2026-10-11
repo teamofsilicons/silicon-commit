@@ -422,8 +422,8 @@ pub const DEFAULT_APP_ID: &str = "commit";
 /// Production Silicon Accounts.
 pub const DEFAULT_ACCOUNTS_URL: &str = "https://accounts.teamofsilicons.com";
 
-/// Environment variables of the IAM/Honeycomb era that Commit no longer reads.
-const RETIRED_VARIABLES: [&str; 11] = [
+/// Environment variables Commit no longer reads: the IAM/Honeycomb era's, and the removed telemetry's.
+const RETIRED_VARIABLES: [&str; 14] = [
     "COMMIT_AUTH_MODE",
     "COMMIT_IAM_BASE_URL",
     "COMMIT_IAM_APP_ID",
@@ -435,6 +435,9 @@ const RETIRED_VARIABLES: [&str; 11] = [
     "COMMIT_HONEYCOMB_URL",
     "COMMIT_TEST_ENVIRONMENT_ENCRYPTION_KEY",
     "COMMIT_TEST_KEY",
+    "COMMIT_TELEMETRY",
+    "COMMIT_TELEMETRY_TABLE_KEY",
+    "COMMIT_TELEMETRY_HOME",
 ];
 
 /// Names of retired variables that are still set, so the process can say so at boot.

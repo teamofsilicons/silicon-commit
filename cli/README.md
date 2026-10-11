@@ -40,7 +40,7 @@ Every command explains itself: `commit --help`, then `commit <command> --help`. 
 `commit docs start`, `commit docs cli`.
 
 Configuration: `COMMIT_API_URL` (default `https://api.commit.teamofsilicons.com`), `ACCOUNTS_URL` (default
-`https://accounts.teamofsilicons.com`), `COMMIT_PROFILE`, `COMMIT_ACCESS_TOKEN`, `COMMIT_TELEMETRY=off`.
+`https://accounts.teamofsilicons.com`), `COMMIT_PROFILE`, `COMMIT_ACCESS_TOKEN`. Commit records no telemetry.
 Plain `http://` URLs are accepted only for this machine.
 
 Guide: [CLI](https://docs.commit.teamofsilicons.com/cli/) · Source:

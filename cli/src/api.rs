@@ -14,7 +14,7 @@ use silicon_commit_client::{Client, Error as ClientError, Mutation};
 use crate::login::{elsewhere, targets};
 use crate::output::{CliError, print_json};
 use crate::session::{self, Loaded};
-use crate::{Command, ProjectCommand, Root, SiliconCommand, TodoCommand, docs, state};
+use crate::{Command, ProjectCommand, Root, SiliconCommand, TodoCommand, docs};
 
 pub const TODOS_HELP: &str = "\
 A todo belongs to whoever created it and is assigned to one account (yourself or anyone
@@ -108,11 +108,9 @@ Examples:
   commit silicons allow si:scout c:alice
   commit silicons disallow si:scout c:alice";
 
-/// A client for `api_url` with this process's telemetry choice and an optional bearer.
+/// A client for `api_url` with an optional bearer.
 pub fn client(api_url: &str, token: Option<&str>) -> Result<Client, CliError> {
-    let client = Client::new(api_url)?
-        .with_source("cli")?
-        .with_telemetry(state::telemetry_enabled());
+    let client = Client::new(api_url)?;
     Ok(match token {
         Some(token) => client.with_bearer(token),
         None => client,

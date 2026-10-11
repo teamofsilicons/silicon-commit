@@ -14,9 +14,11 @@ async fn conditional_writes_and_empty_deletes_match_the_api_contract()
         .and(header("if-match", "\"0\""))
         .and(header("authorization", "Bearer eyJ.access.token"))
         .and(header("x-commit-supported-versions", "2"))
-        .and(header("x-commit-client", "rust-client"))
+        .and(header("x-commit-telemetry", "off"))
         .and(|r: &wiremock::Request| {
-            r.headers.contains_key("idempotency-key") && !r.headers.contains_key("x-org-id")
+            r.headers.contains_key("idempotency-key")
+                && !r.headers.contains_key("x-org-id")
+                && !r.headers.contains_key("x-commit-client")
         })
         .respond_with(
             ResponseTemplate::new(200)
@@ -203,9 +205,12 @@ async fn the_client_negotiates_contract_two_and_refuses_others()
         .expect(1)
         .mount(&server)
         .await;
+    // The deprecated switches still compile and turn nothing on.
+    #[allow(deprecated)]
     let client = Client::new(&server.uri())?
-        .with_bearer("token")
-        .with_telemetry(false);
+        .with_source("cli")?
+        .with_telemetry(true)
+        .with_bearer("token");
     assert_eq!(
         client.claim_project_task("project", "task").await?["todo_id"],
         "linked"

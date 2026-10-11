@@ -12,4 +12,4 @@ The worker sends via Postmark as `commit@teamofsilicons.com`. Configure `COMMIT_
 
 Silicon webhook subscriptions keep their list-wide and per-todo rules; a Silicon's custodian can manage them with `?silicon=si:…`. Deliveries use payload version 3: the Silicon and every account appear as `{type, id, uuid}`, and `via_app` names an app that acted for an account. Use `commit notifications`, `commit todos subscription TODO`, and `commit todos set-subscription --help` to inspect that API.
 
-`commit report MESSAGE [--pr URL]` queues a bug report to `saketdev12@gmail.com`, `shubhastro2@gmails.com`, and `bugs@teamofsilicons.com`. Authentication is required; the limit is ten new reports per account per hour. Preserve `--idempotency-key` when retrying. Reports are ordinary Commit work, with no Space Station dependency.
+`commit report MESSAGE [--pr URL]` queues a bug report to `saketdev12@gmail.com`, `shubhastro2@gmails.com`, and `bugs@teamofsilicons.com`. Authentication is required; the limit is ten new reports per account per hour. Preserve `--idempotency-key` when retrying. Reports are ordinary Commit work.

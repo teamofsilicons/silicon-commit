@@ -16,7 +16,7 @@ use silicon_commit::{
     config::{DEFAULT_ACCOUNTS_URL, DEFAULT_APP_ID, MigrationSettings},
     domain::ActorType,
     infrastructure::postgres::{self, identity_links},
-    telemetry,
+    logging,
 };
 
 const USAGE: &str = "usage:
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let settings = MigrationSettings::from_env()?;
-    telemetry::init(&settings.log_filter)?;
+    logging::init(&settings.log_filter)?;
     match arguments.first().map(String::as_str) {
         None => {
             let pool = postgres::connect_migrator(&settings.database, "commit-migrate").await?;
@@ -161,6 +161,7 @@ fn accounts_client() -> anyhow::Result<Option<(AccountsClient, String, secrecy::
     let app_id = std::env::var("COMMIT_APP_ID").unwrap_or_else(|_| DEFAULT_APP_ID.to_owned());
     let client = AccountsClient::builder()
         .base_url(url)
+        .telemetry(false)
         .build()
         .context("ACCOUNTS_URL is not a usable Silicon Accounts URL")?;
     Ok(Some((client, app_id, secrecy::SecretString::from(secret))))

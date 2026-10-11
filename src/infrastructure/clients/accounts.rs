@@ -100,6 +100,8 @@ impl AccountsIdentity {
             .timeout(request_timeout)
             .max_retries(1)
             .user_agent(concat!("silicon-commit/", env!("CARGO_PKG_VERSION")))
+            // Commit records no telemetry and asks Silicon Accounts not to record any for its calls.
+            .telemetry(false)
             .build()
             .map_err(|_| ClientBuildError::InvalidEndpoint)?;
         Ok(Self {
