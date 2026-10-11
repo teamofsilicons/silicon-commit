@@ -205,8 +205,9 @@ GRANT EXECUTE
 -- Worker: webhook queue state plus one owner-defined bounded retention
 -- capability; no direct content deletion/redaction, project writes, identity
 -- mutation, audit insertion, or new product-row creation. It reads only the
--- uuid and current id of a delivery's recipient.
-GRANT SELECT (uuid, public_id)
+-- uuid, current id and link status of a delivery's recipient (unlinked
+-- recipients are skipped when claiming).
+GRANT SELECT (uuid, public_id, status)
     ON TABLE commit.accounts
     TO :"worker_role";
 GRANT SELECT
