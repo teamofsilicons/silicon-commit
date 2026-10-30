@@ -24,3 +24,5 @@ npm-debug.log*
 /test-results/
 /playwright-report/
 /blob-report/
+
+.dev/

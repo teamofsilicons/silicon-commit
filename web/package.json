@@ -30,7 +30,9 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
-    "remark-gfm": "4.0.1"
+    "remark-gfm": "4.0.1",
+    "@aws-sdk/client-dynamodb": "3.1160.0",
+    "@vercel/oidc-aws-credentials-provider": "3.3.17"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
