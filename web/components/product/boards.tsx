@@ -471,6 +471,8 @@ function WorkPanel({
   const [status, setStatus] = useState("open"),
     [kind, setKind] = useState("all"),
     [owner, setOwner] = useState(""),
+    [assignee, setAssignee] = useState(""),
+    [assignedTeam, setAssignedTeam] = useState(""),
     [category, setCategory] = useState(""),
     [offset, setOffset] = useState(0),
     [filtering, setFiltering] = useState(false);
@@ -479,6 +481,7 @@ function WorkPanel({
     mine,
     category: category || undefined,
     owner: owner || undefined,
+    assignee: assignedTeam || assignee || undefined,
     status: status === "all" ? undefined : status,
     kind: kind === "all" ? undefined : kind,
     offset,
@@ -557,7 +560,26 @@ function WorkPanel({
                 setOffset(0);
               }}
             />
+            <PersonField
+              label="Assigned to"
+              value={assignee}
+              onChange={(value) => {
+                setAssignee(value);
+                setAssignedTeam("");
+                setOffset(0);
+              }}
+            />
+            <TeamSelect
+              label="Assigned team"
+              value={assignedTeam}
+              onChange={(value) => {
+                setAssignedTeam(value);
+                setAssignee("");
+                setOffset(0);
+              }}
+            />
             <Input
+              list={board ? "board-category-options" : undefined}
               label="Filter by category"
               value={category}
               onChange={(e) => {
@@ -565,6 +587,13 @@ function WorkPanel({
                 setOffset(0);
               }}
             />
+            {board ? (
+              <datalist id="board-category-options">
+                {board.categories.map((c) => (
+                  <option key={c.id} value={c.name} />
+                ))}
+              </datalist>
+            ) : null}
             <Select
               label="Work type"
               value={kind}
