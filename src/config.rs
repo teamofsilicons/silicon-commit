@@ -73,7 +73,7 @@ pub struct ServerSettings {
     pub bind_addr: SocketAddr,
     /// Canonical externally visible API base URL.
     pub public_base_url: Url,
-    /// Exact browser origins allowed to call the API; empty denies CORS.
+    /// Exact origin restriction for this bearer API; empty permits standalone interface origins.
     pub cors_allowed_origins: Vec<Url>,
     /// Maximum request processing duration.
     pub request_timeout: Duration,

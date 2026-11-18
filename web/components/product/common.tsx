@@ -4,7 +4,7 @@ import {useInfiniteQuery, useQuery, useQueryClient} from "@tanstack/react-query"
 import {Button} from "@/components/silicon-ui/button/button";
 import {Select} from "@/components/silicon-ui/select/select";
 import {Dialog,DialogContent} from "@/components/silicon-ui/dialog/dialog";
-import {AccountChip} from "@/components/foundation/account/account-chip";
+import {PersonChip} from "./people";
 import {ErrorAlert} from "@/components/foundation/feedback/error-alert";
 import {ApiError} from "@/lib/errors";
 import {request,type RequestOptions} from "@/lib/client/api";
@@ -34,5 +34,5 @@ export const todoStatuses=["yet_to_do","in_progress","blocked","completed","canc
 export const projectStatuses=["yet_to_start","in_progress","blocked","completed","canceled"];
 export function StatusSelect({value,onChange,project=false,all=false,label:field="Status"}:{value:string;onChange:(value:string)=>void;project?:boolean;all?:boolean;label?:string}){return <Select label={field} value={value} onValueChange={onChange} options={[...(all?[{value:"all",label:"All statuses"}]:[]),...(project?projectStatuses.filter(value=>all||value!=="completed"):todoStatuses).map(value=>({value,label:label(value)}))]}/>;}
 export function Status({value}:{value:string}){return <span className={styles.status} data-status={value} data-sq="surface">{label(value)}</span>;}
-export function Who({actor}:{actor:Actor|string}){const a=typeof actor==="string"?{id:actor,type:actor.startsWith("si:")?"silicon" as const:"carbon" as const}:actor;return <AccountChip account={{...a,kind:a.type}} variant="chip"/>;}
+export function Who({actor}:{actor:Actor|string}){const a=typeof actor==="string"?{id:actor,type:actor.startsWith("si:")?"silicon" as const:"carbon" as const}:actor;return <PersonChip id={a.id} fallback={{...a,kind:a.type}}/>;}
 export function Attachments({urls}:{urls:string[]}){return urls.length?<div className={styles.attachments}>{urls.map((url,i)=>{let href:string|undefined;try{const u=new URL(url);if(u.protocol==="https:")href=u.href;}catch{}return href?<a key={url} href={href} target="_blank" rel="noreferrer">Attachment {i+1} ↗</a>:null;})}</div>:null;}

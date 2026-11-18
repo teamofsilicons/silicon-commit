@@ -101,7 +101,7 @@ impl ProjectService {
         actor: &VerifiedActor,
         locator: &ProjectLocator,
     ) -> Result<Project, AppError> {
-        postgres::get_project(&self.pool, locator, actor.uuid())
+        postgres::get_project(&self.pool, locator, actor)
             .await?
             .ok_or(AppError::NotFound)
     }
@@ -133,6 +133,14 @@ impl ProjectService {
         let command = request
             .validate(&self.limits, &actor.actor)
             .map_err(validation_error)?;
+        if command
+            .details
+            .team_ids
+            .iter()
+            .any(|id| !actor.shareable_teams.contains(id))
+        {
+            return Err(AppError::Forbidden);
+        }
         let participants = self
             .resolve_participants(actor, &command.silicon_ids, &command.details.carbon_ids)
             .await?;
@@ -150,6 +158,8 @@ impl ProjectService {
             ensure_reachable(&mut transaction, actor, &participant.actor, "silicon_ids").await?;
         }
 
+        crate::application::boards::check_board(&mut transaction, actor, command.details.board_id)
+            .await?;
         let created_at =
             postgres::next_project_created_at(&mut transaction, &actor.actor, &command.slug)
                 .await?;
@@ -167,6 +177,10 @@ impl ProjectService {
         .await?;
         for (task_id, command, assignee) in seeds {
             postgres::insert_task(&mut transaction, actor, project_id, task_id, &command).await?;
+            if let Some(team) = &command.assigned_team {
+                self.assign_team(&mut transaction, actor, project_id, task_id, team)
+                    .await?;
+            }
             if let Some(assignee) = assignee {
                 self.assign_task(
                     &mut transaction,
@@ -286,6 +300,25 @@ impl ProjectService {
             .authorize_locked_project(&mut transaction, actor, locator)
             .await?;
         ensure_project_remains_terminal(locked_project.status, &command)?;
+        crate::application::boards::check_board(
+            &mut transaction,
+            actor,
+            command.board_id.apply(None),
+        )
+        .await?;
+        if let Some(teams) = &command.team_ids {
+            let existing: Vec<String> =
+                sqlx::query_scalar("SELECT team_ids FROM commit.projects WHERE id=$1")
+                    .bind(locked_project.id.into_uuid())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+            if teams
+                .iter()
+                .any(|id| !existing.contains(id) && !actor.shareable_teams.contains(id))
+            {
+                return Err(AppError::Forbidden);
+            }
+        }
         remember(&mut transaction, actor, &newly_resolved).await?;
         for member in &newly_resolved {
             if !snapshot.has_member(&member.actor.uuid) {
@@ -509,6 +542,10 @@ impl ProjectService {
 
         let task_id = ProjectTaskId::new();
         postgres::insert_task(&mut transaction, actor, project_id, task_id, &command).await?;
+        if let Some(team) = &command.assigned_team {
+            self.assign_team(&mut transaction, actor, project_id, task_id, team)
+                .await?;
+        }
         if let Some(assignee) = &assignee {
             self.assign_task(&mut transaction, actor, project_id, task_id, Some(assignee))
                 .await?;
@@ -576,7 +613,12 @@ impl ProjectService {
             .await?
             .ok_or(AppError::NotFound)?;
         remember(&mut transaction, actor, &[]).await?;
-        if let Some(assignee) = &assignment {
+        if let crate::domain::NullablePatch::Value(team) = &command.assigned_team {
+            if previous.assigned_team.as_ref() != Some(team) {
+                self.assign_team(&mut transaction, actor, project_id, task_id, team)
+                    .await?;
+            }
+        } else if let Some(assignee) = &assignment {
             self.assign_task(
                 &mut transaction,
                 actor,
@@ -584,6 +626,17 @@ impl ProjectService {
                 task_id,
                 assignee.as_ref(),
             )
+            .await?;
+        }
+        if matches!(command.assigned_team, crate::domain::NullablePatch::Null)
+            && assignment.is_none()
+        {
+            sqlx::query(
+                "UPDATE commit.project_tasks SET assigned_team=NULL WHERE project_id=$1 AND id=$2",
+            )
+            .bind(project_id.into_uuid())
+            .bind(task_id.into_uuid())
+            .execute(&mut *transaction)
             .await?;
         }
         let task = postgres::update_task(&mut transaction, project_id, task_id, &command)
@@ -849,8 +902,8 @@ impl ProjectService {
         let project = postgres::lock_project(connection, locator)
             .await?
             .ok_or(AppError::NotFound)?;
-        if !postgres::can_write(connection, actor.uuid(), project.id).await? {
-            if postgres::can_read(connection, actor.uuid(), project.id).await? {
+        if !postgres::can_write(connection, actor, project.id).await? {
+            if postgres::can_read(connection, actor, project.id).await? {
                 return Err(AppError::Denied {
                     code: "project_not_writable".into(),
                     message: "Only the project's members (and the custodians of member Silicons) can change it. Ask a member to add you.".to_owned(),
@@ -1030,13 +1083,20 @@ fn project_patch_fingerprint(request: &ProjectPatch) -> Value {
 }
 
 fn project_task_create_fingerprint(request: &ProjectTaskCreate) -> Value {
-    json!({
+    let mut body = json!({
         "assigned_to": request.assigned_to,
         "parent_task_id": request.parent_task_id,
         "title": request.title,
         "description": request.description,
         "status": request.status,
-    })
+    });
+    if request.plan != crate::domain::WorkPlan::default() {
+        body["plan"] = json!(request.plan);
+    }
+    if let Some(team) = &request.assigned_team {
+        body["assigned_team"] = json!(team);
+    }
+    body
 }
 
 fn blocker_fingerprint(request: &BlockerCreate) -> Value {

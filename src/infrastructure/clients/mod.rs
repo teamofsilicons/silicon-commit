@@ -6,6 +6,7 @@ use http::{HeaderMap, header};
 use thiserror::Error;
 
 pub mod accounts;
+pub(crate) mod collaboration;
 pub mod webhook;
 
 /// Redacted adapter construction failure.

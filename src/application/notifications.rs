@@ -163,7 +163,7 @@ impl NotificationSettingsService {
         todo_id: TodoId,
     ) -> Result<TodoNotificationSubscription, AppError> {
         let mut connection = self.pool.acquire().await?;
-        if !todo_store::can_see(&mut connection, todo_id, actor.uuid()).await? {
+        if !todo_store::can_see(&mut connection, todo_id, actor).await? {
             return Err(AppError::NotFound);
         }
         drop(connection);
@@ -198,7 +198,7 @@ impl NotificationSettingsService {
         let target = store::lock_todo_notification_target(transaction.as_mut(), todo_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        if !todo_store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+        if !todo_store::can_see(transaction.as_mut(), todo_id, actor).await? {
             return Err(AppError::NotFound);
         }
         authorize_todo_target(actor, &target)?;

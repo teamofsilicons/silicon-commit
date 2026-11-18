@@ -92,6 +92,18 @@ pub enum TodoView {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TodoCreate {
+    /// Time budget and completion.
+    #[serde(flatten)]
+    pub plan: super::WorkPlan,
+    /// Linked projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_ids: Vec<super::ProjectId>,
+    /// Containing board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<uuid::Uuid>,
+    /// Categories for organizing this todo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
     /// Human-readable title.
     pub title: String,
     /// Optional formatting-preserving description.
@@ -120,8 +132,20 @@ impl TodoCreate {
             .transpose()?;
         let attachments = validate_attachments(self.attachments, limits.attachments_per_todo)?;
 
+        self.plan.validate()?;
+        let mut projects = self.project_ids;
+        if let Some(id) = self.project_id {
+            projects.retain(|p| *p != id);
+            projects.insert(0, id);
+        }
+        super::validation::ensure_item_count("project_ids", projects.len(), 0, 64)?;
+        super::validation::ensure_unique("project_ids", &projects)?;
         Ok(ValidatedTodoCreate {
-            project_id: self.project_id,
+            plan: self.plan,
+            board_id: self.board_id,
+            project_id: projects.first().copied(),
+            project_ids: projects,
+            categories: super::categories(self.categories)?,
             title,
             description,
             assigned_to: self.assigned_to,
@@ -134,6 +158,14 @@ impl TodoCreate {
 /// Fully validated todo creation command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedTodoCreate {
+    /// Time budget and completion.
+    pub plan: super::WorkPlan,
+    /// Linked projects.
+    pub project_ids: Vec<super::ProjectId>,
+    /// Containing board.
+    pub board_id: Option<uuid::Uuid>,
+    /// Categories for organizing this todo.
+    pub categories: Vec<String>,
     /// Trimmed non-empty title.
     pub title: RequiredText,
     /// Bounded description, with `None` representing JSON absence.
@@ -211,6 +243,22 @@ where
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoPatch {
+    /// Time budget and completion.
+    #[serde(flatten)]
+    pub plan: super::PlanPatch,
+    /// Linked projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<super::ProjectId>>,
+    /// Containing board.
+    #[serde(default, skip_serializing_if = "super::NullablePatch::is_absent")]
+    pub board_id: super::NullablePatch<uuid::Uuid>,
+    /// Categories for organizing this todo.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub categories: Option<Vec<String>>,
     /// Replacement title.
     #[serde(
         default,
@@ -257,6 +305,10 @@ impl TodoPatch {
             && self.status.is_none()
             && self.attachments.is_none()
             && self.project_id.is_absent()
+            && self.categories.is_none()
+            && self.board_id.is_absent()
+            && self.project_ids.is_none()
+            && self.plan.is_empty()
     }
 
     /// Validates all supplied fields and rejects an empty patch.
@@ -280,7 +332,22 @@ impl TodoPatch {
             .map(|values| validate_attachments(values, limits.attachments_per_todo))
             .transpose()?;
 
+        self.plan.apply(&super::WorkPlan::default()).validate()?;
+        if let Some(ids) = &self.project_ids {
+            super::validation::ensure_item_count("project_ids", ids.len(), 0, 64)?;
+            super::validation::ensure_unique("project_ids", ids)?;
+            if !self.project_id.is_absent() {
+                return Err(ValidationError::invalid(
+                    "project_ids",
+                    "use project_ids or project_id in a patch",
+                ));
+            }
+        }
         Ok(ValidatedTodoPatch {
+            plan: self.plan,
+            board_id: self.board_id,
+            project_ids: self.project_ids,
+            categories: self.categories.map(super::categories).transpose()?,
             project_id: self.project_id,
             title,
             description,
@@ -294,6 +361,14 @@ impl TodoPatch {
 /// Fully validated todo patch command.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ValidatedTodoPatch {
+    /// Time budget and completion.
+    pub plan: super::PlanPatch,
+    /// Linked projects.
+    pub project_ids: Option<Vec<super::ProjectId>>,
+    /// Containing board.
+    pub board_id: super::NullablePatch<uuid::Uuid>,
+    /// Categories for organizing this todo.
+    pub categories: Option<Vec<String>>,
     /// Validated title replacement.
     pub title: Option<RequiredText>,
     /// Validated description operation.
@@ -311,6 +386,14 @@ pub struct ValidatedTodoPatch {
 /// Public todo aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Todo {
+    /// Time budget and completion.
+    pub plan: super::WorkPlan,
+    /// Linked projects.
+    pub project_ids: Vec<super::ProjectId>,
+    /// Containing board.
+    pub board_id: Option<uuid::Uuid>,
+    /// Categories for organizing this todo.
+    pub categories: Vec<String>,
     /// `UUIDv7` resource ID.
     pub id: TodoId,
     /// Validated title.
@@ -354,6 +437,11 @@ impl Serialize for Todo {
     {
         #[derive(Serialize)]
         struct WireTodo<'a> {
+            #[serde(flatten)]
+            plan: &'a super::WorkPlan,
+            board_id: Option<uuid::Uuid>,
+            project_ids: &'a [super::ProjectId],
+            categories: &'a [String],
             id: TodoId,
             project_id: Option<super::ProjectId>,
             title: &'a RequiredText,
@@ -369,6 +457,10 @@ impl Serialize for Todo {
         }
 
         WireTodo {
+            plan: &self.plan,
+            board_id: self.board_id,
+            project_ids: &self.project_ids,
+            categories: &self.categories,
             id: self.id,
             project_id: self.project_id,
             title: &self.title,
@@ -431,6 +523,10 @@ pub struct TodoNote {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoQuery {
+    /// Restrict to this board.
+    pub board_id: Option<uuid::Uuid>,
+    /// Match a category name, ignoring case.
+    pub category: Option<String>,
     /// Caller-relative list projection.
     #[serde(default)]
     pub view: TodoView,

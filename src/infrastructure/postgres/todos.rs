@@ -36,7 +36,7 @@ pub(crate) const OUTBOX_PAYLOAD_VERSION: i16 = 3;
 const TODO_PROJECTION: &str = r#"
     SELECT
         todo.id,
-        todo.project_id,
+        todo.project_id, todo.categories, todo.board_id, todo.project_ids, todo.ideal_minutes, todo.progress,
         todo.title,
         todo.description,
         assigned_by.uuid AS assigned_by_uuid,
@@ -61,6 +61,10 @@ const TODO_PROJECTION: &str = r#"
 
 /// Complete values needed to insert a todo aggregate.
 pub(crate) struct NewTodo<'a> {
+    pub(crate) board_id: Option<Uuid>,
+    pub(crate) project_ids: &'a [crate::domain::ProjectId],
+    pub(crate) plan: &'a crate::domain::WorkPlan,
+    pub(crate) categories: &'a [String],
     pub(crate) id: TodoId,
     pub(crate) title: &'a RequiredText,
     pub(crate) description: Option<&'a LimitedText>,
@@ -73,6 +77,10 @@ pub(crate) struct NewTodo<'a> {
 
 /// Full desired todo state after an authorized patch.
 pub(crate) struct TodoReplacement<'a> {
+    pub(crate) board_id: Option<Uuid>,
+    pub(crate) project_ids: &'a [crate::domain::ProjectId],
+    pub(crate) plan: &'a crate::domain::WorkPlan,
+    pub(crate) categories: &'a [String],
     pub(crate) title: &'a RequiredText,
     pub(crate) description: Option<&'a LimitedText>,
     pub(crate) assigned_to: &'a AccountUuid,
@@ -141,11 +149,23 @@ pub(crate) async fn list_todos(
     builder
         .push(" WHERE todo.deleted_at IS NULL AND commit.todo_access(todo.id, ")
         .push_bind(me)
+        .push(", ")
+        .push_bind(&actor.teams)
         .push(")");
+    if let Some(category) = &query.category {
+        builder
+            .push(" AND EXISTS(SELECT 1 FROM unnest(todo.categories) n WHERE lower(n)=lower(")
+            .push_bind(category)
+            .push("))");
+    }
+    if let Some(board) = query.board_id {
+        builder.push(" AND todo.board_id=").push_bind(board);
+    }
     if let Some(project_id) = query.project_id {
         builder
-            .push(" AND todo.project_id = ")
-            .push_bind(project_id.into_uuid());
+            .push(" AND ")
+            .push_bind(project_id.into_uuid())
+            .push("=ANY(todo.project_ids)");
     }
 
     match query.view {
@@ -231,14 +251,15 @@ fn push_account_filter(builder: &mut QueryBuilder<Postgres>, alias: &'static str
 pub(crate) async fn get_visible_todo(
     pool: &PgPool,
     todo_id: TodoId,
-    viewer: &AccountUuid,
+    viewer: &VerifiedActor,
 ) -> Result<Option<Todo>, AppError> {
     let sql = format!(
-        "{TODO_PROJECTION} WHERE todo.id = $1 AND todo.deleted_at IS NULL AND commit.todo_access(todo.id, $2)"
+        "{TODO_PROJECTION} WHERE todo.id = $1 AND todo.deleted_at IS NULL AND commit.todo_access(todo.id, $2, $3)"
     );
     let record = sqlx::query_as::<_, TodoRecord>(AssertSqlSafe(sql))
         .bind(todo_id.into_uuid())
-        .bind(viewer.as_str())
+        .bind(viewer.uuid().as_str())
+        .bind(&viewer.teams)
         .fetch_optional(pool)
         .await?;
     record.map(TodoRecord::into_domain).transpose()
@@ -248,12 +269,13 @@ pub(crate) async fn get_visible_todo(
 pub(crate) async fn can_see(
     connection: &mut PgConnection,
     todo_id: TodoId,
-    viewer: &AccountUuid,
+    viewer: &VerifiedActor,
 ) -> Result<bool, AppError> {
     Ok(
-        sqlx::query_scalar::<_, bool>("SELECT commit.todo_access($1, $2)")
+        sqlx::query_scalar::<_, bool>("SELECT commit.todo_access($1, $2, $3)")
             .bind(todo_id.into_uuid())
-            .bind(viewer.as_str())
+            .bind(viewer.uuid().as_str())
+            .bind(&viewer.teams)
             .fetch_one(connection)
             .await?,
     )
@@ -315,7 +337,7 @@ async fn get_todo_on_connection(
 pub(crate) async fn list_notes(
     pool: &PgPool,
     todo_id: TodoId,
-    viewer: &AccountUuid,
+    viewer: &VerifiedActor,
     query: CollectionQuery,
 ) -> Result<Option<Vec<TodoNote>>, AppError> {
     let cursor_created_at = query.cursor.map(PageCursor::created_at);
@@ -342,15 +364,16 @@ pub(crate) async fn list_notes(
         LEFT JOIN commit.accounts AS author ON author.uuid = note.author_account
         WHERE todo.id = $1
           AND todo.deleted_at IS NULL
-          AND commit.todo_access(todo.id, $2)
+          AND commit.todo_access(todo.id, $2, $6)
         ORDER BY note.created_at DESC NULLS LAST, note.id DESC NULLS LAST
         "#,
     )
     .bind(todo_id.into_uuid())
-    .bind(viewer.as_str())
+    .bind(viewer.uuid().as_str())
     .bind(cursor_created_at)
     .bind(cursor_id)
     .bind(i64::from(query.limit.get()) + 1)
+    .bind(&viewer.teams)
     .fetch_all(pool)
     .await?;
 
@@ -373,9 +396,9 @@ pub(crate) async fn insert_todo(
     sqlx::query(
         r#"
         INSERT INTO commit.todos (
-            id, title, description, assigned_by_account, assigned_to_account, status, project_id
+            id, title, description, assigned_by_account, assigned_to_account, status, project_id, categories, board_id, project_ids, ideal_minutes, progress
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(todo.id.into_uuid())
@@ -384,7 +407,7 @@ pub(crate) async fn insert_todo(
     .bind(todo.assigned_by.as_str())
     .bind(todo.assigned_to.as_str())
     .bind(todo.status)
-    .bind(todo.project_id.map(crate::domain::ProjectId::into_uuid))
+    .bind(todo.project_id.map(crate::domain::ProjectId::into_uuid)).bind(todo.categories).bind(todo.board_id).bind(todo.project_ids.iter().map(|id|id.into_uuid()).collect::<Vec<_>>()).bind(todo.plan.ideal_minutes).bind(todo.plan.progress)
     .execute(&mut *connection)
     .await?;
     insert_attachments(connection, todo.id, todo.attachments).await
@@ -403,7 +426,7 @@ pub(crate) async fn update_todo(
             description = $3,
             assigned_to_account = $4,
             status = $5,
-            project_id = $6
+            project_id = $6, categories = $7, board_id=$8, project_ids=$9, ideal_minutes=$10, progress=$11
         WHERE id = $1
           AND deleted_at IS NULL
         "#,
@@ -417,7 +440,7 @@ pub(crate) async fn update_todo(
         replacement
             .project_id
             .map(crate::domain::ProjectId::into_uuid),
-    )
+    ).bind(replacement.categories).bind(replacement.board_id).bind(replacement.project_ids.iter().map(|id|id.into_uuid()).collect::<Vec<_>>()).bind(replacement.plan.ideal_minutes).bind(replacement.plan.progress)
     .execute(&mut *connection)
     .await?;
     if result.rows_affected() != 1 {
@@ -769,6 +792,11 @@ pub(crate) async fn insert_outbox_event(
 
 #[derive(FromRow)]
 struct TodoRecord {
+    board_id: Option<Uuid>,
+    project_ids: Vec<Uuid>,
+    ideal_minutes: Option<i32>,
+    progress: Option<i16>,
+    categories: Vec<String>,
     id: Uuid,
     title: String,
     description: Option<String>,
@@ -804,6 +832,17 @@ impl TodoRecord {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Todo {
+            board_id: self.board_id,
+            project_ids: self
+                .project_ids
+                .into_iter()
+                .map(crate::domain::ProjectId::from_uuid)
+                .collect(),
+            plan: crate::domain::WorkPlan {
+                ideal_minutes: self.ideal_minutes,
+                progress: self.progress,
+            },
+            categories: self.categories,
             project_id: self.project_id.map(crate::domain::ProjectId::from_uuid),
             id: TodoId::from_uuid(self.id),
             title,

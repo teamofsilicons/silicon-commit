@@ -81,7 +81,7 @@ impl TodoService {
 
     /// Returns one active todo the caller can see.
     pub async fn get(&self, actor: &VerifiedActor, todo_id: TodoId) -> Result<Todo, AppError> {
-        store::get_visible_todo(&self.pool, todo_id, actor.uuid())
+        store::get_visible_todo(&self.pool, todo_id, actor)
             .await?
             .ok_or(AppError::NotFound)
     }
@@ -120,13 +120,18 @@ impl TodoService {
         remember(transaction.as_mut(), actor, std::slice::from_ref(&assignee)).await?;
         ensure_reachable(transaction.as_mut(), actor, &assignee.actor, "assigned_to").await?;
         let todo_id = TodoId::new();
-        if let Some(project_id) = request.project_id {
+        crate::application::boards::check_board(&mut transaction, actor, request.board_id).await?;
+        for &project_id in &request.project_ids {
             authorize_link(&mut transaction, actor, project_id).await?;
             share_project(&mut transaction, actor, project_id, &assignee.actor).await?;
         }
         store::insert_todo(
             transaction.as_mut(),
             &NewTodo {
+                categories: &request.categories,
+                board_id: request.board_id,
+                project_ids: &request.project_ids,
+                plan: &request.plan,
                 id: todo_id,
                 title: &request.title,
                 description: request.description.as_ref(),
@@ -183,6 +188,76 @@ impl TodoService {
         Ok(response)
     }
 
+    /// Adds or removes a set of project links across multiple owned todos atomically.
+    pub async fn link_projects(
+        &self,
+        actor: &VerifiedActor,
+        todo_ids: &[TodoId],
+        project_ids: &[ProjectId],
+        remove: bool,
+        request_id: &str,
+    ) -> Result<(), AppError> {
+        crate::domain::validation::ensure_item_count("todo_ids", todo_ids.len(), 1, 100)?;
+        crate::domain::validation::ensure_item_count("project_ids", project_ids.len(), 1, 64)?;
+        let mut projects = project_ids.to_vec();
+        projects.sort_by_key(|id| id.into_uuid());
+        projects.dedup();
+        let mut todos = todo_ids.to_vec();
+        todos.sort_by_key(|id| id.into_uuid());
+        todos.dedup();
+        let mut tx = self.pool.begin().await?;
+        for &id in &projects {
+            authorize_link(&mut tx, actor, id).await?;
+        }
+        for id in todos {
+            let todo = store::lock_todo(&mut tx, id)
+                .await?
+                .ok_or(AppError::NotFound)?;
+            if !actor.acts_for(&todo.assigned_by.uuid) {
+                return Err(AppError::Forbidden);
+            }
+            let mut links = todo.project_ids.clone();
+            if remove {
+                links.retain(|p| !projects.contains(p));
+            } else {
+                for project in &projects {
+                    if !links.contains(project) {
+                        links.push(*project);
+                        share_project(&mut tx, actor, *project, &todo.assigned_to).await?;
+                    }
+                }
+            }
+            if links == todo.project_ids {
+                continue;
+            }
+            crate::domain::validation::ensure_item_count("project_ids", links.len(), 0, 64)?;
+            if remove && let Some(primary)=todo.project_id && !links.contains(&primary) &&
+                sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM commit.project_tasks WHERE todo_id=$1 AND deleted_at IS NULL)").bind(id.into_uuid()).fetch_one(&mut *tx).await? {
+                return Err(AppError::Conflict{code:"project_task_link_is_immutable".into()});
+            }
+            let links: Vec<_> = links.iter().map(|p| p.into_uuid()).collect();
+            sqlx::query("UPDATE commit.todos SET project_id=$2,project_ids=$3 WHERE id=$1")
+                .bind(id.into_uuid())
+                .bind(links.first())
+                .bind(&links)
+                .execute(&mut *tx)
+                .await?;
+            store::insert_audit_event(
+                &mut tx,
+                actor,
+                "todo.updated",
+                "todo",
+                id.into_uuid(),
+                request_id,
+                &json!({"fields":["project_ids"]}),
+                self.audit_retention,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Applies an authorized field-level todo patch exactly once.
     pub async fn update(
         &self,
@@ -219,13 +294,29 @@ impl TodoService {
         let current = store::lock_todo(transaction.as_mut(), todo_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        if !store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+        if !store::can_see(transaction.as_mut(), todo_id, actor).await? {
             return Err(AppError::NotFound);
         }
         authorize_patch(actor, &current, &patch)?;
         remember(transaction.as_mut(), actor, resolved_assignee.as_slice()).await?;
 
         let desired = DesiredTodo::from_patch(&current, patch, resolved_assignee);
+        crate::application::boards::check_board(
+            &mut transaction,
+            actor,
+            desired
+                .board_id
+                .filter(|_| current.board_id != desired.board_id),
+        )
+        .await?;
+        for &id in &desired.project_ids {
+            if !current.project_ids.contains(&id)
+                || desired.assigned_to.uuid != current.assigned_to.uuid
+            {
+                authorize_link(&mut transaction, actor, id).await?;
+                share_project(&mut transaction, actor, id, &desired.assigned_to).await?;
+            }
+        }
         if desired.changed_fields.contains(&"assigned_to") {
             ensure_reachable(
                 transaction.as_mut(),
@@ -279,6 +370,10 @@ impl TodoService {
             transaction.as_mut(),
             todo_id,
             &TodoReplacement {
+                categories: &desired.categories,
+                board_id: desired.board_id,
+                project_ids: &desired.project_ids,
+                plan: &desired.plan,
                 project_id: desired.project_id,
                 title: &desired.title,
                 description: desired.description.as_ref(),
@@ -371,7 +466,7 @@ impl TodoService {
             }
             DeleteTarget::Active(todo) => todo,
         };
-        if !store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+        if !store::can_see(transaction.as_mut(), todo_id, actor).await? {
             return Err(AppError::NotFound);
         }
         if !authorization::can_delete_todo(actor, &current) {
@@ -437,7 +532,7 @@ impl TodoService {
         query: CollectionQuery,
     ) -> Result<Page<TodoNote>, AppError> {
         let limit = query.limit;
-        let notes = store::list_notes(&self.pool, todo_id, actor.uuid(), query)
+        let notes = store::list_notes(&self.pool, todo_id, actor, query)
             .await?
             .ok_or(AppError::NotFound)?;
         Ok(Page::from_window(notes, limit, |note| {
@@ -482,7 +577,7 @@ impl TodoService {
         let todo = store::lock_todo(transaction.as_mut(), todo_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        if !store::can_see(transaction.as_mut(), todo_id, actor.uuid()).await? {
+        if !store::can_see(transaction.as_mut(), todo_id, actor).await? {
             return Err(AppError::NotFound);
         }
         authorize_note(actor, &todo)?;
@@ -581,6 +676,10 @@ impl TodoService {
 }
 
 struct DesiredTodo {
+    board_id: Option<uuid::Uuid>,
+    project_ids: Vec<ProjectId>,
+    plan: crate::domain::WorkPlan,
+    categories: Vec<String>,
     project_id: Option<ProjectId>,
     title: RequiredText,
     description: Option<LimitedText>,
@@ -612,7 +711,13 @@ impl DesiredTodo {
             .attachments
             .unwrap_or_else(|| current.attachments.clone());
 
-        let mut changed_fields = Vec::with_capacity(5);
+        let mut changed_fields = Vec::with_capacity(7);
+        let categories = patch
+            .categories
+            .unwrap_or_else(|| current.categories.clone());
+        if categories != current.categories {
+            changed_fields.push("categories");
+        }
         if title != current.title {
             changed_fields.push("title");
         }
@@ -636,15 +741,38 @@ impl DesiredTodo {
             TodoActivityKind::Updated
         };
 
-        let project_id = match patch.project_id {
-            NullablePatch::Absent => current.project_id,
-            NullablePatch::Null => None,
-            NullablePatch::Value(id) => Some(id),
-        };
+        let mut project_ids = patch
+            .project_ids
+            .unwrap_or_else(|| current.project_ids.clone());
+        if !patch.project_id.is_absent() {
+            if let Some(old) = current.project_id {
+                project_ids.retain(|p| *p != old);
+            }
+            if let NullablePatch::Value(id) = patch.project_id {
+                project_ids.retain(|p| *p != id);
+                project_ids.insert(0, id);
+            }
+        }
+        let project_id = project_ids.first().copied();
+        let board_id = patch.board_id.apply(current.board_id);
+        let plan = patch.plan.apply(&current.plan);
+        if project_ids != current.project_ids {
+            changed_fields.push("project_ids");
+        }
+        if board_id != current.board_id {
+            changed_fields.push("board_id");
+        }
+        if plan != current.plan {
+            changed_fields.push("progress");
+        }
         if project_id != current.project_id {
             changed_fields.push("project_id");
         }
         Self {
+            board_id,
+            project_ids,
+            plan,
+            categories,
             project_id,
             title,
             description,
@@ -692,7 +820,7 @@ async fn replay_on_connection(
                 .bind(id.into_uuid())
                 .fetch_optional(&mut *connection)
                 .await?;
-        if live == Some(true) && !store::can_see(connection, id, actor.uuid()).await? {
+        if live == Some(true) && !store::can_see(connection, id, actor).await? {
             return Err(AppError::NotFound);
         }
     }
@@ -796,14 +924,27 @@ fn mutation_response<T: serde::Serialize>(
 }
 
 fn create_fingerprint_input(request: &TodoCreate) -> Value {
-    json!({
+    let mut body = json!({
         "project_id": request.project_id,
         "title": request.title,
         "description": request.description,
         "assigned_to": request.assigned_to,
         "status": request.status,
         "attachments": request.attachments,
-    })
+    });
+    if !request.project_ids.is_empty() {
+        body["project_ids"] = json!(request.project_ids);
+    }
+    if request.board_id.is_some() {
+        body["board_id"] = json!(request.board_id);
+    }
+    if request.plan != crate::domain::WorkPlan::default() {
+        body["plan"] = json!(request.plan);
+    }
+    if !request.categories.is_empty() {
+        body["categories"] = json!(request.categories);
+    }
+    body
 }
 
 fn note_fingerprint_input(request: &TodoNoteCreate) -> Value {
@@ -861,8 +1002,8 @@ async fn authorize_link(
     project_store::lock_project(connection, &ProjectLocator::Id(project_id))
         .await?
         .ok_or(AppError::NotFound)?;
-    if !project_store::can_write(connection, actor.uuid(), project_id).await? {
-        if project_store::can_read(connection, actor.uuid(), project_id).await? {
+    if !project_store::can_write(connection, actor, project_id).await? {
+        if project_store::can_read(connection, actor, project_id).await? {
             return Err(AppError::Denied {
                 code: "project_not_writable".into(),
                 message: "Only the project's members (and the custodians of member Silicons) can add work to it.".to_owned(),

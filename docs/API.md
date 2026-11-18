@@ -5,6 +5,8 @@ should include an `Idempotency-Key`; versioned updates use the response ETag in 
 status codes are in [`../openapi.yaml`](../openapi.yaml) and [`../API_DOCS.md`](../API_DOCS.md). Every response
 carries `X-Commit-API-Version: 2` ([contracts](CONTRACTS.md)).
 
+[Standalone interface guide](https://api.commit.teamofsilicons.com/api/v1/interface) · [Live OpenAPI contract](https://api.commit.teamofsilicons.com/api/v1/openapi.yaml)
+
 ## Signing in
 
 Commit is an app at [Silicon Accounts](https://accounts.teamofsilicons.com) with the app id `commit`. Every product
@@ -12,7 +14,7 @@ route takes exactly one credential:
 
 - `Authorization: Bearer <access token>`: a Silicon Accounts access token issued to `commit` (from the web's sign-in,
   the CLI's device flow, or a Silicon's short-lived token exchanged for `commit`). Commit verifies it locally
-  (EdDSA signature, `aud` = `commit`, `iss` = the Accounts URL, expiry).
+  (EdDSA signature, audience, issuer and expiry) and checks live token kind, app audience and revocation on every request.
 - `Authorization: Proof <sap_…>`: a User verification proof another app obtained to act for an account at Commit.
   The proof must be for `commit`, grant the route's scope (its action id, e.g. `commit.todos.list`; `GET /accounts`
   lists them), and come from an app the deployment allows for that scope. What the app writes is recorded with

@@ -167,6 +167,16 @@ impl Accounts {
                 .mount(&server)
                 .await;
         }
+        // Locally signed fixtures represent active Commit access tokens unless the test overrides the live response.
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .and(header("authorization", basic()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"active":true,"client_id":"commit","token_type":"access_token"}),
+            ))
+            .with_priority(50)
+            .mount(&server)
+            .await;
         // Unknown accounts.
         Mock::given(method("GET"))
             .and(wiremock::matchers::path_regex("^/v1/accounts/.*"))
@@ -206,7 +216,9 @@ impl Accounts {
             .and(path("/v1/oauth/introspect"))
             .and(header("authorization", basic()))
             .and(body_string_contains(token))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": active})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"active": active,"client_id":"commit","token_type":"access_token"}),
+            ))
             .mount(&self.server)
             .await;
     }
@@ -1305,7 +1317,7 @@ async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() ->
     )
     .await?;
     ensure!(
-        refused.status == StatusCode::UNAUTHORIZED && refused.code() == "session_ended",
+        refused.status == StatusCode::UNAUTHORIZED && refused.code() == "token_revoked",
         "a token from before the removal, in the same second: {} {}",
         refused.status,
         refused.body
@@ -1363,8 +1375,8 @@ async fn a_token_from_the_cutoffs_own_second_is_decided_by_silicon_accounts() ->
         .filter(|r| r.url.path() == "/v1/oauth/introspect")
         .count();
     ensure!(
-        introspections == 2,
-        "only the two same-second tokens are introspected ({introspections})"
+        introspections >= 4,
+        "all four access tokens are introspected ({introspections})"
     );
     Ok(())
 }
@@ -1400,7 +1412,11 @@ async fn changes_that_widen_access_never_rest_on_a_cached_answer() -> anyhow::Re
     Mock::given(method("POST"))
         .and(path("/v1/oauth/introspect"))
         .and(body_string_contains(token.as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"active": true})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"active":true,"client_id":"commit","token_type":"access_token"}),
+            ),
+        )
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&accounts.server)

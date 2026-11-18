@@ -22,7 +22,11 @@ use crate::{
 pub fn can_patch_todo(actor: &VerifiedActor, todo: &Todo, patch: &ValidatedTodoPatch) -> bool {
     let for_owner = actor.acts_for(&todo.assigned_by.uuid);
     let for_assignee = actor.acts_for(&todo.assigned_to.uuid);
-    let changes_owner_fields = patch.title.is_some()
+    let changes_owner_fields = !patch.board_id.is_absent()
+        || patch.project_ids.is_some()
+        || patch.plan.ideal_minutes != crate::domain::NullablePatch::Absent
+        || patch.categories.is_some()
+        || patch.title.is_some()
         || !patch.description.is_absent()
         || patch.assigned_to.is_some()
         || patch.attachments.is_some()
@@ -31,7 +35,8 @@ pub fn can_patch_todo(actor: &VerifiedActor, todo: &Todo, patch: &ValidatedTodoP
     if changes_owner_fields && !for_owner {
         return false;
     }
-    if patch.status.is_some() && !(for_owner || for_assignee) {
+    if (patch.status.is_some() || !patch.plan.progress.is_absent()) && !(for_owner || for_assignee)
+    {
         return false;
     }
     true
@@ -90,6 +95,10 @@ mod tests {
 
     fn todo(owner: Actor, assignee: Actor) -> Todo {
         Todo {
+            categories: vec![],
+            plan: crate::domain::WorkPlan::default(),
+            project_ids: vec![],
+            board_id: None,
             project_id: None,
             id: TodoId::new(),
             title: RequiredText::new("title", "Task", 500).unwrap_or_else(|e| panic!("{e}")),

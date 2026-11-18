@@ -249,6 +249,10 @@ async fn account_rows_keep_their_uuid_and_kind() -> anyhow::Result<()> {
         .create(
             &as_silicon,
             TodoCreate {
+                categories: vec![],
+                board_id: None,
+                plan: silicon_commit::domain::WorkPlan::default(),
+                project_ids: vec![],
                 project_id: None,
                 title: "contradiction".to_owned(),
                 description: None,
@@ -324,6 +328,10 @@ async fn todo_lifecycle_enforces_replay_visibility_and_actor_boundaries() -> any
         Uuid::new_v4().simple()
     );
     let request = TodoCreate {
+        categories: vec![],
+        board_id: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
+        project_ids: vec![],
         project_id: None,
         title: "Prepare launch review".to_owned(),
         description: Some("Preserve this formatting.\n\n- first\n- second".to_owned()),
@@ -447,6 +455,10 @@ async fn todo_lifecycle_enforces_replay_visibility_and_actor_boundaries() -> any
             &assignee,
             todo_id,
             TodoPatch {
+                categories: None,
+                board_id: silicon_commit::domain::NullablePatch::Absent,
+                plan: silicon_commit::domain::PlanPatch::default(),
+                project_ids: None,
                 project_id: NullablePatch::Absent,
                 title: None,
                 description: NullablePatch::Absent,
@@ -816,6 +828,10 @@ async fn notification_settings_drive_effective_routing_and_immutable_snapshots()
         .create(
             &delegating_silicon,
             TodoCreate {
+                categories: vec![],
+                board_id: None,
+                plan: silicon_commit::domain::WorkPlan::default(),
+                project_ids: vec![],
                 project_id: None,
                 title: "Exercise notification routing".to_owned(),
                 description: None,
@@ -1143,6 +1159,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
     ));
 
     let task_request = ProjectTaskCreate {
+        assigned_team: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
         assigned_to: None,
         parent_task_id: None,
         title: "Deploy PostgreSQL migrations".to_owned(),
@@ -1178,6 +1196,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &locator,
             task_id,
             ProjectTaskPatch {
+                assigned_team: silicon_commit::domain::NullablePatch::Absent,
+                plan: silicon_commit::domain::PlanPatch::default(),
                 assigned_to: NullablePatch::Absent,
                 title: None,
                 description: None,
@@ -1192,6 +1212,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &creator,
             &locator,
             ProjectTaskCreate {
+                assigned_team: None,
+                plan: silicon_commit::domain::WorkPlan::default(),
                 assigned_to: None,
                 parent_task_id: Some(task_id),
                 title: "Verify the migrated schema".to_owned(),
@@ -1403,6 +1425,8 @@ async fn project_retries_replay_after_membership_is_revoked() -> anyhow::Result<
         )
         .await?;
     let task_request = ProjectTaskCreate {
+        assigned_team: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
         assigned_to: None,
         parent_task_id: None,
         title: "Persist retry response".to_owned(),

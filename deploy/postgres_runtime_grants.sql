@@ -283,3 +283,13 @@ GRANT SELECT ON commit.effective_email_preferences TO :"api_role", :"worker_role
 GRANT EXECUTE ON FUNCTION commit.current_custodian(text) TO :"api_role", :"worker_role";
 
 GRANT SELECT ON commit.accounts_uuid128_map TO :"api_role", :"worker_role";
+
+GRANT SELECT, INSERT, DELETE ON commit.contact_connections TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.project_access(uuid,text,text[]), commit.project_writable(uuid,text,text[]),
+    commit.todo_access(uuid,text,text[]) TO :"api_role";
+
+GRANT SELECT,INSERT,UPDATE ON commit.boards TO :"api_role";
+GRANT SELECT,INSERT,UPDATE,DELETE ON commit.board_members,commit.board_categories TO :"api_role";
+GRANT SELECT,INSERT ON commit.board_invitations,commit.board_operations TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.board_role(uuid,text,text[]) TO :"api_role";
+GRANT EXECUTE ON FUNCTION commit.rename_category(text[],text,text) TO :"api_role";
