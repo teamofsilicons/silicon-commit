@@ -2529,3 +2529,68 @@ async fn ordinary_reads_require_live_access_tokens_for_commit() -> anyhow::Resul
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn invitations_rank_by_two_sent_plus_received_then_recency() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let owner = Account::carbon("ranking-owner");
+    let outgoing = Account::carbon("ranking-outgoing");
+    let incoming = Account::carbon("ranking-incoming");
+    let recent = Account::carbon("ranking-latest");
+    let accounts = Accounts::start(&[&owner, &outgoing, &incoming, &recent]).await;
+    let app = router(&pool, &accounts, "", false)?;
+    let (subject, out_token, in_token, recent_token) = (
+        accounts.token(&owner),
+        accounts.token(&outgoing),
+        accounts.token(&incoming),
+        accounts.token(&recent),
+    );
+    for (user, token) in [
+        (&owner, &subject),
+        (&outgoing, &out_token),
+        (&incoming, &in_token),
+        (&recent, &recent_token),
+    ] {
+        accounts.userinfo(token, user).await;
+    }
+    let invite = async |from: &str, to: &str| -> anyhow::Result<()> {
+        let board = workflow_request(
+            &app,
+            Method::POST,
+            "boards",
+            from,
+            Some(json!({"name":"Ranking fixture"})),
+        )
+        .await?;
+        workflow_request(
+            &app,
+            Method::PATCH,
+            &format!("boards/{}", board["id"].as_str().context("board ID")?),
+            from,
+            Some(json!({"revision":1,"action":"invite","subject":to,"role":"member"})),
+        )
+        .await?;
+        Ok(())
+    };
+    invite(&subject, &outgoing.id).await?;
+    invite(&in_token, &owner.id).await?;
+    invite(&in_token, &owner.id).await?;
+    invite(&recent_token, &owner.id).await?;
+    let tied = workflow_request(&app, Method::GET, "people", &subject, None).await?;
+    let items = tied["items"].as_array().context("suggestions")?;
+    ensure!(
+        items.len() == 3
+            && items[0]["uuid"] == incoming.uuid
+            && items[0]["received"] == 2
+            && items[1]["uuid"] == outgoing.uuid
+            && items[1]["sent"] == 1
+            && items[2]["uuid"] == recent.uuid,
+        "{tied}"
+    );
+    invite(&subject, &outgoing.id).await?;
+    let highest = workflow_request(&app, Method::GET, "people", &subject, None).await?;
+    ensure!(highest["items"][0]["uuid"] == outgoing.uuid && highest["items"][0]["sent"] == 2);
+    Ok(())
+}
