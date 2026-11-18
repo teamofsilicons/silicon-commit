@@ -66,7 +66,6 @@ pub struct AccountsIdentity {
     proof_issuers: ProofIssuers,
     pool: PgPool,
     keys: Mutex<KeyCache>,
-    introspections: Mutex<HashMap<[u8; 32], (bool, Instant)>>,
     proofs: Mutex<HashMap<[u8; 32], CachedProof>>,
     lookups: Mutex<HashMap<String, CachedLookup>>,
 }
@@ -112,7 +111,6 @@ impl AccountsIdentity {
             proof_issuers: settings.proof_issuers.clone(),
             pool,
             keys: Mutex::new(KeyCache::default()),
-            introspections: Mutex::new(HashMap::new()),
             proofs: Mutex::new(HashMap::new()),
             lookups: Mutex::new(HashMap::new()),
         })
@@ -203,39 +201,19 @@ impl AccountsIdentity {
         }
     }
 
-    /// Asks Silicon Accounts whether an access token is still active (cached briefly). With
-    /// `fresh_after`, a cached answer older than that instant is not trusted.
-    async fn introspect_active(
-        &self,
-        token: &str,
-        fresh_after: Option<OffsetDateTime>,
-    ) -> Result<bool, ProviderError> {
-        let key = digest(token);
-        {
-            let cache = self.introspections.lock().await;
-            if let Some((active, at)) = cache.get(&key)
-                && at.elapsed() < ONLINE_CHECK_TTL
-                && fresh_after.is_none_or(|after| OffsetDateTime::now_utc() - at.elapsed() > after)
-            {
-                return Ok(*active);
-            }
-        }
-        let app = self
+    /// Verify live token kind and audience on every request, including revocation.
+    async fn introspect_active(&self, token: &str) -> Result<bool, ProviderError> {
+        let live = self
             .client
-            .as_app(&self.app_id, self.app_secret.expose_secret());
-        let active = app
+            .as_app(&self.app_id, self.app_secret.expose_secret())
             .introspect(token)
             .await
-            .map_err(|error| map_accounts_error(&error))?
-            .active;
-        let mut cache = self.introspections.lock().await;
-        prune(&mut cache, |(_, at)| at.elapsed() < ONLINE_CHECK_TTL);
-        cache.insert(key, (active, Instant::now()));
-        Ok(active)
+            .map_err(|e| map_accounts_error(&e))?;
+        Ok(live.active
+            && live.token_type.as_deref() == Some("access_token")
+            && live.client_id.as_deref() == Some(self.app_id.as_str()))
     }
 
-    /// Verifies a proof at Silicon Accounts (cached briefly). `fresh` skips the cache: a
-    /// request that widens access must not rest on an answer from before a revocation.
     async fn verify_proof(
         &self,
         token: &str,
@@ -401,7 +379,7 @@ struct Subject {
 }
 
 impl AccountsIdentity {
-    async fn bearer_subject(&self, token: &str, sensitive: bool) -> Result<Subject, ProviderError> {
+    async fn bearer_subject(&self, token: &str) -> Result<Subject, ProviderError> {
         let claims = self.verify_bearer(token).await?;
         let uuid = AccountUuid::new(claims.sub.clone()).map_err(|_| ProviderError::Rejected {
             code: "token_missing_claim",
@@ -414,11 +392,7 @@ impl AccountsIdentity {
         })?;
         // A change that widens access asks every time: an answer cached from before a sign-out
         // that just happened must not let it through.
-        if sensitive
-            && !self
-                .introspect_active(token, Some(OffsetDateTime::now_utc()))
-                .await?
-        {
+        if !self.introspect_active(token).await? {
             return Err(ProviderError::Rejected {
                 code: "token_revoked",
                 message: "Silicon Accounts says this access token is no longer active: the sign-in was ended or Commit's access was removed. Sign in to Commit again.".to_owned(),
@@ -548,17 +522,14 @@ impl AccountsIdentity {
             });
         }
         let restoring_access = lifecycle.as_ref().and_then(|state| state.access_removed_at);
-        if let Some(removed) = restoring_access {
+        if restoring_access.is_some() {
             // Proofs issued by other apps cannot restore this account's grant to Commit.
             let Some(token) = &bearer else {
                 return Err(ProviderError::Rejected {
                     code: "app_access_removed", message: "Commit's access was removed. Sign in to Commit again before using app proofs.".to_owned(),
                 });
             };
-            if !self
-                .introspect_active(token.expose_secret(), Some(removed))
-                .await?
-            {
+            if !self.introspect_active(token.expose_secret()).await? {
                 return Err(ProviderError::Rejected {
                     code: "session_ended",
                     message: "This sign-in to Commit ended. Sign in to Commit again.".to_owned(),
@@ -685,9 +656,9 @@ impl AccountsIdentity {
             (Some(issued_at), _) if issued_at == cutoff_second && cutoff.nanosecond() == 0 => {
                 Ok(false)
             }
-            (Some(issued_at), Some(token)) if issued_at == cutoff_second => Ok(!self
-                .introspect_active(token.expose_secret(), Some(cutoff))
-                .await?),
+            (Some(issued_at), Some(token)) if issued_at == cutoff_second => {
+                Ok(!self.introspect_active(token.expose_secret()).await?)
+            }
             _ => Ok(true),
         }
     }
@@ -771,7 +742,20 @@ impl AccountsIdentity {
                 return Err(error);
             }
         };
-        let account = resolved_from_summary(&summary)?;
+        let mut account = resolved_from_summary(&summary)?;
+        if account.display_name.is_empty() && account.pfp_url.is_empty() {
+            let app = self
+                .client
+                .as_app(&self.app_id, self.app_secret.expose_secret());
+            if let Ok(member) = app.user(account.actor.uuid.as_str()).await
+                && member.uuid == account.actor.uuid.as_str()
+                && member.status == "active"
+                && member.granted_scopes.iter().any(|scope| scope == "profile")
+            {
+                account.display_name = member.display_name;
+                account.pfp_url = member.pfp_url.unwrap_or_default();
+            }
+        }
         let mut cache = self.lookups.lock().await;
         prune(&mut cache, |(_, at)| at.elapsed() < LOOKUP_TTL);
         let now = Instant::now();
@@ -865,14 +849,42 @@ pub(crate) fn usable(
 
 #[async_trait]
 impl IdentityProvider for AccountsIdentity {
+    async fn contacts_proof(
+        &self,
+        token: &str,
+        write: bool,
+    ) -> Result<SecretString, ProviderError> {
+        let issued = self
+            .client
+            .as_app(&self.app_id, self.app_secret.expose_secret())
+            .issue_user_verification(
+                &silicon_accounts_client::IssueUserVerification {
+                    subject_token: token.to_owned(),
+                    receiving_app: "silicon-contacts".to_owned(),
+                    scopes: vec![
+                        if write {
+                            "contacts.write"
+                        } else {
+                            "contacts.read"
+                        }
+                        .to_owned(),
+                    ],
+                    access_ttl_seconds: Some(120),
+                },
+                Some(&uuid::Uuid::new_v4().to_string()),
+            )
+            .await
+            .map_err(|error| map_accounts_error(&error))?;
+        Ok(SecretString::from(issued.proof_token.expose().to_owned()))
+    }
+
     async fn authenticate(
         &self,
         request: &AuthenticationRequest,
     ) -> Result<VerifiedActor, ProviderError> {
         let subject = match &request.credential {
             InboundCredential::Bearer(_) => {
-                self.bearer_subject(request.credential.expose(), request.sensitive)
-                    .await?
+                self.bearer_subject(request.credential.expose()).await?
             }
             InboundCredential::Proof(_) => {
                 self.proof_subject(

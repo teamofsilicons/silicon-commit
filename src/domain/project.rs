@@ -295,6 +295,15 @@ impl FromStr for ProjectLocator {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectDetails {
+    /// Board containing the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<Uuid>,
+    /// Stable Organizations team targets sharing the project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub team_ids: Vec<String>,
+    /// Labels used to organize projects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
     /// Optional context, preserving Markdown formatting.
     #[serde(default)]
     pub description: String,
@@ -331,6 +340,13 @@ impl ProjectDetails {
             limits.participants_per_project,
         )?;
         ensure_unique("carbon_ids", &self.carbon_ids)?;
+        ensure_item_count(
+            "team_ids",
+            self.team_ids.len(),
+            0,
+            limits.participants_per_project,
+        )?;
+        ensure_unique("team_ids", &self.team_ids)?;
         Ok(())
     }
 }
@@ -339,6 +355,12 @@ impl ProjectDetails {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSeedTask {
+    /// Time and progress.
+    #[serde(flatten)]
+    pub plan: super::WorkPlan,
+    /// Organizations team responsible for this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_team: Option<String>,
     /// Task title.
     pub title: String,
     /// Optional task context.
@@ -381,6 +403,7 @@ impl ProjectCreate {
     ) -> Result<ValidatedProjectCreate, ValidationError> {
         self.details.validate(limits)?;
         let mut details = self.details;
+        details.categories = super::categories(details.categories)?;
         if creator.actor_type == ActorType::Carbon && !details.carbon_ids.contains(&creator.id) {
             details.carbon_ids.push(creator.id.clone());
         }
@@ -436,6 +459,23 @@ pub struct ValidatedProjectCreate {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectPatch {
+    /// Move to a board or clear its board.
+    #[serde(default, skip_serializing_if = "super::NullablePatch::is_absent")]
+    pub board_id: super::NullablePatch<Uuid>,
+    /// Replace the shared team targets.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub team_ids: Option<Vec<String>>,
+    /// Replace the category list.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub categories: Option<Vec<String>>,
     /// Replacement display name. It never changes the immutable slug.
     #[serde(
         default,
@@ -498,6 +538,9 @@ impl ProjectPatch {
             && self.attachments.is_none()
             && self.private.is_none()
             && self.carbon_ids.is_none()
+            && self.team_ids.is_none()
+            && self.categories.is_none()
+            && self.board_id.is_absent()
     }
 
     /// Validates metadata changes without mutating the immutable slug.
@@ -538,6 +581,9 @@ impl ProjectPatch {
             attachments: self.attachments.clone().unwrap_or_default(),
             private: self.private.unwrap_or_default(),
             carbon_ids: self.carbon_ids.clone().unwrap_or_default(),
+            board_id: None,
+            team_ids: self.team_ids.clone().unwrap_or_default(),
+            categories: vec![],
         }
         .validate(limits)?;
         Ok(ValidatedProjectPatch {
@@ -548,6 +594,9 @@ impl ProjectPatch {
             attachments: self.attachments,
             private: self.private,
             carbon_ids: self.carbon_ids,
+            board_id: self.board_id,
+            team_ids: self.team_ids,
+            categories: self.categories.map(super::categories).transpose()?,
         })
     }
 }
@@ -555,6 +604,12 @@ impl ProjectPatch {
 /// Fully validated project metadata patch.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ValidatedProjectPatch {
+    /// Move to a board or clear its board.
+    pub board_id: super::NullablePatch<Uuid>,
+    /// Replace the shared team targets.
+    pub team_ids: Option<Vec<String>>,
+    /// Replace the category list.
+    pub categories: Option<Vec<String>>,
     /// Validated display-name replacement.
     pub name: Option<RequiredText>,
     /// Non-completion status replacement.
@@ -654,6 +709,9 @@ impl Serialize for Project {
             private: bool,
             description: &'a str,
             attachments: &'a [super::AttachmentUrl],
+            board_id: Option<Uuid>,
+            team_ids: &'a [String],
+            categories: &'a [String],
             silicon_ids: Vec<&'a ActorId>,
             carbon_ids: Vec<&'a ActorId>,
             members: Vec<ActorRef>,
@@ -676,6 +734,9 @@ impl Serialize for Project {
             private: self.details.private,
             description: &self.details.description,
             attachments: &self.details.attachments,
+            board_id: self.details.board_id,
+            team_ids: &self.details.team_ids,
+            categories: &self.details.categories,
             silicon_ids: self.silicon_members().map(|member| &member.id).collect(),
             carbon_ids: self
                 .members
@@ -699,6 +760,10 @@ impl Serialize for Project {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectQuery {
+    /// Restrict to this board.
+    pub board_id: Option<Uuid>,
+    /// Match a category name, ignoring case.
+    pub category: Option<String>,
     /// Optional exact lifecycle state.
     pub status: Option<ProjectStatus>,
     /// Only projects this Silicon is a member of (`si:` id or account uuid).
@@ -845,6 +910,12 @@ pub struct ValidatedDiaryUpdate {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectTaskCreate {
+    /// Time and progress.
+    #[serde(flatten)]
+    pub plan: super::WorkPlan,
+    /// Organizations team responsible for this task.
+    #[serde(default)]
+    pub assigned_team: Option<String>,
     /// Optional parent task in the same project.
     #[serde(default)]
     pub parent_task_id: Option<ProjectTaskId>,
@@ -867,7 +938,16 @@ impl ProjectTaskCreate {
         self,
         limits: &DomainLimits,
     ) -> Result<ValidatedProjectTaskCreate, ValidationError> {
+        if self.assigned_team.is_some() && self.assigned_to.is_some() {
+            return Err(ValidationError::invalid(
+                "assigned_team",
+                "choose a team or an individual",
+            ));
+        }
+        self.plan.validate()?;
         Ok(ValidatedProjectTaskCreate {
+            plan: self.plan,
+            assigned_team: self.assigned_team,
             assigned_to: self.assigned_to,
             parent_task_id: self.parent_task_id,
             title: RequiredText::new("title", self.title, limits.title_chars)?,
@@ -884,6 +964,10 @@ impl ProjectTaskCreate {
 /// Validated task or subtask creation command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedProjectTaskCreate {
+    /// Time and progress.
+    pub plan: super::WorkPlan,
+    /// Organizations team responsible for this task.
+    pub assigned_team: Option<String>,
     /// Optional same-project parent ID.
     pub parent_task_id: Option<ProjectTaskId>,
     /// Validated title.
@@ -900,6 +984,12 @@ pub struct ValidatedProjectTaskCreate {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectTaskPatch {
+    /// Time and progress.
+    #[serde(flatten)]
+    pub plan: super::PlanPatch,
+    /// Organizations team responsible for this task.
+    #[serde(default)]
+    pub assigned_team: super::NullablePatch<String>,
     /// Replacement title.
     #[serde(default, deserialize_with = "deserialize_optional_non_null")]
     pub title: Option<String>,
@@ -922,6 +1012,8 @@ impl ProjectTaskPatch {
             && self.description.is_none()
             && self.status.is_none()
             && self.assigned_to.is_absent()
+            && self.assigned_team.is_absent()
+            && self.plan.is_empty()
     }
 
     /// Validates supplied task changes.
@@ -936,7 +1028,18 @@ impl ProjectTaskPatch {
             ));
         }
 
+        if matches!(self.assigned_team, super::NullablePatch::Value(_))
+            && matches!(self.assigned_to, super::NullablePatch::Value(_))
+        {
+            return Err(ValidationError::invalid(
+                "assigned_team",
+                "choose a team or an individual",
+            ));
+        }
+        self.plan.apply(&super::WorkPlan::default()).validate()?;
         Ok(ValidatedProjectTaskPatch {
+            plan: self.plan,
+            assigned_team: self.assigned_team,
             assigned_to: self.assigned_to,
             title: self
                 .title
@@ -954,6 +1057,10 @@ impl ProjectTaskPatch {
 /// Validated project-task patch.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ValidatedProjectTaskPatch {
+    /// Time and progress.
+    pub plan: super::PlanPatch,
+    /// Organizations team responsible for this task.
+    pub assigned_team: super::NullablePatch<String>,
     /// Validated title replacement.
     pub title: Option<RequiredText>,
     /// Validated description replacement.
@@ -967,6 +1074,11 @@ pub struct ValidatedProjectTaskPatch {
 /// Project-local task or subtask.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProjectTask {
+    /// Time and progress.
+    #[serde(flatten)]
+    pub plan: super::WorkPlan,
+    /// Organizations team responsible for this task.
+    pub assigned_team: Option<String>,
     /// `UUIDv7` task ID.
     pub id: ProjectTaskId,
     /// Owning project UUID.

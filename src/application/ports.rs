@@ -77,6 +77,12 @@ pub enum Grant {
 /// The authenticated account and what Commit knows about its custodian circle.
 #[derive(Clone)]
 pub struct VerifiedActor {
+    /// Current team memberships verified by Organizations for this request.
+    pub teams: Vec<String>,
+    /// Current display names of visible team targets.
+    pub team_names: std::collections::BTreeMap<String, String>,
+    /// Team targets this account may share with (including teams managed by admins).
+    pub shareable_teams: Vec<String>,
     /// The account the request acts as.
     pub actor: Actor,
     /// For a Silicon: its custodian.
@@ -96,6 +102,9 @@ impl VerifiedActor {
             actor,
             custodian: None,
             managed_silicons: BTreeSet::new(),
+            teams: Vec::new(),
+            team_names: std::collections::BTreeMap::default(),
+            shareable_teams: Vec::new(),
             grant,
         }
     }
@@ -143,6 +152,9 @@ impl fmt::Debug for VerifiedActor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VerifiedActor")
+            .field("teams", &self.teams)
+            .field("shareable_teams", &self.shareable_teams)
+            .field("team_names", &self.team_names)
             .field("actor", &self.actor)
             .field("custodian", &self.custodian)
             .field("managed_silicons", &self.managed_silicons)
@@ -285,6 +297,15 @@ pub enum ProviderError {
 /// Silicon Accounts authentication and account directory boundary.
 #[async_trait]
 pub trait IdentityProvider: Send + Sync {
+    /// Issues a short-lived, consented proof limited to the caller's address book.
+    async fn contacts_proof(
+        &self,
+        _token: &str,
+        _write: bool,
+    ) -> Result<SecretString, ProviderError> {
+        Err(ProviderError::Unavailable)
+    }
+
     /// Verifies one inbound credential and returns the account it acts as.
     async fn authenticate(
         &self,

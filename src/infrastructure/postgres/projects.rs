@@ -55,7 +55,7 @@ const PROJECT_SELECT: &str = r"
            project.status,
            project.description,
            project.attachments,
-           project.private,
+           project.private, project.board_id, project.categories, project.team_ids,
            (SELECT coalesce(max(v.version), 0) FROM commit.project_versions v WHERE v.project_id = project.id) AS version,
            (SELECT coalesce(jsonb_agg(jsonb_build_object('type', a.kind, 'id', a.public_id, 'uuid', a.uuid)
                                       ORDER BY c.first_contributed_at, a.public_id, a.uuid), '[]')
@@ -159,7 +159,7 @@ pub(crate) async fn acquire_idempotency(
             let project = lock_project(connection, &locator)
                 .await?
                 .ok_or(AppError::NotFound)?;
-            if !can_read(connection, actor.uuid(), project.id).await? {
+            if !can_read(connection, actor, project.id).await? {
                 return Err(AppError::NotFound);
             }
         }
@@ -277,7 +277,9 @@ pub(crate) async fn list_projects(
         r"
         {PROJECT_SELECT}
          WHERE project.deleted_at IS NULL
-           AND commit.project_access(project.id, $6)
+           AND commit.project_access(project.id, $6, $7)
+           AND ($9::uuid IS NULL OR project.board_id=$9)
+           AND ($8::text IS NULL OR EXISTS (SELECT 1 FROM unnest(project.categories) n WHERE lower(n)=lower($8)))
            AND ($1::commit.project_status IS NULL OR project.status = $1)
            AND (
                 $2::text IS NULL
@@ -309,6 +311,9 @@ pub(crate) async fn list_projects(
         .bind(cursor_id)
         .bind(fetch_limit)
         .bind(actor.uuid().as_str())
+        .bind(&actor.teams)
+        .bind(&query.category)
+        .bind(query.board_id)
         .fetch_all(pool)
         .await?;
 
@@ -319,7 +324,7 @@ pub(crate) async fn list_projects(
 pub(crate) async fn get_project(
     pool: &PgPool,
     locator: &ProjectLocator,
-    viewer: &AccountUuid,
+    viewer: &VerifiedActor,
 ) -> Result<Option<Project>, AppError> {
     let mut connection = pool.acquire().await?;
     let Some(project_id) = find_project_id(&mut connection, locator).await? else {
@@ -456,9 +461,9 @@ pub(crate) async fn insert_project(
         r"
         INSERT INTO commit.projects (
             id, name, slug, uid, status, created_by_account, owner_account,
-            created_at, updated_at, description, attachments, private
+            created_at, updated_at, description, attachments, private, team_ids, categories, board_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $7, $8, $9, $10, $11, $12, $13)
         ",
     )
     .bind(project_id.into_uuid())
@@ -471,6 +476,7 @@ pub(crate) async fn insert_project(
     .bind(&command.details.description)
     .bind(Json(&command.details.attachments))
     .bind(command.details.private)
+    .bind(&command.details.team_ids).bind(&command.details.categories).bind(command.details.board_id)
     .execute(&mut *connection)
     .await?;
 
@@ -518,6 +524,8 @@ pub(crate) async fn update_project(
                description = coalesce($4, description),
                attachments = coalesce($5, attachments),
                private = coalesce($6, private),
+               team_ids = coalesce($7, team_ids), categories = coalesce($8, categories),
+               board_id=CASE WHEN $9 THEN $10 ELSE board_id END,
                updated_at = GREATEST(updated_at, clock_timestamp())
          WHERE id = $1
         ",
@@ -528,9 +536,17 @@ pub(crate) async fn update_project(
     .bind(&command.description)
     .bind(command.attachments.as_ref().map(Json))
     .bind(command.private)
+    .bind(&command.team_ids)
+    .bind(&command.categories)
+    .bind(!command.board_id.is_absent())
+    .bind(command.board_id.apply(None))
     .execute(&mut *connection)
     .await?;
 
+    if let Some(teams) = &command.team_ids {
+        sqlx::query("UPDATE commit.project_tasks SET assigned_team=NULL WHERE project_id=$1 AND assigned_team IS NOT NULL AND NOT (assigned_team=ANY($2)) AND deleted_at IS NULL")
+            .bind(project_id.into_uuid()).bind(teams).execute(&mut *connection).await?;
+    }
     if let Some(members) = members {
         let accounts = members
             .iter()
@@ -738,9 +754,9 @@ pub(crate) async fn insert_task(
     sqlx::query(
         r"
         INSERT INTO commit.project_tasks (
-            id, project_id, parent_task_id, title, description, status, created_by_account
+            id, project_id, parent_task_id, title, description, status, created_by_account, ideal_minutes, progress
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ",
     )
     .bind(task_id.into_uuid())
@@ -749,7 +765,7 @@ pub(crate) async fn insert_task(
     .bind(command.title.as_str())
     .bind(command.description.as_str())
     .bind(command.status)
-    .bind(actor.uuid().as_str())
+    .bind(actor.uuid().as_str()).bind(command.plan.ideal_minutes).bind(command.plan.progress)
     .execute(&mut *connection)
     .await?;
 
@@ -774,6 +790,8 @@ pub(crate) async fn update_task(
            SET title = coalesce($3, title),
                description = coalesce($4, description),
                status = coalesce($5, status),
+               ideal_minutes=CASE WHEN $6 THEN $7 ELSE ideal_minutes END,
+               progress=CASE WHEN $8 THEN $9 ELSE progress END,
                updated_at = GREATEST(updated_at, clock_timestamp())
          WHERE project_id = $1
            AND id = $2 AND deleted_at IS NULL
@@ -784,6 +802,10 @@ pub(crate) async fn update_task(
     .bind(command.title.as_ref().map(RequiredText::as_str))
     .bind(command.description.as_ref().map(LimitedText::as_str))
     .bind(command.status)
+    .bind(!command.plan.ideal_minutes.is_absent())
+    .bind(command.plan.ideal_minutes.apply(None))
+    .bind(!command.plan.progress.is_absent())
+    .bind(command.plan.progress.apply(None))
     .execute(&mut *connection)
     .await?;
     if result.rows_affected() == 0 {
@@ -969,7 +991,7 @@ const PROJECT_TASK_SELECT_BASE: &str = r"
            task.status,
            (SELECT jsonb_build_object('type', a.kind, 'id', a.public_id, 'uuid', a.uuid)
               FROM commit.accounts a WHERE a.uuid = task.assigned_to_account) AS assigned_to,
-           task.todo_id,
+           task.todo_id, task.assigned_team, task.ideal_minutes, task.progress,
            author.uuid AS author_uuid,
            author.kind AS author_kind,
            author.public_id AS author_id,
@@ -1003,6 +1025,9 @@ struct ProjectRow {
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
     members: Json<Vec<crate::domain::ActorRef>>,
+    board_id: Option<Uuid>,
+    categories: Vec<String>,
+    team_ids: Vec<String>,
     description: String,
     attachments: Json<Vec<crate::domain::AttachmentUrl>>,
     private: bool,
@@ -1029,6 +1054,9 @@ impl ProjectRow {
                 attachments: self.attachments.0,
                 private: self.private,
                 carbon_ids,
+                board_id: self.board_id,
+                categories: self.categories,
+                team_ids: self.team_ids,
             },
             version: self.version,
             collaborators: self.collaborators.0,
@@ -1090,12 +1118,20 @@ struct ProjectTaskRow {
     author_id: String,
     created_at: OffsetDateTime,
     assigned_to: Option<Json<crate::domain::ActorRef>>,
+    ideal_minutes: Option<i32>,
+    progress: Option<i16>,
+    assigned_team: Option<String>,
     todo_id: Option<Uuid>,
 }
 
 impl ProjectTaskRow {
     fn into_domain(self) -> Result<ProjectTask, AppError> {
         Ok(ProjectTask {
+            plan: crate::domain::WorkPlan {
+                ideal_minutes: self.ideal_minutes,
+                progress: self.progress,
+            },
+            assigned_team: self.assigned_team,
             assigned_to: self.assigned_to.map(|a| a.0),
             todo_id: self.todo_id.map(crate::domain::TodoId::from_uuid),
             id: ProjectTaskId::from_uuid(self.id),
@@ -1186,27 +1222,33 @@ fn invalid_row(message: impl Into<String>) -> AppError {
 /// and the owner's circle unless the project is private).
 pub(crate) async fn can_read(
     connection: &mut PgConnection,
-    account: &AccountUuid,
+    account: &VerifiedActor,
     project_id: ProjectId,
 ) -> Result<bool, AppError> {
-    Ok(sqlx::query_scalar("SELECT commit.project_access($1, $2)")
-        .bind(project_id.into_uuid())
-        .bind(account.as_str())
-        .fetch_one(connection)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT commit.project_access($1, $2, $3)")
+            .bind(project_id.into_uuid())
+            .bind(account.uuid().as_str())
+            .bind(&account.teams)
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 /// Whether the account can change the project (members and member Silicons' custodians).
 pub(crate) async fn can_write(
     connection: &mut PgConnection,
-    account: &AccountUuid,
+    account: &VerifiedActor,
     project_id: ProjectId,
 ) -> Result<bool, AppError> {
-    Ok(sqlx::query_scalar("SELECT commit.project_writable($1, $2)")
-        .bind(project_id.into_uuid())
-        .bind(account.as_str())
-        .fetch_one(connection)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT commit.project_writable($1, $2, $3)")
+            .bind(project_id.into_uuid())
+            .bind(account.uuid().as_str())
+            .bind(&account.teams)
+            .fetch_one(connection)
+            .await?,
+    )
 }
 
 #[cfg(test)]

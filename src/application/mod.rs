@@ -8,3 +8,5 @@ pub mod ports;
 pub mod projects;
 pub mod scopes;
 pub mod todos;
+
+pub(crate) mod boards;

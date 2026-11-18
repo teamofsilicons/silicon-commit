@@ -6,6 +6,8 @@ ARG GIT_COMMIT_SHA=unknown
 ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 
 COPY Cargo.toml Cargo.lock ./
+COPY openapi.yaml ./openapi.yaml
+COPY docs/INTERFACES.md ./docs/INTERFACES.md
 COPY migrations ./migrations
 COPY src ./src
 COPY client ./client

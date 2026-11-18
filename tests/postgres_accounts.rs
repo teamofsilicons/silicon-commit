@@ -55,6 +55,10 @@ fn accounts(pool: &sqlx::PgPool, directory: Arc<Directory>) -> AccountService {
 
 fn todo_for(assignee: &VerifiedActor, title: &str) -> TodoCreate {
     TodoCreate {
+        categories: vec![],
+        board_id: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
+        project_ids: vec![],
         project_id: None,
         title: title.to_owned(),
         description: None,

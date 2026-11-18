@@ -1,6 +1,6 @@
 //! API negotiation and local compatibility lifecycle governance (no telemetry).
 //!
-//! Contract 2 is the Silicon Accounts contract: no organizations or tags,
+//! Contract 2 is the Silicon Accounts contract: account-keyed work with optional boards and Organizations teams,
 //! every account reference carries its permanent `uuid`, and Silicon webhooks
 //! use payload version 3. Contract 1 authenticated with Silicon IAM; it is
 //! deprecated and sunsets after seven idle days like any replaced contract.

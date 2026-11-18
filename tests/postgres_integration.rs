@@ -249,6 +249,10 @@ async fn account_rows_keep_their_uuid_and_kind() -> anyhow::Result<()> {
         .create(
             &as_silicon,
             TodoCreate {
+                categories: vec![],
+                board_id: None,
+                plan: silicon_commit::domain::WorkPlan::default(),
+                project_ids: vec![],
                 project_id: None,
                 title: "contradiction".to_owned(),
                 description: None,
@@ -324,6 +328,10 @@ async fn todo_lifecycle_enforces_replay_visibility_and_actor_boundaries() -> any
         Uuid::new_v4().simple()
     );
     let request = TodoCreate {
+        categories: vec![],
+        board_id: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
+        project_ids: vec![],
         project_id: None,
         title: "Prepare launch review".to_owned(),
         description: Some("Preserve this formatting.\n\n- first\n- second".to_owned()),
@@ -447,6 +455,10 @@ async fn todo_lifecycle_enforces_replay_visibility_and_actor_boundaries() -> any
             &assignee,
             todo_id,
             TodoPatch {
+                categories: None,
+                board_id: silicon_commit::domain::NullablePatch::Absent,
+                plan: silicon_commit::domain::PlanPatch::default(),
+                project_ids: None,
                 project_id: NullablePatch::Absent,
                 title: None,
                 description: NullablePatch::Absent,
@@ -816,6 +828,10 @@ async fn notification_settings_drive_effective_routing_and_immutable_snapshots()
         .create(
             &delegating_silicon,
             TodoCreate {
+                categories: vec![],
+                board_id: None,
+                plan: silicon_commit::domain::WorkPlan::default(),
+                project_ids: vec![],
                 project_id: None,
                 title: "Exercise notification routing".to_owned(),
                 description: None,
@@ -1143,6 +1159,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
     ));
 
     let task_request = ProjectTaskCreate {
+        assigned_team: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
         assigned_to: None,
         parent_task_id: None,
         title: "Deploy PostgreSQL migrations".to_owned(),
@@ -1178,6 +1196,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &locator,
             task_id,
             ProjectTaskPatch {
+                assigned_team: silicon_commit::domain::NullablePatch::Absent,
+                plan: silicon_commit::domain::PlanPatch::default(),
                 assigned_to: NullablePatch::Absent,
                 title: None,
                 description: None,
@@ -1192,6 +1212,8 @@ async fn project_lifecycle_enforces_authorization_diary_cas_and_atomic_completio
             &creator,
             &locator,
             ProjectTaskCreate {
+                assigned_team: None,
+                plan: silicon_commit::domain::WorkPlan::default(),
                 assigned_to: None,
                 parent_task_id: Some(task_id),
                 title: "Verify the migrated schema".to_owned(),
@@ -1403,6 +1425,8 @@ async fn project_retries_replay_after_membership_is_revoked() -> anyhow::Result<
         )
         .await?;
     let task_request = ProjectTaskCreate {
+        assigned_team: None,
+        plan: silicon_commit::domain::WorkPlan::default(),
         assigned_to: None,
         parent_task_id: None,
         title: "Persist retry response".to_owned(),
@@ -2083,21 +2107,24 @@ async fn contract_sunset_and_email_preferences_enforce_their_lifecycle() -> anyh
         .bind(actor.uuid().as_str())
         .execute(&pool)
         .await?;
-    // Claim until this job leaves the queue (other tests may queue jobs in the same database).
-    let mut status = String::from("pending");
-    for _ in 0..100 {
-        let claimed: Option<serde_json::Value> = sqlx::query_scalar("SELECT commit.claim_email()")
-            .fetch_optional(&pool)
-            .await?;
-        status = sqlx::query_scalar("SELECT status FROM commit.email_jobs WHERE id=$1")
-            .bind(job)
-            .fetch_one(&pool)
-            .await?;
-        if status != "pending" || claimed.is_none() {
-            break;
-        }
-    }
+    // Exercise our fixture even when another test has deliverable jobs in the same queue.
+    let mut claim = pool.begin().await?;
+    sqlx::query(
+        "UPDATE commit.email_jobs SET next_attempt_at='-infinity'::timestamptz WHERE id=$1",
+    )
+    .bind(job)
+    .execute(&mut *claim)
+    .await?;
+    let result: serde_json::Value = sqlx::query_scalar("SELECT commit.claim_email()")
+        .fetch_one(&mut *claim)
+        .await?;
+    assert_eq!(result["simulated"], true);
+    let status: String = sqlx::query_scalar("SELECT status FROM commit.email_jobs WHERE id=$1")
+        .bind(job)
+        .fetch_one(&mut *claim)
+        .await?;
     assert_eq!(status, "suppressed");
+    claim.commit().await?;
     Ok(())
 }
 
@@ -2118,11 +2145,17 @@ async fn project_history_retains_only_the_latest_thousand_snapshots() -> anyhow:
         )
         .await?;
     let id = response_uuid(&project, "id")?;
-    sqlx::query("INSERT INTO commit.audit_events(id,actor_account,action,resource_type,resource_id,request_id) SELECT gen_random_uuid(),$1,'project.updated','project',$2,'history-cap-'||n FROM generate_series(1,1005) n")
-        .bind(actor.uuid().as_str())
-        .bind(id)
-        .execute(&pool)
-        .await?;
+    // Production produces individual audit records. Bound each fixture insert to stay
+    // within the same statement timeout on slower CI databases.
+    for start in (1_i32..=1005).step_by(100) {
+        sqlx::query("INSERT INTO commit.audit_events(id,actor_account,action,resource_type,resource_id,request_id) SELECT gen_random_uuid(),$1,'project.updated','project',$2,'history-cap-'||n FROM generate_series($3::int,$4::int) n")
+            .bind(actor.uuid().as_str())
+            .bind(id)
+            .bind(start)
+            .bind((start + 99).min(1005))
+            .execute(&pool)
+            .await?;
+    }
     let (count, min, max): (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*),min(version),max(version) FROM commit.project_versions WHERE project_id=$1",
     )

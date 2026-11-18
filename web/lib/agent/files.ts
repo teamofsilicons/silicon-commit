@@ -71,6 +71,8 @@ export function llmsTxt(origin: string): string {
     "",
     `- [Docs](${links.docs})`,
     `- [${name} in the Silicon Apps store](${links.store})`,
+    "- [Interface API guide](https://api.commit.teamofsilicons.com/api/v1/interface)",
+    "- [OpenAPI contract](https://api.commit.teamofsilicons.com/api/v1/openapi.yaml)",
     `- [Home page](${origin}/)`,
     "",
   ].join("\n");

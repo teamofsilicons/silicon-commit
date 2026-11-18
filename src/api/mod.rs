@@ -45,10 +45,12 @@ use crate::{
 
 mod accounts;
 pub mod auth;
+mod boards;
 mod contracts;
 mod email;
 pub mod extract;
 pub mod notifications;
+mod people;
 pub mod projects;
 pub mod todos;
 mod webhooks;
@@ -62,6 +64,7 @@ const MAX_REQUEST_ID_BYTES: usize = 128;
 pub struct AppState {
     pub(crate) pool: PgPool,
     contract_store: bool,
+    collaboration: Option<crate::infrastructure::clients::collaboration::Collaboration>,
     pub(crate) identity: Arc<dyn IdentityProvider>,
     pub(crate) todos: Arc<TodoService>,
     pub(crate) projects: Arc<ProjectService>,
@@ -92,6 +95,7 @@ impl AppState {
         Self {
             pool,
             contract_store: false,
+            collaboration: None,
             identity,
             todos,
             projects,
@@ -109,6 +113,21 @@ impl AppState {
     pub fn with_webhook_secret(mut self, secret: Option<SecretString>) -> Self {
         self.webhook_secret = secret;
         self
+    }
+
+    /// Configure the trusted Contacts and Organizations services for this instance.
+    pub fn with_collaboration_origins(
+        mut self,
+        contacts: &str,
+        organizations: &str,
+    ) -> Result<Self, crate::infrastructure::clients::ClientBuildError> {
+        self.collaboration = Some(
+            crate::infrastructure::clients::collaboration::Collaboration::from_origins(
+                contacts,
+                organizations,
+            )?,
+        );
+        Ok(self)
     }
 
     /// Sets the app id and the public Silicon Accounts URL clients sign in with.
@@ -185,6 +204,8 @@ impl AppState {
             integrations.accounts.app_id.clone(),
             integrations.accounts.issuer.clone(),
         );
+        state.collaboration =
+            Some(crate::infrastructure::clients::collaboration::Collaboration::new()?);
         state.contract_store = true;
         Ok(state)
     }
@@ -219,15 +240,63 @@ impl AppState {
         sensitive: bool,
     ) -> Result<VerifiedActor, AppError> {
         let request = auth::request(headers, scope, sensitive)?;
-        self.identity.authenticate(&request).await.map_err(|error| {
-            tracing::debug!(
-                scope,
-                resource = resource.as_deref(),
-                ?error,
-                "authentication refused"
-            );
-            authentication_error(error)
-        })
+        let mut actor = self
+            .identity
+            .authenticate(&request)
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    scope,
+                    resource = resource.as_deref(),
+                    ?error,
+                    "authentication refused"
+                );
+                authentication_error(error)
+            })?;
+        if (scope.starts_with("commit.project")
+            || scope.starts_with("commit.todo")
+            || scope.starts_with("commit.board")
+            || scope == "commit.work.read")
+            && let (Some(client), crate::application::ports::InboundCredential::Bearer(token)) =
+                (&self.collaboration, &request.credential)
+        {
+            use secrecy::ExposeSecret as _;
+            let ctx = client
+                .organizations(&self.app_id, token.expose_secret(), actor.uuid().as_str())
+                .await?;
+            for team in &ctx.share_targets {
+                if team.kind != "team" {
+                    continue;
+                }
+                let key = format!("team:{}", team.id);
+                let local = team.id.split_once('/').map_or("", |(_, id)| id);
+                let admin = ctx
+                    .organizations
+                    .iter()
+                    .find(|org| org["org_id"] == team.org_id)
+                    .is_some_and(|org| {
+                        let caps = &org["capabilities"];
+                        caps["admin"] == true
+                            || caps["team_admins"]
+                                .as_array()
+                                .is_some_and(|ids| ids.iter().any(|id| id == local))
+                    });
+                if admin {
+                    actor.teams.push(format!("admin:{key}"));
+                }
+                actor.team_names.insert(key, team.name.clone());
+            }
+            actor
+                .teams
+                .extend(ctx.groups.into_iter().filter(|g| g.starts_with("team:")));
+            actor.shareable_teams = ctx
+                .share_targets
+                .into_iter()
+                .filter(|t| t.kind == "team")
+                .map(|t| format!("team:{}", t.id))
+                .collect();
+        }
+        Ok(actor)
     }
 }
 
@@ -305,6 +374,18 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
     let api = Router::new()
         .route("/contracts", get(contracts::describe))
         .route("/accounts", get(accounts::metadata))
+        .route("/boards", get(boards::list).post(boards::create))
+        .route("/boards/{board_id}", get(boards::get).patch(boards::update))
+        .route("/work", get(boards::work))
+        .route("/project-links", put(boards::links))
+        .route("/people", get(people::suggest))
+        .route("/people/resolve", get(people::resolve))
+        .route("/contacts", get(people::list).post(people::save))
+        .route("/contacts/connection", get(people::connection).put(people::connect))
+        .route("/contacts/photos/{id}", get(people::photo))
+        .route("/organizations", get(people::organizations))
+        .route("/openapi.yaml", get(openapi))
+        .route("/interface", get(interface_guide))
         .route("/me", get(accounts::me))
         .route(
             "/silicons/{silicon}/allowed-accounts",
@@ -425,6 +506,8 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
             request_timeout,
         ));
     let app = Router::new()
+        .route("/openapi.yaml", get(openapi))
+        .route("/interface", get(interface_guide))
         .route("/healthz", get(health))
         .route("/readyz", get(readiness))
         .merge(product_api)
@@ -441,6 +524,19 @@ pub fn router(state: AppState, settings: &ServerSettings) -> Result<Router, ApiB
         .layer(middleware::from_fn(ensure_response_request_id))
         .layer(middleware::from_fn(no_store));
     Ok(app)
+}
+
+async fn openapi() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+        include_str!("../../openapi.yaml"),
+    )
+}
+async fn interface_guide() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        include_str!("../../docs/INTERFACES.md"),
+    )
 }
 
 async fn health() -> Json<Health> {
@@ -600,8 +696,11 @@ fn cors_layer(settings: &ServerSettings) -> Result<CorsLayer, ApiBuildError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CorsLayer::new()
-        .allow_origin(origins)
-        .allow_credentials(true)
+        .allow_origin(if origins.is_empty() {
+            tower_http::cors::AllowOrigin::any()
+        } else {
+            tower_http::cors::AllowOrigin::list(origins)
+        })
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -821,6 +920,35 @@ mod tests {
 
     fn cases() -> Vec<Case> {
         vec![
+            case(Method::GET, "/api/v1/boards", None, "commit.boards.read"),
+            write(
+                Method::POST,
+                "/api/v1/boards",
+                None,
+                "commit.boards.manage",
+                r#"{"name":"Test board"}"#,
+            ),
+            case(Method::GET, "/api/v1/work", None, "commit.work.read"),
+            case(Method::GET, "/api/v1/people", None, "commit.people.read"),
+            case(
+                Method::GET,
+                "/api/v1/organizations",
+                None,
+                "commit.organizations.read",
+            ),
+            case(
+                Method::GET,
+                "/api/v1/contacts",
+                None,
+                "commit.contacts.read",
+            ),
+            write(
+                Method::PUT,
+                "/api/v1/contacts/connection",
+                None,
+                "commit.contacts.write",
+                r#"{"enabled":true}"#,
+            ),
             case(Method::GET, "/api/v1/me", None, action::ME_READ),
             case(
                 Method::GET,

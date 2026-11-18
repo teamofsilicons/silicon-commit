@@ -71,6 +71,13 @@ pub const ALLOWLIST_UPDATE: &str = "commit.allowlist.update";
 
 /// Every scope Commit honours, for configuration validation and documentation.
 pub const ALL: &[&str] = &[
+    "commit.boards.read",
+    "commit.boards.manage",
+    "commit.work.read",
+    "commit.people.read",
+    "commit.contacts.read",
+    "commit.contacts.write",
+    "commit.organizations.read",
     NOTIFICATION_SETTINGS_READ,
     NOTIFICATION_SETTINGS_UPDATE,
     TODOS_LIST,

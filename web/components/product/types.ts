@@ -1,9 +1,9 @@
 export type Actor={id:string;uuid:string;type:"carbon"|"silicon"};
 export type Me={id:string;uuid:string;kind:"carbon"|"silicon";email?:string;display_name:string;silicons:Actor[];custodian?:Actor};
-export type Todo={id:string;title:string;description:string|null;assigned_to:Actor;assigned_by:Actor;status:string;attachments:string[];project_id?:string|null;created_at:string;updated_at:string};
+export type Todo={board_id?:string|null;project_ids:string[];categories:string[];ideal_minutes?:number;progress?:number;id:string;title:string;description:string|null;assigned_to:Actor;assigned_by:Actor;status:string;attachments:string[];project_id?:string|null;created_at:string;updated_at:string};
 export type Note={id:string;body:string;author:Actor;created_at:string};
-export type Project={id:string;name:string;description:string;slug:string;uid:string;status:string;private:boolean;carbon_ids:string[];silicon_ids:string[];collaborators:Actor[];created_by:Actor;attachments:string[];version:number;created_at:string;updated_at:string};
-export type Task={id:string;project_id:string;parent_task_id:string|null;title:string;description:string;status:string;assigned_to?:Actor|null;todo_id?:string|null;created_by:Actor;created_at:string};
+export type Project={board_id?:string|null;categories:string[];team_ids:string[];id:string;name:string;description:string;slug:string;uid:string;status:string;private:boolean;carbon_ids:string[];silicon_ids:string[];collaborators:Actor[];created_by:Actor;attachments:string[];version:number;created_at:string;updated_at:string};
+export type Task={ideal_minutes?:number;progress?:number;assigned_team?:string;id:string;project_id:string;parent_task_id:string|null;title:string;description:string;status:string;assigned_to?:Actor|null;todo_id?:string|null;created_by:Actor;created_at:string};
 export type Entry={id:string;type:"blocker"|"update"|"completion";title:string;description:string;status?:string;created_by:Actor;created_at:string};
 export type Diary={markdown:string;version:number;updated_by:Actor;updated_at:string};
 export type PageResult<T>={items:T[];next_cursor:string|null};

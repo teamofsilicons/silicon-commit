@@ -67,6 +67,8 @@ impl ProjectService {
                 description: task.description.clone(),
                 status: task.status,
                 assigned_to: task.assigned_to.clone(),
+                assigned_team: task.assigned_team.clone(),
+                plan: task.plan.clone(),
             }
             .validate(&self.limits)
             .map_err(validation_error)?;
@@ -126,7 +128,9 @@ impl ProjectService {
             remember(tx, actor, std::slice::from_ref(account)).await?;
             ensure_reachable(tx, actor, &account.actor, "assigned_to").await?;
             // Assigning project work shares the project with its assignee.
-            postgres::add_member(tx, actor, project_id, &account.actor.uuid).await?;
+            if task.assigned_team.is_none() || account.actor.uuid != *actor.uuid() {
+                postgres::add_member(tx, actor, project_id, &account.actor.uuid).await?;
+            }
             let todo_id = if let Some(id) = task.todo_id {
                 id
             } else {
@@ -141,13 +145,17 @@ impl ProjectService {
                         assigned_to: &account.actor.uuid,
                         status: task.status,
                         attachments: &[],
+                        categories: &[],
+                        board_id: None,
+                        project_ids: &[project_id],
+                        plan: &task.plan,
                         project_id: Some(project_id),
                     },
                 )
                 .await?;
                 id
             };
-            sqlx::query("UPDATE commit.project_tasks SET assigned_to_account = $3, todo_id = $4 WHERE project_id = $1 AND id = $2 AND deleted_at IS NULL")
+            sqlx::query("UPDATE commit.project_tasks SET assigned_team=NULL, assigned_to_account = $3, todo_id = $4 WHERE project_id = $1 AND id = $2 AND deleted_at IS NULL")
                 .bind(project_id.into_uuid())
                 .bind(task_id.into_uuid())
                 .bind(account.actor.uuid.as_str())
@@ -156,7 +164,7 @@ impl ProjectService {
                 .await?;
         } else {
             // Detach first: deleting the old todo must not delete the now-open task.
-            sqlx::query("UPDATE commit.project_tasks SET assigned_to_account = NULL, todo_id = NULL WHERE project_id = $1 AND id = $2 AND deleted_at IS NULL")
+            sqlx::query("UPDATE commit.project_tasks SET assigned_team=NULL, assigned_to_account = NULL, todo_id = NULL WHERE project_id = $1 AND id = $2 AND deleted_at IS NULL")
                 .bind(project_id.into_uuid())
                 .bind(task_id.into_uuid())
                 .execute(&mut *tx)
@@ -165,6 +173,26 @@ impl ProjectService {
                 todo_store::soft_delete_todo(tx, id, actor.uuid(), self.audit_retention).await?;
             }
         }
+        Ok(())
+    }
+
+    pub(super) async fn assign_team(
+        &self,
+        tx: &mut PgConnection,
+        actor: &VerifiedActor,
+        project_id: ProjectId,
+        task_id: ProjectTaskId,
+        team: &str,
+    ) -> Result<(), AppError> {
+        if !actor.shareable_teams.iter().any(|id| id == team) {
+            return Err(AppError::Forbidden);
+        }
+        self.assign_task(tx, actor, project_id, task_id, None)
+            .await?;
+        sqlx::query("UPDATE commit.projects SET team_ids=array_append(team_ids,$2) WHERE id=$1 AND NOT ($2=ANY(team_ids))")
+            .bind(project_id.into_uuid()).bind(team).execute(&mut *tx).await?;
+        sqlx::query("UPDATE commit.project_tasks SET assigned_team=$3 WHERE project_id=$1 AND id=$2 AND deleted_at IS NULL")
+            .bind(project_id.into_uuid()).bind(task_id.into_uuid()).bind(team).execute(tx).await?;
         Ok(())
     }
 
@@ -201,6 +229,13 @@ impl ProjectService {
             return Err(AppError::Conflict {
                 code: "task_already_assigned".into(),
             });
+        }
+        if task
+            .assigned_team
+            .as_ref()
+            .is_some_and(|team| !actor.teams.contains(team))
+        {
+            return Err(AppError::Forbidden);
         }
         let me = ResolvedAccount::known(actor.actor.clone(), actor.custodian.clone());
         self.assign_task(&mut tx, actor, project_id, task_id, Some(&me))
