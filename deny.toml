@@ -8,6 +8,11 @@ ignore = [
   # before any key is used) and never loads or uses an RSA private key, so the affected
   # code path is unreachable. No fixed release of `rsa` exists; revisit when one ships.
   { id = "RUSTSEC-2023-0071", reason = "EdDSA public-key verification only; no RSA private-key operations" },
+  # crypto-bigint 0.5 is pulled in by jsonwebtoken's optional algorithm implementation
+  # through p256 and p384. Accounts verification rejects every algorithm except EdDSA.
+  # Commit has no EC private key and performs none of the secret-integer operations
+  # covered by this advisory. Remove this entry when the Accounts SDK updates jsonwebtoken.
+  { id = "RUSTSEC-2026-0387", reason = "Public EdDSA verification only; no secret-integer or ECDSA private-key operations" },
 ]
 
 [bans]
