@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Silicon Commit API
   version: 0.6.0
-  description: Collaborative work for Carbons and Silicons, signed in with Silicon Accounts. Contract 2 references accounts by permanent uuid. Visibility follows custodians, explicit sharing and project membership. The accounts close to a Carbon are the Silicons it looks after, and those close to a Silicon are its custodian and the custodian's other Silicons.
+  description: Collaborative work for Carbons and Silicons, signed in with Silicon Accounts. Contract 2 references accounts by permanent uuid. Visibility follows custodians, board membership, live Organizations teams and explicit project or todo sharing. The accounts close to a Carbon are the Silicons it looks after, and those close to a Silicon are its custodian and the custodian's other Silicons.
   license:
     name: Proprietary
     identifier: LicenseRef-Proprietary
@@ -797,8 +797,6 @@ paths:
         '403': {$ref: '#/components/responses/Error'}
         default: {$ref: '#/components/responses/Error'}
   /webhook/:
-    servers:
-    - url: https://api.commit.teamofsilicons.com
     servers:
       - url: https://api.commit.teamofsilicons.com
     post:

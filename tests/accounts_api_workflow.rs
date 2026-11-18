@@ -2341,6 +2341,49 @@ async fn boards_connect_teams_contacts_and_cross_project_work() -> anyhow::Resul
     ensure!(
         workflow_request(&app, Method::GET, &board_path, &other, None).await?["role"] == "member"
     );
+    let claim_path = format!(
+        "projects/{project}/tasks/{}/claim",
+        task["id"].as_str().context("task ID")?
+    );
+    let outside_claim = call(
+        &app,
+        Method::POST,
+        &format!("/api/v1/{claim_path}"),
+        Some(&bearer(&other)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(outside_claim.status == StatusCode::FORBIDDEN);
+    let claimed = workflow_request(&app, Method::POST, &claim_path, &worker, None).await?;
+    let linked = workflow_request(
+        &app,
+        Method::GET,
+        &format!(
+            "todos/{}",
+            claimed["todo_id"].as_str().context("claimed todo")?
+        ),
+        &worker,
+        None,
+    )
+    .await?;
+    ensure!(
+        linked["ideal_minutes"] == 100
+            && linked["progress"] == 50
+            && linked["assigned_to"]["id"] == member.id
+    );
+    let still_counted_once = workflow_request(
+        &app,
+        Method::GET,
+        &format!("work?board_id={board}"),
+        &admin,
+        None,
+    )
+    .await?;
+    ensure!(
+        still_counted_once["summary"]["total"] == 3
+            && still_counted_once["summary"]["percent"] == 60
+    );
     let contact_photo = uuid::Uuid::new_v4();
     let contacts = vec![
         json!({"uuid":peer.uuid,"account":peer.summary(),"name":"Marigold","photo_id":contact_photo,"trust":2}),
@@ -2445,5 +2488,44 @@ async fn boards_connect_teams_contacts_and_cross_project_work() -> anyhow::Resul
         .status
             == StatusCode::NOT_FOUND
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_reads_require_live_access_tokens_for_commit() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let user = Account::carbon("interface-identity");
+    let accounts = Accounts::start(&[&user]).await;
+    let app = router(&pool, &accounts, "", false)?;
+    for (active, client, kind) in [
+        (false, "commit", "access_token"),
+        (true, "another-app", "access_token"),
+        (true, "commit", "refresh_token"),
+    ] {
+        let token = accounts.token_with(&user, |claims| claims["jti"] = json!(new_uuid()));
+        accounts.userinfo(&token, &user).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/oauth/introspect"))
+            .and(header("authorization", basic()))
+            .and(body_string_contains(&token))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"active":active,"client_id":client,"token_type":kind})),
+            )
+            .mount(&accounts.server)
+            .await;
+        let reply = call(
+            &app,
+            Method::GET,
+            "/api/v1/me",
+            Some(&bearer(&token)),
+            None,
+            &[],
+        )
+        .await?;
+        ensure!(reply.status == StatusCode::UNAUTHORIZED, "{}", reply.body);
+    }
     Ok(())
 }
