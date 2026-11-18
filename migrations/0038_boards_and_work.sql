@@ -36,7 +36,12 @@ CREATE INDEX projects_board ON commit.projects(board_id) WHERE deleted_at IS NUL
 CREATE INDEX todos_board ON commit.todos(board_id) WHERE deleted_at IS NULL;
 CREATE INDEX todos_projects ON commit.todos USING gin(project_ids) WHERE deleted_at IS NULL;
 -- Preserve the existing single-project field for older clients and linked task synchronization.
+-- This internal representation change must preserve existing ETags, timestamps and tombstones.
+ALTER TABLE commit.todos DISABLE TRIGGER todos_touch_version;
+ALTER TABLE commit.todos DISABLE TRIGGER todos_preserve_tombstones;
 UPDATE commit.todos SET project_ids=ARRAY[project_id] WHERE project_id IS NOT NULL;
+ALTER TABLE commit.todos ENABLE TRIGGER todos_preserve_tombstones;
+ALTER TABLE commit.todos ENABLE TRIGGER todos_touch_version;
 CREATE FUNCTION commit_private.todo_project_links() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 BEGIN
  IF (TG_OP='INSERT' OR NEW.project_id IS DISTINCT FROM OLD.project_id) AND

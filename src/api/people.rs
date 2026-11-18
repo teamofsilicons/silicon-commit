@@ -1,4 +1,4 @@
-//! Account-scoped invitation signals and the signed-in account'state Silicon Contacts.
+//! Account-scoped invitation signals and the signed-in account’s Silicon Contacts.
 use super::{
     AppState, auth,
     extract::{StrictJson, StrictPath, StrictQuery},
@@ -275,12 +275,12 @@ impl Person {
             .to_owned();
         self.pfp_url = contact["photo_id"]
             .as_str()
-            .and_then(|state| Uuid::parse_str(state).ok())
+            .and_then(|photo| Uuid::parse_str(photo).ok())
             .map_or_else(
                 || {
                     profile["pfp_url"]
                         .as_str()
-                        .filter(|state| !state.is_empty())
+                        .filter(|url| !url.is_empty())
                         .unwrap_or(&self.pfp_url)
                         .to_owned()
                 },
@@ -297,8 +297,8 @@ fn fuzzy(query: &str, value: &str) -> bool {
     let mut chars = haystack.chars();
     query
         .chars()
-        .filter(|contact| !contact.is_whitespace())
-        .all(|wanted| chars.by_ref().any(|contact| contact == wanted))
+        .filter(|ch| !ch.is_whitespace())
+        .all(|wanted| chars.by_ref().any(|ch| ch == wanted))
 }
 async fn ranked(
     state: &AppState,
@@ -379,13 +379,13 @@ async fn ranked(
         people.retain(|id, _| !blocked.contains(id));
     }
     let mut result: Vec<_> = people.into_values().collect();
-    result.sort_by(|actor, b| {
+    result.sort_by(|a, b| {
         (2 * b.sent + b.received)
-            .cmp(&(2 * actor.sent + actor.received))
-            .then(b.last_invited_at.cmp(&actor.last_invited_at))
-            .then(b.trust.cmp(&actor.trust))
-            .then_with(|| actor.id.cmp(&b.id))
-            .then_with(|| actor.uuid.cmp(&b.uuid))
+            .cmp(&(2 * a.sent + a.received))
+            .then(b.last_invited_at.cmp(&a.last_invited_at))
+            .then(b.trust.cmp(&a.trust))
+            .then_with(|| a.id.cmp(&b.id))
+            .then_with(|| a.uuid.cmp(&b.uuid))
     });
     Ok(result)
 }

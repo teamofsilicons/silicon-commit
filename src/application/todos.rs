@@ -353,18 +353,6 @@ impl TodoService {
                     code: "project_task_link_is_immutable".into(),
                 });
             }
-            if let Some(id) = desired.project_id {
-                authorize_link(&mut transaction, actor, id).await?;
-            }
-        }
-        // Content or status edits must not recreate membership removed separately.
-        // A reassignment or a new link may widen access, and needs project write authority.
-        if let Some(project_id) = desired.project_id
-            && (desired.project_id != current.project_id
-                || desired.changed_fields.contains(&"assigned_to"))
-        {
-            authorize_link(&mut transaction, actor, project_id).await?;
-            share_project(&mut transaction, actor, project_id, &desired.assigned_to).await?;
         }
         store::update_todo(
             transaction.as_mut(),

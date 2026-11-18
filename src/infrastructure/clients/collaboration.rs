@@ -30,9 +30,8 @@ pub(crate) struct ShareTarget {
     pub org_id: String,
 }
 
-fn origin(env_name: &str, default: &str) -> Result<Url, ClientBuildError> {
-    let url = Url::parse(&std::env::var(env_name).unwrap_or_else(|_| default.to_owned()))
-        .map_err(|_| ClientBuildError::InvalidEndpoint)?;
+fn origin(input: &str) -> Result<Url, ClientBuildError> {
+    let url = Url::parse(input).map_err(|_| ClientBuildError::InvalidEndpoint)?;
     if url.path() != "/"
         || !url.username().is_empty()
         || url.password().is_some()
@@ -49,13 +48,21 @@ fn origin(env_name: &str, default: &str) -> Result<Url, ClientBuildError> {
 
 impl Collaboration {
     pub fn new() -> Result<Self, ClientBuildError> {
+        Self::from_origins(
+            &std::env::var("COMMIT_CONTACTS_URL")
+                .unwrap_or_else(|_| "https://contacts.teamofsilicons.com".into()),
+            &std::env::var("COMMIT_ORGANIZATIONS_URL")
+                .unwrap_or_else(|_| "https://organizations.teamofsilicons.com".into()),
+        )
+    }
+    pub(crate) fn from_origins(
+        contacts: &str,
+        organizations: &str,
+    ) -> Result<Self, ClientBuildError> {
         Ok(Self {
             http: http_client(Duration::from_secs(3), Duration::from_secs(12))?,
-            contacts: origin("COMMIT_CONTACTS_URL", "https://contacts.teamofsilicons.com")?,
-            organizations: origin(
-                "COMMIT_ORGANIZATIONS_URL",
-                "https://organizations.teamofsilicons.com",
-            )?,
+            contacts: origin(contacts)?,
+            organizations: origin(organizations)?,
         })
     }
     pub async fn organizations(

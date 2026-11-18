@@ -115,6 +115,21 @@ impl AppState {
         self
     }
 
+    /// Configure the trusted Contacts and Organizations services for this instance.
+    pub fn with_collaboration_origins(
+        mut self,
+        contacts: &str,
+        organizations: &str,
+    ) -> Result<Self, crate::infrastructure::clients::ClientBuildError> {
+        self.collaboration = Some(
+            crate::infrastructure::clients::collaboration::Collaboration::from_origins(
+                contacts,
+                organizations,
+            )?,
+        );
+        Ok(self)
+    }
+
     /// Sets the app id and the public Silicon Accounts URL clients sign in with.
     #[must_use]
     pub fn with_accounts(

@@ -261,6 +261,16 @@ fn router(
     issuers: &str,
     webhook: bool,
 ) -> anyhow::Result<Router> {
+    test_router(pool, accounts, issuers, webhook, false)
+}
+
+fn test_router(
+    pool: &PgPool,
+    accounts: &Accounts,
+    issuers: &str,
+    webhook: bool,
+    collaboration: bool,
+) -> anyhow::Result<Router> {
     let settings = AccountsSettings {
         issuer: ISSUER.to_owned(),
         api_url: accounts.server.uri().parse()?,
@@ -310,6 +320,11 @@ fn router(
     )
     .with_webhook_secret(settings.webhook_secret.clone())
     .with_accounts("commit", ISSUER);
+    let state = if collaboration {
+        state.with_collaboration_origins(&accounts.server.uri(), &accounts.server.uri())?
+    } else {
+        state
+    };
     let server = ServerSettings {
         bind_addr: "127.0.0.1:0".parse()?,
         public_base_url: "http://127.0.0.1:4141/api/v1".parse()?,
@@ -2078,5 +2093,357 @@ async fn retired_webhook_subjects_and_nested_custodians_cannot_return() -> anyho
     ensure!(current.as_deref() == Some(owner.uuid.as_str()));
     let recreated:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM commit.accounts WHERE uuid=$1) OR EXISTS(SELECT 1 FROM commit.account_lifecycle WHERE uuid=$1)").bind(&old).fetch_one(&pool).await?;
     ensure!(!recreated);
+    Ok(())
+}
+
+async fn workflow_request(
+    app: &Router,
+    verb: Method,
+    path: &str,
+    user: &str,
+    body: Option<Value>,
+) -> anyhow::Result<Value> {
+    let response = call(
+        app,
+        verb.clone(),
+        &format!("/api/v1/{path}"),
+        Some(&bearer(user)),
+        body,
+        &[],
+    )
+    .await?;
+    ensure!(
+        response.status.is_success(),
+        "{verb} {path}: {} {}",
+        response.status,
+        response.body
+    );
+    Ok(response.body)
+}
+async fn org_membership(
+    accounts: &Accounts,
+    user: &Account,
+    token: &str,
+    team: &str,
+    member: bool,
+    admin: bool,
+    priority: u8,
+) {
+    let groups = if member {
+        vec![format!("team:{team}")]
+    } else {
+        vec![]
+    };
+    let targets = if member {
+        vec![json!({"type":"team","id":team,"org_id":"studio","name":"Design"})]
+    } else {
+        vec![]
+    };
+    Mock::given(method("GET")).and(path("/v1/integrations/commit/me")).and(header("authorization",bearer(token)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"account_uuid":user.uuid,"organizations":[{"org_id":"studio","name":"Studio","capabilities":{"admin":admin}}],"groups":groups,"share_targets":targets})))
+        .with_priority(priority).mount(&accounts.server).await;
+}
+
+#[tokio::test]
+async fn boards_connect_teams_contacts_and_cross_project_work() -> anyhow::Result<()> {
+    let Some(pool) = test_pool().await? else {
+        return Ok(());
+    };
+    let owner = Account::carbon("board-owner");
+    let member = Account::silicon("design-agent", &owner);
+    let peer = Account::carbon("board-peer");
+    let uninvited = Account::carbon("board-trusted");
+    let accounts = Accounts::start(&[&owner, &member, &peer, &uninvited]).await;
+    let app = test_router(&pool, &accounts, "", false, true)?;
+    let (admin, worker, other) = (
+        accounts.token(&owner),
+        accounts.token(&member),
+        accounts.token(&peer),
+    );
+    let team = format!("studio/design-{}", new_uuid());
+    let group = format!("team:{team}");
+    for (person, token, is_member, is_admin) in [
+        (&owner, &admin, true, true),
+        (&member, &worker, true, false),
+        (&peer, &other, false, false),
+    ] {
+        accounts.userinfo(token, person).await;
+        org_membership(&accounts, person, token, &team, is_member, is_admin, 5).await;
+    }
+    let boards = workflow_request(&app, Method::GET, "boards", &admin, None).await?;
+    let home = boards["items"]
+        .as_array()
+        .context("board list")?
+        .iter()
+        .find(|r| r["home_team"] == group)
+        .context("default team board")?["id"]
+        .as_str()
+        .context("id")?;
+    let home_path = format!("boards/{home}");
+    let root = workflow_request(&app, Method::GET, &home_path, &admin, None).await?;
+    ensure!(root["role"] == "admin" && root["categories"][0]["name"] == "Design");
+    workflow_request(&app,Method::PATCH,&home_path,&admin,Some(json!({"action":"category_delete","category_id":root["categories"][0]["id"],"revision":1}))).await?;
+    workflow_request(&app, Method::GET, "boards", &admin, None).await?;
+    ensure!(
+        workflow_request(&app, Method::GET, &home_path, &admin, None).await?["categories"]
+            == json!([])
+    );
+    let child = workflow_request(
+        &app,
+        Method::POST,
+        "boards",
+        &admin,
+        Some(json!({"name":"Review","parent_id":home})),
+    )
+    .await?;
+    let board = child["id"].as_str().context("child")?;
+    let board_path = format!("boards/{board}");
+    ensure!(
+        workflow_request(&app, Method::GET, &board_path, &worker, None).await?["role"] == "member"
+    );
+    let denied = call(
+        &app,
+        Method::POST,
+        "/api/v1/boards",
+        Some(&bearer(&worker)),
+        Some(json!({"name":"Denied","parent_id":board})),
+        &[],
+    )
+    .await?;
+    ensure!(denied.status == StatusCode::FORBIDDEN);
+    let private = call(
+        &app,
+        Method::GET,
+        &format!("/api/v1/{board_path}"),
+        Some(&bearer(&other)),
+        None,
+        &[],
+    )
+    .await?;
+    ensure!(private.status == StatusCode::NOT_FOUND);
+    workflow_request(
+        &app,
+        Method::PATCH,
+        &board_path,
+        &admin,
+        Some(json!({"revision":1,"action":"settings","progress_mode":"time"})),
+    )
+    .await?;
+    let a=workflow_request(&app,Method::POST,"projects",&admin,Some(json!({"name":"First project","board_id":board,"private":true,"team_ids":[group],"categories":["Research","Design"]}))).await?;
+    let b = workflow_request(
+        &app,
+        Method::POST,
+        "projects",
+        &admin,
+        Some(json!({"name":"Second project","board_id":board,"private":true})),
+    )
+    .await?;
+    let project = a["id"].as_str().context("project")?;
+    let task=workflow_request(&app,Method::POST,&format!("projects/{project}/tasks"),&admin,Some(json!({"title":"Design handoff","assigned_team":group,"ideal_minutes":100,"progress":50,"status":"in_progress"}))).await?;
+    ensure!(task["assigned_team"] == group && task["ideal_minutes"] == 100);
+    let todo=workflow_request(&app,Method::POST,"todos",&admin,Some(json!({"title":"Ready","assigned_to":owner.id,"board_id":board,"status":"completed","progress":100,"ideal_minutes":25,"categories":["Design","Ready"]}))).await?;
+    let todo2 = workflow_request(
+        &app,
+        Method::POST,
+        "todos",
+        &admin,
+        Some(json!({"title":"Another item","assigned_to":owner.id})),
+    )
+    .await?;
+    let links = json!({"todo_ids":[todo["id"],todo2["id"]],"project_ids":[a["id"],b["id"]]});
+    workflow_request(
+        &app,
+        Method::PUT,
+        "project-links",
+        &admin,
+        Some(links.clone()),
+    )
+    .await?;
+    workflow_request(
+        &app,
+        Method::PUT,
+        "project-links",
+        &admin,
+        Some(links.clone()),
+    )
+    .await?;
+    for item in [&todo, &todo2] {
+        let saved = workflow_request(
+            &app,
+            Method::GET,
+            &format!("todos/{}", item["id"].as_str().context("todo ID")?),
+            &admin,
+            None,
+        )
+        .await?;
+        ensure!(
+            saved["project_ids"]
+                .as_array()
+                .context("project IDs")?
+                .len()
+                == 2
+        );
+    }
+    let aggregate = workflow_request(
+        &app,
+        Method::GET,
+        &format!("work?board_id={board}"),
+        &admin,
+        None,
+    )
+    .await?;
+    ensure!(
+        aggregate["summary"]["total"] == 3 && aggregate["summary"]["percent"] == 60,
+        "{aggregate}"
+    );
+    let active = workflow_request(
+        &app,
+        Method::GET,
+        "work?mine=true&status=active",
+        &worker,
+        None,
+    )
+    .await?;
+    ensure!(
+        active["items"]
+            .as_array()
+            .context("active work")?
+            .iter()
+            .any(|w| w["id"] == task["id"])
+    );
+    let unauthorized = call(
+        &app,
+        Method::PUT,
+        "/api/v1/project-links",
+        Some(&bearer(&other)),
+        Some(links),
+        &[],
+    )
+    .await?;
+    ensure!(!unauthorized.status.is_success());
+    let invited = workflow_request(
+        &app,
+        Method::PATCH,
+        &board_path,
+        &admin,
+        Some(json!({"revision":2,"action":"invite","subject":peer.id,"role":"member"})),
+    )
+    .await?;
+    ensure!(invited["revision"] == 3);
+    workflow_request(
+        &app,
+        Method::PATCH,
+        &board_path,
+        &admin,
+        Some(json!({"revision":3,"action":"invite","subject":peer.id,"role":"member"})),
+    )
+    .await?;
+    ensure!(
+        workflow_request(&app, Method::GET, &board_path, &other, None).await?["role"] == "member"
+    );
+    let contact_photo = uuid::Uuid::new_v4();
+    let contacts = vec![
+        json!({"uuid":peer.uuid,"account":peer.summary(),"name":"Marigold","photo_id":contact_photo,"trust":2}),
+        json!({"uuid":uninvited.uuid,"account":uninvited.summary(),"name":"Mariana","trust":250}),
+    ];
+    for (scope, token) in [
+        ("contacts.read", "sap_contact_read"),
+        ("contacts.write", "sap_contact_write"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/v1/proofs/user-verification"))
+            .and(header("authorization", basic()))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"subject_token":admin,"receiving_app":"silicon-contacts","scopes":[scope]}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"proof_token":token})))
+            .mount(&accounts.server)
+            .await;
+    }
+    for (url, data) in [
+        ("/v1/me".to_owned(), json!({"account":owner.summary()})),
+        ("/v1/relationships".into(), json!({"items":[]})),
+        ("/v1/contacts".into(), json!({"items":contacts,"total":2})),
+        (format!("/v1/contacts/{}", peer.uuid), contacts[0].clone()),
+        ("/v1/lookup".into(), peer.summary()),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(url))
+            .and(header("authorization", "Proof sap_contact_read"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(data))
+            .mount(&accounts.server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v1/contacts"))
+        .and(header("authorization", "Proof sap_contact_write"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"id":peer.uuid,"name":"Marigold","trust":120,"photo_id":contact_photo}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"uuid":peer.uuid,"trust":120})),
+        )
+        .expect(1)
+        .mount(&accounts.server)
+        .await;
+    workflow_request(
+        &app,
+        Method::PUT,
+        "contacts/connection",
+        &admin,
+        Some(json!({"enabled":true})),
+    )
+    .await?;
+    let suggestions = workflow_request(&app, Method::GET, "people?q=mri", &admin, None).await?;
+    ensure!(
+        suggestions["items"][0]["uuid"] == peer.uuid
+            && suggestions["items"][0]["sent"] == 1
+            && suggestions["items"][1]["uuid"] == uninvited.uuid,
+        "{suggestions}"
+    );
+    let saved = workflow_request(
+        &app,
+        Method::GET,
+        &format!("people/resolve?id={}", peer.id),
+        &admin,
+        None,
+    )
+    .await?;
+    ensure!(
+        saved["display_name"] == "Marigold"
+            && saved["pfp_url"] == format!("/api/v1/contacts/photos/{contact_photo}")
+    );
+    workflow_request(
+        &app,
+        Method::POST,
+        "contacts",
+        &admin,
+        Some(json!({"id":peer.id,"name":"Marigold","trust":120})),
+    )
+    .await?;
+    workflow_request(
+        &app,
+        Method::PUT,
+        "contacts/connection",
+        &admin,
+        Some(json!({"enabled":false})),
+    )
+    .await?;
+    let disconnected = workflow_request(&app, Method::GET, "people?q=mri", &admin, None).await?;
+    ensure!(disconnected["total"] == 0);
+    org_membership(&accounts, &member, &worker, &team, false, false, 1).await;
+    ensure!(
+        call(
+            &app,
+            Method::GET,
+            &format!("/api/v1/{board_path}"),
+            Some(&bearer(&worker)),
+            None,
+            &[]
+        )
+        .await?
+        .status
+            == StatusCode::NOT_FOUND
+    );
     Ok(())
 }

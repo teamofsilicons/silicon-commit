@@ -1,7 +1,7 @@
 //! Account and custodian authorization policy.
 //!
-//! Commit has no organizations. Work belongs to the account that created it,
-//! is shared explicitly (assignment, project membership), and is visible to
+//! Work belongs to the account that created it,
+//! can be shared through assignments, projects, boards and live Organizations teams, and is visible to
 //! the custodian circle as the database functions `commit.todo_access`,
 //! `commit.project_access` and `commit.project_writable` define. The rules
 //! here decide what an already-visible caller may change; every one of them

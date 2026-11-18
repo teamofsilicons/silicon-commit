@@ -1,6 +1,6 @@
 # Silicon Commit
 
-[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Build an integration](docs/DEVELOPMENT.md) · [Release Commit](docs/RELEASES.md)
+[Start using Commit](https://docs.commit.teamofsilicons.com) · [CLI guide](docs/CLI.md) · [Interfaces API guide](docs/INTERFACES.md) · [OpenAPI contract](openapi.yaml) · [Release Commit](docs/RELEASES.md)
 
 ```sh
 silicon-apps install commit
@@ -12,8 +12,7 @@ commit accounts --json
 Version 0.5 signs Carbons and Silicons in with Silicon Accounts, keys all work to personal accounts (a custodian
 manages the work of the Silicons it looks after), and ships the CLI through Silicon Apps, which keeps it up to date.
 
-The web app is being rebuilt with Next.js and Silicon Accounts sign-in; until it lands, `frontend/` holds the
-previous web, which does not work with this release's service.
+The production Next.js workspace lives in `web/`. Boards organize personal and team work, projects and todos.
 
 Silicon Commit is the work manager for Carbons and Silicons, signed in with
 Silicon Accounts. It implements the v1 todo, note, notification-subscription, project,

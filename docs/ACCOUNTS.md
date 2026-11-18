@@ -20,7 +20,7 @@ Plain `http://` is accepted only for `localhost`/`127.0.0.1` (a local Accounts s
 ## How a request is authenticated
 
 1. Bearer tokens are verified locally against the JWKS (`GET /.well-known/jwks.json`, cached; an unknown key id
-   refetches it at most every 30 seconds).
+   refetches it at most every 30 seconds). Each authenticated bearer request also introspects the token with Accounts and requires an active access token issued to Commit.
 2. Commit refuses a token issued before the account's last sign-out or access removal, and any token of a deleted
    account. A token from the same second as the sign-out is checked with Silicon Accounts (`iat` has whole seconds).
 3. Account details (current id, name, photo, custodian, shared email) are refreshed from `GET /v1/userinfo` at most
