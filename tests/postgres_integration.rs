@@ -2107,21 +2107,24 @@ async fn contract_sunset_and_email_preferences_enforce_their_lifecycle() -> anyh
         .bind(actor.uuid().as_str())
         .execute(&pool)
         .await?;
-    // Claim until this job leaves the queue (other tests may queue jobs in the same database).
-    let mut status = String::from("pending");
-    for _ in 0..100 {
-        let claimed: Option<serde_json::Value> = sqlx::query_scalar("SELECT commit.claim_email()")
-            .fetch_optional(&pool)
-            .await?;
-        status = sqlx::query_scalar("SELECT status FROM commit.email_jobs WHERE id=$1")
-            .bind(job)
-            .fetch_one(&pool)
-            .await?;
-        if status != "pending" || claimed.is_none() {
-            break;
-        }
-    }
+    // Exercise our fixture even when another test has deliverable jobs in the same queue.
+    let mut claim = pool.begin().await?;
+    sqlx::query(
+        "UPDATE commit.email_jobs SET next_attempt_at='-infinity'::timestamptz WHERE id=$1",
+    )
+    .bind(job)
+    .execute(&mut *claim)
+    .await?;
+    let result: serde_json::Value = sqlx::query_scalar("SELECT commit.claim_email()")
+        .fetch_one(&mut *claim)
+        .await?;
+    assert_eq!(result["simulated"], true);
+    let status: String = sqlx::query_scalar("SELECT status FROM commit.email_jobs WHERE id=$1")
+        .bind(job)
+        .fetch_one(&mut *claim)
+        .await?;
     assert_eq!(status, "suppressed");
+    claim.commit().await?;
     Ok(())
 }
 
@@ -2142,11 +2145,17 @@ async fn project_history_retains_only_the_latest_thousand_snapshots() -> anyhow:
         )
         .await?;
     let id = response_uuid(&project, "id")?;
-    sqlx::query("INSERT INTO commit.audit_events(id,actor_account,action,resource_type,resource_id,request_id) SELECT gen_random_uuid(),$1,'project.updated','project',$2,'history-cap-'||n FROM generate_series(1,1005) n")
-        .bind(actor.uuid().as_str())
-        .bind(id)
-        .execute(&pool)
-        .await?;
+    // Production produces individual audit records. Bound each fixture insert to stay
+    // within the same statement timeout on slower CI databases.
+    for start in (1_i32..=1005).step_by(100) {
+        sqlx::query("INSERT INTO commit.audit_events(id,actor_account,action,resource_type,resource_id,request_id) SELECT gen_random_uuid(),$1,'project.updated','project',$2,'history-cap-'||n FROM generate_series($3::int,$4::int) n")
+            .bind(actor.uuid().as_str())
+            .bind(id)
+            .bind(start)
+            .bind((start + 99).min(1005))
+            .execute(&pool)
+            .await?;
+    }
     let (count, min, max): (i64, i64, i64) = sqlx::query_as(
         "SELECT count(*),min(version),max(version) FROM commit.project_versions WHERE project_id=$1",
     )
